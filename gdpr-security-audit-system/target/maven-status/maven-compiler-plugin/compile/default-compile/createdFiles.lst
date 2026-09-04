@@ -1,0 +1,4 @@
+com/gdpr/audit/security/JwtRoleConverter.class
+com/gdpr/audit/controller/AuthTestController.class
+com/gdpr/audit/config/SecurityConfig.class
+com/gdpr/audit/GdprAuditApplication.class

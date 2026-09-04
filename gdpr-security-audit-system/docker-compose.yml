@@ -1,0 +1,97 @@
+version: '3.8'
+
+services:
+  # -----------------------------------------------------------------
+  # 1. 主业务数据库：PostgreSQL 16
+  # -----------------------------------------------------------------
+  postgres:
+    image: postgres:16-alpine
+    container_name: audit-postgres
+    restart: always
+    environment:
+      POSTGRES_DB: audit_db
+      POSTGRES_USER: audit_user
+      POSTGRES_PASSWORD: audit_password
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U audit_user -d audit_db"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  # -----------------------------------------------------------------
+  # 2. IAM 身份认证中心：Keycloak 24
+  # -----------------------------------------------------------------
+  keycloak:
+    image: quay.io/keycloak/keycloak:24.0
+    container_name: audit-keycloak
+    command: start-dev
+    environment:
+      KEYCLOAK_ADMIN: admin
+      KEYCLOAK_ADMIN_PASSWORD: admin_password
+      KC_DB: postgres
+      KC_DB_URL: jdbc:postgresql://postgres:5432/audit_db
+      KC_DB_USERNAME: audit_user
+      KC_DB_PASSWORD: audit_password
+      KC_HEALTH_ENABLED: "true"
+      KC_METRICS_ENABLED: "true"
+    ports:
+      - "8080:8080"
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+  # -----------------------------------------------------------------
+  # 3. 日志与搜索：Elasticsearch 8.12
+  # -----------------------------------------------------------------
+  elasticsearch:
+    image: docker.elastic.co/elasticsearch/elasticsearch:8.12.2
+    container_name: audit-elasticsearch
+    environment:
+      - node.name=elasticsearch
+      - cluster.name=audit-cluster
+      - discovery.type=single-node
+      - xpack.security.enabled=false # 本地开发禁用 SSL/密码以简化对接，生产环境中需开启
+      - "ES_JAVA_OPTS=-Xms512m -Xmx512m" # 限制内存，防止笔记本爆内存
+    ports:
+      - "9200:9200"
+    volumes:
+      - es_data:/usr/share/elasticsearch/data
+
+  # -----------------------------------------------------------------
+  # 4. 日志收集与传输：Logstash 8.12
+  # -----------------------------------------------------------------
+  logstash:
+    image: docker.elastic.co/logstash/logstash:8.12.2
+    container_name: audit-logstash
+    volumes:
+      - ./logstash/pipeline:/usr/share/logstash/pipeline:ro
+    ports:
+      - "50000:50000/tcp"
+      - "50000:50000/udp"
+    environment:
+      LS_JAVA_OPTS: "-Xms256m -Xmx256m"
+    depends_on:
+      - elasticsearch
+
+  # -----------------------------------------------------------------
+  # 5. 可视化仪表盘：Kibana 8.12
+  # -----------------------------------------------------------------
+  kibana:
+    image: docker.elastic.co/kibana/kibana:8.12.2
+    container_name: audit-kibana
+    ports:
+      - "5601:5601"
+    environment:
+      - ELASTICSEARCH_HOSTS=http://elasticsearch:9200
+    depends_on:
+      - elasticsearch
+
+volumes:
+  postgres_data:
+    driver: local
+  es_data:
+    driver: local

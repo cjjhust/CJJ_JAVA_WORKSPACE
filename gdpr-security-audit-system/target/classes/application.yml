@@ -1,0 +1,27 @@
+server:
+  port: 8081
+
+spring:
+  application:
+    name: gdpr-security-audit-system
+
+  datasource:
+    url: jdbc:postgresql://localhost:5432/audit_db
+    username: audit_user
+    password: audit_password
+    driver-class-name: org.postgresql.Driver
+
+  jpa:
+    hibernate:
+      ddl-auto: update
+    show-sql: true
+    properties:
+      hibernate:
+        format_sql: true
+
+  security:
+    oauth2:
+      resourceserver:
+        jwt:
+          # Keycloak 的 JWT 签发地址 (Keycloak 24 默认格式如下)
+          issuer-uri: http://localhost:8080/realms/audit-realm
