@@ -53,6 +53,19 @@
         </dependencies>
     </dependencyManagement>
 
+    <!--
+      P1-1 可观测性：Prometheus 注册表属于“平台级关注点”（每个服务都要能被抓取），
+      故声明在聚合 POM 的 <dependencies> 里由 6 个模块统一继承，避免在 6 个模块里重复声明。
+      版本由 spring-boot-starter-parent 的 BOM 管理（无需写版本号）。
+      各模块已各自声明 spring-boot-starter-actuator，用于暴露 /actuator/prometheus。
+    -->
+    <dependencies>
+        <dependency>
+            <groupId>io.micrometer</groupId>
+            <artifactId>micrometer-registry-prometheus</artifactId>
+        </dependency>
+    </dependencies>
+
     <build>
         <pluginManagement>
             <plugins>

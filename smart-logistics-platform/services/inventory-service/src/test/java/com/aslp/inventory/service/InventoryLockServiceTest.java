@@ -2,6 +2,7 @@ package com.aslp.inventory.service;
 
 import com.aslp.inventory.entity.InventoryItem;
 import com.aslp.inventory.repository.InventoryRepository;
+import io.micrometer.core.instrument.simple.SimpleMeterRegistry;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
@@ -17,6 +18,7 @@ import java.util.concurrent.TimeUnit;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyString;
@@ -52,9 +54,12 @@ class InventoryLockServiceTest {
 
     private InventoryLockService service;
 
+    /** P1-1：用内存注册表验证指标真实递增（不启动 Prometheus 也能断言）。 */
+    private final SimpleMeterRegistry meterRegistry = new SimpleMeterRegistry();
+
     @BeforeEach
     void setUp() {
-        service = new InventoryLockService(redissonClient, repository);
+        service = new InventoryLockService(redissonClient, repository, meterRegistry);
     }
 
     /** Bruchsal 总仓 AMZ-1001 的种子态：可用 320 / 锁定 12。 */
@@ -168,5 +173,57 @@ class InventoryLockServiceTest {
         assertFalse(service.releaseLockedInventory("NOPE", WAREHOUSE, 1));
 
         verify(repository, never()).save(any());
+    }
+
+    // ---------------- P1-1：可观测性（指标真实递增） ----------------
+
+    @Test
+    @DisplayName("P1-1：扣减的三类结果分别落到 applied / rejected_balance / rejected_invalid_qty")
+    void deductMetricsDistinguishOutcome() throws InterruptedException {
+        InventoryItem item = stock(1, 0);
+        givenExistingStock(item);
+        givenLockAcquired();
+
+        assertFalse(service.deductInventory(SKU, WAREHOUSE, 5), "可用仅 1，扣 5 应被拒");
+        assertFalse(service.deductInventory(SKU, WAREHOUSE, 0), "非正数应被拒");
+        assertTrue(service.deductInventory(SKU, WAREHOUSE, 1));
+
+        assertEquals(1.0, counter("deduct", "applied"), 1e-9);
+        assertEquals(1.0, counter("deduct", "rejected_balance"), 1e-9);
+        assertEquals(1.0, counter("deduct", "rejected_invalid_qty"), 1e-9);
+    }
+
+    @Test
+    @DisplayName("P1-1：抢锁失败单独归类为 rejected_lock（不能和库存不足混为一谈）")
+    void lockContentionIsTaggedSeparatelyFromStockShortage() throws InterruptedException {
+        when(redissonClient.getLock(anyString())).thenReturn(lock);
+        when(lock.tryLock(2, 10, TimeUnit.SECONDS)).thenReturn(false);
+
+        assertFalse(service.deductInventory(SKU, WAREHOUSE, 1));
+
+        assertEquals(1.0, counter("deduct", "rejected_lock"), 1e-9);
+        assertNull(meterRegistry.find(InventoryLockService.METRIC_LOCK_OPERATIONS)
+                .tags("operation", "deduct", "result", "rejected_balance").counter(),
+                "抢锁失败不应被记成余额不足：两者处置方式完全不同");
+    }
+
+    @Test
+    @DisplayName("P1-1：扣减与释放共用同一计数器，用 operation 标签区分（可各算成功率）")
+    void deductAndReleaseShareOneCounterWithDifferentOperationTag() throws InterruptedException {
+        InventoryItem item = stock(10, 10);
+        givenExistingStock(item);
+        givenLockAcquired();
+
+        assertTrue(service.deductInventory(SKU, WAREHOUSE, 4));
+        assertTrue(service.releaseLockedInventory(SKU, WAREHOUSE, 4));
+
+        assertEquals(1.0, counter("deduct", "applied"), 1e-9);
+        assertEquals(1.0, counter("release", "applied"), 1e-9);
+    }
+
+    /** 读指定 operation / result 标签的计数值（不存在则抛 MeterNotFoundException）。 */
+    private double counter(String operation, String result) {
+        return meterRegistry.get(InventoryLockService.METRIC_LOCK_OPERATIONS)
+                .tags("operation", operation, "result", result).counter().count();
     }
 }

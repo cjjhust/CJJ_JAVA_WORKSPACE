@@ -1,0 +1,243 @@
+{
+  "uid": "aslp-overview",
+  "title": "ASLP 海外仓平台总览",
+  "description": "M1-M4 全链路观测：网关路由 / HTTP 延迟 / JVM / 订单拉取 / VRP 求解 / 库存锁 / 熔断器。数据源与看板均由 monitoring/ 下的文件版本化管理。",
+  "tags": ["aslp", "logistics"],
+  "timezone": "browser",
+  "schemaVersion": 39,
+  "version": 1,
+  "refresh": "10s",
+  "editable": true,
+  "time": { "from": "now-30m", "to": "now" },
+  "annotations": { "list": [] },
+  "templating": { "list": [] },
+  "panels": [
+    {
+      "id": 1,
+      "type": "stat",
+      "title": "抓取目标存活 (up)",
+      "description": "aslp-services 作业下每个实例的存活状态。低于 6 说明有服务没被抓到。",
+      "gridPos": { "h": 6, "w": 8, "x": 0, "y": 0 },
+      "datasource": { "type": "prometheus", "uid": "aslp-prometheus" },
+      "options": {
+        "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false },
+        "colorMode": "background",
+        "graphMode": "none",
+        "textMode": "value_and_name"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "mappings": [
+            { "type": "value", "options": { "0": { "text": "DOWN", "color": "red" } } },
+            { "type": "value", "options": { "1": { "text": "UP", "color": "green" } } }
+          ],
+          "thresholds": { "mode": "absolute", "steps": [{ "color": "red", "value": null }, { "color": "green", "value": 1 }] },
+          "unit": "short"
+        },
+        "overrides": []
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": { "type": "prometheus", "uid": "aslp-prometheus" },
+          "expr": "up{job=\"aslp-services\"}",
+          "legendFormat": "{{application}}",
+          "instant": true
+        }
+      ]
+    },
+    {
+      "id": 2,
+      "type": "stat",
+      "title": "HTTP 5xx 速率",
+      "description": "全平台 5xx 请求速率（req/s）。非 0 就是在报错。",
+      "gridPos": { "h": 6, "w": 8, "x": 8, "y": 0 },
+      "datasource": { "type": "prometheus", "uid": "aslp-prometheus" },
+      "options": {
+        "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false },
+        "colorMode": "background",
+        "graphMode": "area",
+        "textMode": "value"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "reqps",
+          "thresholds": { "mode": "absolute", "steps": [{ "color": "green", "value": null }, { "color": "red", "value": 0.001 }] },
+          "decimals": 3
+        },
+        "overrides": []
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": { "type": "prometheus", "uid": "aslp-prometheus" },
+          "expr": "sum(rate(http_server_requests_seconds_count{status=~\"5..\"}[5m])) + sum(rate(spring_cloud_gateway_requests_seconds_count{httpStatusCode=~\"5..\"}[5m]))",
+          "instant": true
+        }
+      ]
+    },
+    {
+      "id": 3,
+      "type": "stat",
+      "title": "熔断器（1 = 当前状态）",
+      "description": "resilience4j_circuitbreaker_state：state 标签给出当前状态，值为 1 的那条即现状。open 变 1 表示平台调用已被熔断。",
+      "gridPos": { "h": 6, "w": 8, "x": 16, "y": 0 },
+      "datasource": { "type": "prometheus", "uid": "aslp-prometheus" },
+      "options": {
+        "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false },
+        "colorMode": "background",
+        "graphMode": "none",
+        "textMode": "value_and_name"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "mappings": [],
+          "thresholds": { "mode": "absolute", "steps": [{ "color": "green", "value": null }] }
+        },
+        "overrides": []
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": { "type": "prometheus", "uid": "aslp-prometheus" },
+          "expr": "sum by (name, state) (resilience4j_circuitbreaker_state)",
+          "legendFormat": "{{name}} = {{state}}",
+          "instant": true
+        }
+      ]
+    },
+    {
+      "id": 4,
+      "type": "timeseries",
+      "title": "网关路由流量（按 routeId / 状态）",
+      "description": "spring_cloud_gateway_requests_seconds_count：SCG 内建指标。限流生效时可直接看到 429 分布在哪个路由。",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 6 },
+      "datasource": { "type": "prometheus", "uid": "aslp-prometheus" },
+      "options": {
+        "legend": { "displayMode": "table", "placement": "bottom", "calcs": ["sum"] },
+        "tooltip": { "mode": "multi", "sort": "desc" }
+      },
+      "fieldConfig": { "defaults": { "unit": "reqps", "custom": { "fillOpacity": 10, "lineWidth": 2 } }, "overrides": [] },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": { "type": "prometheus", "uid": "aslp-prometheus" },
+          "expr": "sum by (routeId, httpStatusCode) (rate(spring_cloud_gateway_requests_seconds_count[1m]))",
+          "legendFormat": "{{routeId}} → {{httpStatusCode}}"
+        }
+      ]
+    },
+    {
+      "id": 5,
+      "type": "timeseries",
+      "title": "HTTP P95 延迟（按服务）",
+      "description": "由 http_server_requests_seconds_bucket 直方图计算，需要 percentiles-histogram 开启。",
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 6 },
+      "datasource": { "type": "prometheus", "uid": "aslp-prometheus" },
+      "options": {
+        "legend": { "displayMode": "table", "placement": "bottom", "calcs": ["max"] },
+        "tooltip": { "mode": "multi", "sort": "desc" }
+      },
+      "fieldConfig": { "defaults": { "unit": "s", "custom": { "fillOpacity": 0, "lineWidth": 2 } }, "overrides": [] },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": { "type": "prometheus", "uid": "aslp-prometheus" },
+          "expr": "histogram_quantile(0.95, sum by (le, application) (rate(http_server_requests_seconds_bucket[5m])))",
+          "legendFormat": "{{application}}"
+        }
+      ]
+    },
+    {
+      "id": 6,
+      "type": "timeseries",
+      "title": "JVM 堆使用（按服务）",
+      "description": "jvm_memory_used_bytes{area=\"heap\"}。堆持续爬升不回落往往意味着内存泄漏。",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 14 },
+      "datasource": { "type": "prometheus", "uid": "aslp-prometheus" },
+      "options": {
+        "legend": { "displayMode": "table", "placement": "bottom", "calcs": ["max"] },
+        "tooltip": { "mode": "multi", "sort": "desc" }
+      },
+      "fieldConfig": { "defaults": { "unit": "bytes", "custom": { "fillOpacity": 10, "lineWidth": 1 } }, "overrides": [] },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": { "type": "prometheus", "uid": "aslp-prometheus" },
+          "expr": "sum by (application) (jvm_memory_used_bytes{area=\"heap\"})",
+          "legendFormat": "{{application}}"
+        }
+      ]
+    },
+    {
+      "id": 7,
+      "type": "timeseries",
+      "title": "订单拉取结局（5m 增量，按平台/结局）",
+      "description": "aslp_order_pull_requests_total：success=正常、failed=平台业务失败、degraded=我方熔断/重试耗尽后的降级。后两者必须区分对待。",
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 14 },
+      "datasource": { "type": "prometheus", "uid": "aslp-prometheus" },
+      "options": {
+        "legend": { "displayMode": "table", "placement": "bottom", "calcs": ["sum"] },
+        "tooltip": { "mode": "multi", "sort": "desc" }
+      },
+      "fieldConfig": { "defaults": { "unit": "short", "custom": { "fillOpacity": 20, "lineWidth": 1, "stacking": { "mode": "normal" } } }, "overrides": [] },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": { "type": "prometheus", "uid": "aslp-prometheus" },
+          "expr": "sum by (platform, outcome) (increase(aslp_order_pull_requests_total[5m]))",
+          "legendFormat": "{{platform}} / {{outcome}}"
+        }
+      ]
+    },
+    {
+      "id": 8,
+      "type": "timeseries",
+      "title": "VRP 求解 P95 与里程均值",
+      "description": "aslp_vrp_solve_seconds（M3 最重计算路径）+ aslp_vrp_distance_km：区分「变慢了」与「解变差了」。",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 22 },
+      "datasource": { "type": "prometheus", "uid": "aslp-prometheus" },
+      "options": {
+        "legend": { "displayMode": "table", "placement": "bottom", "calcs": ["max"] },
+        "tooltip": { "mode": "multi", "sort": "desc" }
+      },
+      "fieldConfig": { "defaults": { "unit": "s", "custom": { "fillOpacity": 0, "lineWidth": 2 } }, "overrides": [] },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": { "type": "prometheus", "uid": "aslp-prometheus" },
+          "expr": "histogram_quantile(0.95, sum by (le, feasible) (rate(aslp_vrp_solve_seconds_bucket[5m])))",
+          "legendFormat": "P95 feasible={{feasible}}"
+        },
+        {
+          "refId": "B",
+          "datasource": { "type": "prometheus", "uid": "aslp-prometheus" },
+          "expr": "sum(increase(aslp_vrp_distance_sum[5m])) / clamp_min(sum(increase(aslp_vrp_distance_count[5m])), 1)",
+          "legendFormat": "平均总里程 (km)"
+        }
+      ]
+    },
+    {
+      "id": 9,
+      "type": "timeseries",
+      "title": "库存锁操作（5m 增量，按操作/结果）",
+      "description": "aslp_inventory_lock_operations_total：rejected_balance=余额不足（要补货）、rejected_lock=抢锁失败（并发压力）、rejected_invalid_qty=入参非法。",
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 22 },
+      "datasource": { "type": "prometheus", "uid": "aslp-prometheus" },
+      "options": {
+        "legend": { "displayMode": "table", "placement": "bottom", "calcs": ["sum"] },
+        "tooltip": { "mode": "multi", "sort": "desc" }
+      },
+      "fieldConfig": { "defaults": { "unit": "short", "custom": { "fillOpacity": 20, "lineWidth": 1, "stacking": { "mode": "normal" } } }, "overrides": [] },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": { "type": "prometheus", "uid": "aslp-prometheus" },
+          "expr": "sum by (operation, result) (increase(aslp_inventory_lock_operations_total[5m]))",
+          "legendFormat": "{{operation}} / {{result}}"
+        }
+      ]
+    }
+  ]
+}

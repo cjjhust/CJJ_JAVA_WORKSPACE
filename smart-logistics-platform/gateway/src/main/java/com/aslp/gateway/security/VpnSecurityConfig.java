@@ -75,10 +75,16 @@ public class VpnSecurityConfig {
                 .formLogin(ServerHttpSecurity.FormLoginSpec::disable)
                 .authorizeExchange(exchange -> exchange
                         .pathMatchers("/actuator/health/**", "/actuator/info").permitAll()
+                        // P1-1：Prometheus 抓取端点放行。
+                        // 权衡：指标只有计数/耗时，不含业务数据；但它是「内部观测面」，
+                        // 生产环境应改用独立 management 端口 + 网络策略限制来源（见 readme §10 限制）。
+                        .pathMatchers("/actuator/prometheus").permitAll()
                         .pathMatchers("/api/auth/**").permitAll()
                         .pathMatchers(HttpMethod.OPTIONS, "/**").permitAll()
                         .pathMatchers(HttpMethod.GET, "/bff/orders/search").hasRole(ROLE_USER)
                         .pathMatchers(HttpMethod.POST, "/api/inventory/**").hasRole(ROLE_ADMIN)
+                        // P1-2：故障演练开关会影响拉取链路，限管理员可操作
+                        .pathMatchers(HttpMethod.POST, "/api/orders/mock/**").hasRole(ROLE_ADMIN)
                         .anyExchange().authenticated())
                 .oauth2ResourceServer(oauth2 -> oauth2
                         .jwt(jwt -> jwt.jwtAuthenticationConverter(roleAwareJwtConverter())))

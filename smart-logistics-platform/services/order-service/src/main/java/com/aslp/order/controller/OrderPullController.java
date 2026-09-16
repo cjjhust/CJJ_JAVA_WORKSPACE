@@ -3,6 +3,7 @@ package com.aslp.order.controller;
 import com.aslp.order.entity.OrderRecord;
 import com.aslp.order.repository.OrderRepository;
 import com.aslp.order.service.OrderPullService;
+import com.aslp.order.strategy.PlatformFailureSwitch;
 import org.springframework.data.domain.Page;
 import org.springframework.data.domain.PageRequest;
 import org.springframework.data.domain.Sort;
@@ -33,13 +34,16 @@ public class OrderPullController {
 
     private final OrderPullService pullService;
     private final OrderRepository repository;
+    private final PlatformFailureSwitch failureSwitch;
 
-    public OrderPullController(OrderPullService pullService, OrderRepository repository) {
+    public OrderPullController(OrderPullService pullService, OrderRepository repository,
+                               PlatformFailureSwitch failureSwitch) {
         this.pullService = pullService;
         this.repository = repository;
+        this.failureSwitch = failureSwitch;
     }
 
-    /** 触发一次订单拉取（策略模式 + 幂等落库）。 */
+    /** 触发一次订单拉取（策略模式 + 幂等落库 + P1-2 容错降级）。 */
     @PostMapping("/pull")
     public ResponseEntity<Map<String, Object>> pull() {
         OrderPullService.PullSummary summary = pullService.pullAndPersist();
@@ -50,8 +54,31 @@ public class OrderPullController {
         body.put("created", summary.created());
         body.put("updated", summary.updated());
         body.put("flagged", summary.flagged());
+        body.put("degraded", summary.degraded());
         body.put("errorMsg", summary.errorMsg());
         return ResponseEntity.ok(body);
+    }
+
+    /**
+     * P1-2 故障演练开关（仅 Mock 策略读取）。
+     *
+     * <p>用于验证「平台连续失败 -> 熔断打开 -> 接口返回降级响应（而非 500）」。
+     * 真实策略无此开关；网关 docker 链路仅允许 ADMIN 调用。
+     *
+     * @param mode NONE（恢复正常）/ ERROR（注入平台故障）
+     */
+    @PostMapping("/mock/failure-mode")
+    public ResponseEntity<Map<String, Object>> setMockFailureMode(@RequestParam String mode) {
+        PlatformFailureSwitch.Mode target;
+        try {
+            target = PlatformFailureSwitch.Mode.valueOf(mode.trim().toUpperCase());
+        } catch (IllegalArgumentException e) {
+            return ResponseEntity.badRequest().build();
+        }
+        failureSwitch.setMode(target);
+        return ResponseEntity.ok(Map.of(
+                "mode", failureSwitch.getMode().name(),
+                "failing", failureSwitch.isFailing()));
     }
 
     /** 多条件分页查询。 */

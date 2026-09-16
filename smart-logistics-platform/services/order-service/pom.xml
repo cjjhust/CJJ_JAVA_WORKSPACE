@@ -35,6 +35,22 @@
             <groupId>org.springframework.boot</groupId>
             <artifactId>spring-boot-starter-actuator</artifactId>
         </dependency>
+        <!-- P1-2：Resilience4j（熔断 + 重试 + 舱壁）+ 降级回退；版本由 Spring Cloud BOM 管理 -->
+        <dependency>
+            <groupId>org.springframework.cloud</groupId>
+            <artifactId>spring-cloud-starter-circuitbreaker-resilience4j</artifactId>
+        </dependency>
+        <!-- Resilience4j 注解式切面（@CircuitBreaker/@Retry/@Bulkhead）需要 AOP 支持 -->
+        <!-- P1-1：把 Resilience4j 的熔断/重试/舱壁状态导出为 Micrometer 指标
+             （resilience4j_circuitbreaker_state / _calls_total …），供 Prometheus 抓取与 Grafana 出图 -->
+        <dependency>
+            <groupId>io.github.resilience4j</groupId>
+            <artifactId>resilience4j-micrometer</artifactId>
+        </dependency>
+        <dependency>
+            <groupId>org.springframework.boot</groupId>
+            <artifactId>spring-boot-starter-aop</artifactId>
+        </dependency>
         <!-- P0-4：Flyway 版本化迁移（替代 ddl-auto: update） -->
         <dependency>
             <groupId>org.flywaydb</groupId>

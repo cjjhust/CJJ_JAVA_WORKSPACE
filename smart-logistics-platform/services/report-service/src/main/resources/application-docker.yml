@@ -9,4 +9,5 @@ management:
   endpoints:
     web:
       exposure:
-        include: health,info
+        # P1-1：docker profile 必须同步加上 prometheus（否则 include 会覆盖基础 profile）
+        include: health,info,prometheus,metrics

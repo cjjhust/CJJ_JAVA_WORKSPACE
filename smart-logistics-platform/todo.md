@@ -1,4 +1,159 @@
 ---
+## P1-1 可观测性（Micrometer + Prometheus + Grafana）（2026-09-17 轮次 8）— 用户要求：做 P1-1 / P1-3 / P1-4 中选一
+
+> 选 P1-1 的依据：它是路线图第一项；且先探测了镜像可用性（`prom/prometheus` / `grafana/grafana` / `openzipkin/zipkin` 本地已存在或可拉取），确认没有此前 MinIO 那类「镜像源不可达」的阻塞风险。
+> 结果：**`mvn clean package -T 1C` BUILD SUCCESS（117 个单测全部通过）｜ `container-verify.sh` EXIT=0（12/12 容器就绪，端到端断言 46/46）**
+
+### A. 交付内容
+
+- [x] **6 个模块统一接入 Prometheus 注册表**：`micrometer-registry-prometheus` 声明在聚合 POM 的 `<dependencies>` 里由各模块继承
+  （平台级关注点，避免 6 份重复声明）；版本由 `spring-boot-starter-parent` BOM 管理
+- [x] **12 个 profile 配置文件同步暴露端点**：`management.endpoints.web.exposure.include` 加 `prometheus,metrics`
+  —— **docker profile 必须同时改**（profile 里的 `include` 会整体覆盖基础 profile，漏写就抓不到，已踩坑并记入 readme §7）
+- [x] **统一指标标签**：`management.metrics.tags.application=${spring.application.name}`，Prometheus 侧可直接 `by (application)` 聚合
+- [x] **直方图配置**：对 `http.server.requests`（含 gateway 的 `spring.cloud.gateway.requests`）与 `aslp.vrp.solve` 开启
+  `percentiles-histogram`，否则看板只能看均值、看不到尾延迟
+- [x] **三个服务的业务指标**（不是只暴露 JVM/HTTP）：
+  - `order-service`：`aslp_order_pull_requests_total{platform,outcome=success|failed|degraded}` + `aslp_order_pull_orders_total{platform,result=created|updated|flagged}`
+  - `route-service`：`aslp_vrp_solve_seconds{feasible}`（Timer）+ `aslp_vrp_distance_km`（DistributionSummary）
+  - `inventory-service`：`aslp_inventory_lock_operations_total{operation,result}`，把「业务性拒绝」与「抢锁失败」分开
+    （`rejected_balance` 要补货、`rejected_lock` 要看并发压力，混成一个 false 无法定位）
+- [x] **监控栈**：compose 新增 `aslp_prometheus:9090`（保留 7 天、开 `--web.enable-lifecycle` 支持热加载）与
+  `aslp_grafana:3000`（演示环境匿名只读）；两容器纳入 `container-verify.sh` 的期望列表
+- [x] **配置全部文件版本化**：`monitoring/prometheus/prometheus.yml`、Grafana 数据源（uid 固定 `aslp-prometheus`）、
+  看板加载器、`aslp-overview` 看板（9 面板）；不依赖手工点击配置
+- [x] **单测断言指标真实递增**（`SimpleMeterRegistry`，不启 Prometheus）：order +2、inventory +3、route +2 = **110 → 117**
+- [x] **端到端断言 41 → 46**：指标端点含业务指标、Prometheus 抓取 6/6、业务指标已入 TSDB、Grafana 健康、看板已自动加载
+- [x] **看板 PromQL 全部对照真实指标名验证**（先 `curl /api/v1/label/__name__/values` 取实名单，再写 JSON），
+  并用 `histogram_quantile` 实测算出 P95（如 route-service 0.063s）
+
+### B. 本轮修复的缺陷（含 1 个环境问题）
+
+| # | 问题 | 根因 | 修复 |
+|---|---|---|---|
+| 30 | **Prometheus 抓不到 5 个服务**：`lastError = HTTP 400`，响应体为空、应用日志无记录 | 与 #21 同源但**不在同一层**：抓取目标写了容器名 `aslp_order_service`，Host 头的下划线对 RFC 1123 主机名非法，**Tomcat 10.1 在进应用前直接回 400**（网关是 Netty 不校验 Host，所以只有它没报错） | targets 改用 compose 已声明的连字符别名 `aslp-order-service:8081` |
+| 31 | 抓取网关 **401**、抓取 auth-service **403** | 观测端点未进安全链白名单；auth-service 关了 httpBasic 所以是 **403 而非 401**（容易误判为权限配置问题） | 两处安全链均放行 `/actuator/prometheus`，注释里写明「生产应改用独立 management 端口 + 来源限制」 |
+| 32 | **大响应体断言恒定假失败**：`/actuator/prometheus`（200KB）明明含目标指标却报「未暴露」 | `set -o pipefail` + `grep -q`：grep 命中即退出 → 写端（echo）收到 **SIGPIPE** → 管道返回 **141** → 走 else 分支。实测同一字符串 `case` 命中、`echo\|grep -qF` 退出码 141、here-string 为 0；小响应体因写端写完得快而不暴露，极具欺骗性 | 断言统一改 **here-string**：`grep -q -- "${expect}" <<< "${body}"`；3 个断言助手一并修正 |
+| 33 | **冷启动时监控断言失败**（暖机通过） | 断言与 Prometheus 抓取周期赛跑：`scrape_interval=15s`，指标刚产生还没被 scrape，立刻查 TSDB 必然空（与 #28 同源） | 两项抓取相关断言改为**有界轮询**（最多 ~48s，命中即停） |
+| 34 | **所有 Java 服务启动失败**：`/tmp/tomcat.8081.xxx: No space left on device` | Docker 虚拟机根分区 100% 满（58.4G 用满）：反复构建镜像累积 66 个悬空镜像 + 14.5GB 构建缓存。错误出现在 Tomcat 建临时目录阶段，**看起来像应用配置问题** | 只清理悬空镜像与构建缓存（腾出 ~15GB）；**刻意不用 `docker system prune --volumes`**（本机还跑着其他项目，卷里有 13GB 数据） |
+
+### C. 验证证据
+
+| 验证项 | 结果 |
+|---|---|
+| `mvn clean package -T 1C` | ✅ BUILD SUCCESS；**117 个单测全部通过**（gateway 9 / order 31 / inventory 23 / route 48 / auth 5 / report 1），0 跳过 |
+| `docker compose down -v` + `container-verify.sh` | ✅ **EXIT=0**；**12/12 容器就绪**；端到端断言 **46/46** |
+| 抓取链路 | ✅ Prometheus **7/7 目标 healthy**（6 业务服务 + 自身），无 `lastError` |
+| 指标端点 | ✅ `/actuator/prometheus` 输出 ~200KB，含 `application` 标签、`aslp_order_pull_requests_total` 等业务指标 |
+| 指标入 TSDB | ✅ `aslp_vrp_distance_count` 可从 Prometheus 查到（证明「应用 → 抓取 → TSDB → 查询」全链路通） |
+| 业务指标实测值 | ✅ `aslp_order_pull_requests_total{outcome="success"}=3`；`aslp_inventory_lock_operations_total{operation="deduct",result="applied"}=1`；网关 `spring_cloud_gateway_requests_seconds_count{routeId="order-pull-throttle"}` |
+| P95 可算 | ✅ `histogram_quantile(0.95, sum by (le, application) (rate(http_server_requests_seconds_bucket[5m])))` 实测出值 |
+| Grafana | ✅ `/api/health` = `database ok`（11.3.0）；数据源健康；看板 `aslp-overview` 自动加载到 ASLP 目录 |
+
+### D. 经验记录（本轮最值钱的三条）
+
+1. **`set -o pipefail` 与 `grep -q` 不能一起用在大输入上**：`grep -q` 命中即退出会让写端 SIGPIPE，管道返回 141 —— 断言「明明命中却失败」。
+   判据：同一字符串用 `case`/`[[ == ]]` 命中而管道 grep 失败，就是它。修法：here-string（`<<<`，无写端进程）或 `grep -c`（读完输入）。
+2. **主机名下划线有两层坑**：`java.net.URI`（RFC 2396，网关路由）与 **HTTP Host 头（RFC 1123，Tomcat 直接 400）**。
+   本项目已为被路由的服务声明连字符别名，Prometheus 抓取也复用同一套别名。
+3. **跨组件断言必须容忍异步周期**：Prometheus 有 15s 抓取间隔，冷启动时「刚产生的指标」还没入库；断言要么轮询、要么断言「下一个周期内出现」，
+   不能写成「立刻可见」。
+
+---
+## P1-2b 修复 M3 VRP 引擎（2026-09-16 轮次 7）— 用户要求：P1-2b 修 VRP 引擎
+
+> 结果：**`mvn clean package -T 1C` BUILD SUCCESS（110 个单测全部通过，0 跳过）｜ `container-verify.sh` EXIT=0（10/10 healthy，端到端断言 41/41）**
+
+### A. 交付内容
+
+- [x] **缺陷 #27 第一层（算法装配）**：`VrpRouteService` 改用官方高层入口 `Jsprit.Builder.buildAlgorithm()`，
+  一次性装配初始解构造、搜索策略集合、状态与约束、迭代上限；不再用空的 `SearchStrategyManager`
+- [x] **缺陷 #27 第二层（距离量纲，修复时才暴露）**：新增 `engine/HaversineCostModel`（真实 km 成本 + 时间折算）
+  与 `engine/GeoDistance`（Haversine）。jsprit 默认欧氏距离在经纬度上单位是「度」（往返 Bruchsal→Karlsruhe 只算出 0.2），
+  而内置 `GreatCircleCosts` 的经纬度顺序与项目约定**相反**（同一条路线算成 11.2 km，真值 19.3 km）→ 自行实现并统一约定 `Location.newInstance(纬度, 经度)`
+- [x] **入参门面 `engine/VrpProblemFactory`**：JSON → jsprit 问题的映射 + 集中校验（坐标成对且在范围内、
+  容量/需求必须为正整数——jsprit 的容量维度是 `int`，小数会被静默截断、id 唯一、求解参数区间）；
+  另提供内置演示问题，使 `curl -X POST .../optimize`（不带 body）保持可用
+- [x] **接口接入**：`RouteController.optimize()` 从桩方法接入真实引擎；入参非法返回 **400 + 中文原因**（不触达求解器）
+- [x] **出参 `dto/VrpPlan`**：逐车路线 / 停靠顺序（含预计到达小时数）/ 里程(km) / 载重 / 未指派作业 / 求解耗时；
+  字段与 `test-data/mock-test-data.json` 的 `routeResults` 对齐，可直接喂看板
+- [x] **`@Disabled` 已移除**：`VrpRouteServiceTest` 重写为 9 例，并新增 `bareSearchStrategyManagerStillFails`
+  把「旧写法为什么必错」变成**长期回归证据**
+- [x] **单测**：route-service 由 7 个（含 2 跳过）→ **46 个全通过**（新增 `GeoDistanceTest` 6 / `HaversineCostModelTest` 6 /
+  `VrpProblemFactoryTest` 11 / `VrpRouteServiceTest` 9 / `RouteControllerTest` 6）
+- [x] **端到端断言**：冒烟脚本新增 2 个助手（带 JSON body 的成功/状态码断言）+ **5 项 VRP 断言**，36 → **41 项**
+
+### B. 本轮修复的缺陷
+
+| # | 问题 | 根因 | 修复 |
+|---|---|---|---|
+| 27 | **M3 的 VRP 引擎实际不可用**（单测生成任务发现，**本轮修复**） | 两层叠加：①空的 `SearchStrategyManager` 未注册任何搜索策略 → `searchSolutions()` 必抛 `no search-strategy found`（已用独立程序复现）；②即便跑通，jsprit 默认欧氏距离在经纬度上**单位是「度」**，而内置 `GreatCircleCosts` 的经纬度顺序与项目约定相反 | ①改 `Jsprit.Builder`；②自带 `HaversineCostModel`（km）并用单测把「纬度在前」的约定钉死；③`VrpProblemFactory` 集中校验；④接口真接入引擎 |
+| 28 | **限流端到端断言时序脆弱**（本轮验证时实测到第二次拿到 200 而非 429） | 断言写成「串行紧接第二次」，隐含要求「首次 `/pull` 在 1 秒内返回」；容器刚就绪时首次调用含 JIT 与首次访问 DB，耗时可能超过 1 秒 → 令牌桶按 1/s 补充 → 第二次合法放行，**断言假失败** | 改为**并发突发**断言（同瞬间并发 4 次，burst=1 时必然有请求被限）；实测 `429 429 429 200` |
+| 29 | 冒烟断言「期望包含 `["A","B"]`」假失败（VRP 未指派作业断言） | 助手函数用普通 `grep`，而 `[` `]` 在正则里是**字符集**，JSON 数组内容按字面量永远匹配不上（响应体里其实完全正确） | 新增的 `check_post_json` 改用 `grep -qF`（固定字符串） |
+
+### C. 验证证据
+
+| 验证项 | 结果 |
+|---|---|
+| `mvn clean package -T 1C` | ✅ BUILD SUCCESS；**110 个单测全部通过**（gateway 9 / order 29 / inventory 20 / route 46 / auth 5 / report 1），0 跳过、0 失败 |
+| `bash scripts/container-verify.sh`（先 `docker compose down -v` 冷启动） | ✅ **EXIT=0**；10/10 容器 healthy；端到端断言 **41/41** |
+| VRP 求解语义 | ✅ 演示问题：1 条路线 / 4 个停靠点 / **615.1 km** / 载重 14 / 求解 ~200 ms |
+| VRP 距离正确性 | ✅ 单作业往返 Bruchsal→Karlsruhe = **38.6 km**（与独立 Haversine 计算 38.5872 一致），同时证明单位是 km 而非「度」 |
+| VRP 无解与非法入参 | ✅ 运力不足 → 200 + `feasible:false` + `unassignedJobIds:["SMOKE-D-BIG"]`；缺 `deliveries` → 400 + 中文原因 |
+| VRP 可复现性 | ✅ 同问题连续求解两次，总里程与停靠顺序完全一致（固定随机种子 `20260916L`） |
+| 限流（本轮改写断言后） | ✅ 并发 4 次 → `429 429 429 200`（1 次拿到令牌、3 次被拒） |
+
+### D. 为什么必须用「并发突发」验证令牌桶（经验记录）
+
+令牌桶按时间补充（`replenishRate=1` 令牌/秒），因此**串行第二次**能否拿到 429，取决于第一次调用的耗时是否小于 1 秒。
+在容器冷启动（JIT + 首访问 DB）时首次 `/pull` 可能超过 1 秒 → 令牌已补充 → 第二次合法放行。
+**断言依赖“前一个请求足够快”就是不稳定断言**；要验证 burst 行为，必须让并发请求落在同一瞬间。
+
+---
+## P1-2 限流与容错 + 低覆盖单测补齐（2026-09-16 轮次 6）— 用户要求：接下来做 P1 / 为低覆盖类生成单测
+
+> 结果：**`mvn test -T 1C` BUILD SUCCESS（75 测试：73 通过 / 2 跳过）｜ `container-verify.sh` EXIT=0（10/10 healthy，端到端断言 36/36）**
+
+### A. P1-2 交付内容
+
+- [x] **网关限流（Redis 令牌桶）**：`RateLimitConfig` 提供带 `user:` / `ip:` 前缀的 `KeyResolver`；
+  `POST /api/orders/pull` 用户维度 **1 次/秒**（对应 M1「平台 API 严格限流」），`/api/auth/**` IP 维度 **10 次/秒**（登录前无用户身份）
+- [x] **order-service 容错**：新增 `PlatformPullGateway`，Resilience4j **Retry → CircuitBreaker → Bulkhead**；
+  降级回退挂在**最外层 Retry**（挂 CB 上会被内层吞掉异常，导致重试永不触发）；
+  任何失败合成 `degraded=true` 结果 → 接口返回 **200 降级响应而非 500**
+- [x] **失败演练能力**：`PlatformFailureSwitch` + `POST /api/orders/mock/failure-mode`（仅 Mock 策略读取，网关限 ADMIN），
+  使「连续失败 → 熔断打开 → 降级 → 自动恢复」可**可控复现**
+- [x] **可观测**：`/actuator/circuitbreakers` 暴露熔断状态；`register-health-indicator=false`（避免熔断时 /actuator/health 变 DOWN）
+- [x] **单测**：`RateLimitConfigTest`(5)、`PlatformPullGatewayTest`(3)、`MockAmazonStrategyTest`(4)，并扩展 `OrderPullServiceTest` 验证降级结果透出且不写库
+- [x] **端到端断言**：冒烟脚本新增 `check_status` 助手 + 4 项断言（限流 429、熔断降级响应、熔断状态 OPEN、自动恢复），32 → **36 项**
+
+### B. 本轮修复的缺陷
+
+| # | 问题 | 根因 | 修复 |
+|---|---|---|---|
+| 25 | **网关启动失败**：`Parameter 1 of method requestRateLimiterGatewayFilterFactory ... required a single bean, but 2 were found` | `RateLimitConfig` 注入多个 `KeyResolver`，而 `GatewayAutoConfiguration` 的限流过滤器工厂需要唯一默认 bean | 主解析器标 `@Primary` |
+| 26 | **全局限流拖垒正常流量**：突发后常规请求成片 429（实测 `X-RateLimit-Remaining: 0`） | SCG 的 `RedisRateLimiter` 令牌桶 key **不含 routeId**（核对其 4.1.5 字节码：`getKeys(String)` 只收解析器输出）→ 不同阈值的路由会共用桶；且 `default-filters` 全局限流无差别节流端到端脚本等正常流量 | 改为**按需路由级限流**，并用 `user:` / `ip:` 前缀隔离令牌桶 |
+| 27 | **M3 的 VRP 引擎实际不可用**（由单测生成任务发现；**已在轮次 7 / P1-2b 修复**） | `VrpRouteService` 的 `new SearchStrategyManager()` 未注册任何搜索策略 → `searchSolutions()` 必抛 `no search-strategy found`；因 `RouteController.optimize()` 仍是桩方法，端到端一直未暴露 | 已用 `@Disabled` 锁定测试 + 记录根因；**轮次 7 已改为 `Jsprit.Builder` 并修掉同一条链路上的距离量纲问题**（见顶部轮次 7） |
+
+### C. 低覆盖单测生成（第二个任务，使用测试生成工作流）
+
+- [x] 新增 **9 个测试类 / 29 个用例**（会话 `20260916212526`，工作日志：`.github/modernize/java-upgrade/20260916212526/generate_tests.md`）
+  - route：`EuropeDhlRuleTest`(5)、`FreightEngineTest`(3)、`VrpRouteServiceTest`(2，跳过)
+  - auth：`JwtTokenServiceTest`(4，含 HS384 跨服务契约断言)
+  - inventory：`InventoryWarningTaskTest`(3，含邮件异常隔离)、`ReplenishmentMailServiceTest`(2)、`InventoryViewTest`(3)
+  - order：`AmazonSpApiStrategyTest`(3)、`OrderDtoTest`(4)
+- [x] **全程未修改生产代码**（仅生成测试）；`VrpRouteServiceTest` 因发现真实缺陷按流程标记 `@Disabled`
+- [x] 范围外（无法在不改生产代码前提下单测）已在工作日志说明：`TrackingService`（硬编码 `new RestTemplate()` + 真实端点）、`DatabaseBackupTask`（外部进程）等
+
+### D. 验证证据
+
+| 验证项 | 结果 |
+|---|---|
+| `mvn clean package -T 1C` | ✅ BUILD SUCCESS；测试类 24 个（原 14），**75 测试 = 73 通过 + 2 跳过**，失败 0 |
+| `bash scripts/container-verify.sh` | ✅ **EXIT=0**；10/10 容器 healthy；端到端断言 **36/36** |
+| P1-2 端到端四项 | ✅ 限流 429（连续第二次 /pull）；平台故障 → `degraded:true`（200 而非 500）；`/actuator/circuitbreakers` state=**OPEN**；关闭故障后自动恢复 `success:true` |
+
+---
 ## P0-5 库存 CRUD 闭环（2026-09-16 轮次 5）— 用户要求：接着做 P0-5 + 把「代码地图」沉淀进 readme
 
 > 结果：**`mvn clean package -T 1C` BUILD SUCCESS（33 单测全绿）｜ `container-verify.sh` EXIT=0（10/10 healthy，端到端断言 32/32）**
@@ -212,9 +367,14 @@
 
 ### 🟠 P1 — M5 能力补齐（预计 1-2 周）
 
-- [ ] **P1-1 可观测性栈**：各服务加 Micrometer + Prometheus registry；compose 增 `aslp_prometheus` / `aslp_grafana` / `aslp_loki`；定义 JVM / HTTP / DB 池 / Redisson 四类看板
-- [ ] **P1-2 限流与容错**：`Resilience4j`（熔断 + 重试 + 舱壁）+ Redis 令牌桶，落实 M1「平台 API 限流」；对 gateway 加 IP/用户维度限流
-  - 验收：压测触发熔断后返回降级响应而非 500
+- [x] **P1-1 可观测性栈** ✅ **2026-09-17 完成** — 各服务接入 Micrometer + Prometheus registry；compose 增 `aslp_prometheus:9090` / `aslp_grafana:3000`；`monitoring/` 下以文件版本化抓取配置 + 数据源 + 9 面板看板
+  - 验收：`container-verify.sh` EXIT=0（12/12 容器、46/46 断言）；Prometheus 7/7 目标 healthy；业务指标（订单拉取结局 / VRP 耗时里程 / 库存锁结果）已入 TSDB 并可在 Grafana 出图
+  - 未完成部分另立 **P1-1b**：Loki + Promtail 日志聚合（镜像需额外拉取）
+- [ ] **P1-1b 日志聚合**：Loki + Promtail（需拉取 `grafana/loki`），采集各服务 stdout，并在日志中串联 traceId（与 P1-3 配合）
+- [x] **P1-2 限流与容错** ✅ **2026-09-16 完成** — 网关 Redis 令牌桶（按需路由级：`/api/orders/pull` 用户维度 1 次/秒、`/api/auth/**` IP 维度）+ order-service Resilience4j 熔断/重试/舱壁 + 降级回退（`degraded` 透出，不返回 500）
+  - 验收：压测触发熔断后返回降级响应而非 500 ✅ **已达成**（端到端 4 项断言全绿：429 / 降级响应 / 熔断 OPEN / 自动恢复）
+- [x] **P1-2b 修复 M3 VRP 引擎** ✅ **2026-09-16 完成** — 改 `Jsprit.Builder` 装配算法（原空 `SearchStrategyManager` 必抛异常）+ 自带 `HaversineCostModel` 修掉距离量纲（原默认欧氏距离在经纬度上单位是「度」）+ `VrpProblemFactory` 集中校验 + `RouteController.optimize()` 真接入引擎
+  - 验收：`VrpRouteServiceTest`（已去掉 `@Disabled`，9 例全绿）；route-service 共 46 个单测全通过；端到端 5 项 VRP 断言全绿（含几何锁定的 38.6 km 往返里程）
 - [ ] **P1-3 追踪链路**：Spring Cloud Sleuth/Micrometer Tracing + Zipkin，串联 gateway → service 调用链
 - [ ] **P1-4 Amazon/eBay 真实契约测试**：WireMock 模拟 SP-API 限流（429）、超时、分页场景，覆盖 `OrderPullStrategy` 分支
 - [ ] **P1-5 邮件真实化**：compose 增 MailHog；补货邮件模板化（Thymeleaf），并恢复 `management.health.mail`

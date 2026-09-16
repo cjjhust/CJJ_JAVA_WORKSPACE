@@ -7,7 +7,7 @@
 #   2) docker compose up -d          —— 基础设施 + 全部 Java 服务
 #   3) 等待全部容器 healthy
 #   4) docker compose ps             —— 状态总览（供人工核对）
-#   5) bash smoke-test.sh --external —— 打容器暴露的 8080 跑 30 项端到端断言
+#   5) bash smoke-test.sh --external —— 打容器暴露的 8080 跑 46 项端到端断言
 #
 # 用法：
 #   bash scripts/container-verify.sh            # 全流程
@@ -31,10 +31,13 @@ cd "$(dirname "${BASH_SOURCE[0]}")/.."
 HEALTH_TIMEOUT="${HEALTH_TIMEOUT:-600}"
 
 # 期望处于运行状态的服务（不含被注释的 minio）
+# 注：aslp_grafana 镜像内没有 curl/wget（已实测），因此它没有容器内健康检查，
+# 就绪与否由冒烟脚本访问 :3000/api/health 断言。
 EXPECTED_SERVICES=(
     aslp_postgres aslp_redis aslp_zookeeper aslp_kafka
     aslp_gateway aslp_order_service aslp_inventory_service
     aslp_route_service aslp_auth_service aslp_report_service
+    aslp_prometheus aslp_grafana
 )
 
 echo "=== 1/5 构建镜像 ==="

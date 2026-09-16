@@ -1,6 +1,11 @@
 spring:
   application:
     name: gateway
+  # P1-2：限流令牌桶存于 Redis（容器内容器名寻址；JDBC/Redisson 同理由此复用 aslp_* 约定）
+  data:
+    redis:
+      host: aslp_redis
+      port: 6379
   cloud:
     gateway:
       # Bug 修复（1）：原 uri 为 lb://aslp_order_service:8081 —— lb:// 后必须跟服务名，
@@ -14,7 +19,24 @@ spring:
       # 在此过程中丢失，最终生成非法字符串 "http:"，启动即抛：
       #   URISyntaxException: Expected scheme-specific part at index 5: http:
       # 故此处统一使用 compose 中声明的连字符网络别名（aslp-xxx，见 docker-compose.yml 文件头）。
+      #
+      # P1-2：限流采用**按需路由级**而非 default-filters 全局（原因见 RateLimitConfig 类注释）。
       routes:
+        # P1-2：平台拉取接口单独收口（每用户 1 次/秒，burst 1），
+        # 对应 M1「针对电商平台 API 的严格限流」。
+        - id: order-pull-throttle
+          uri: http://aslp-order-service:8081
+          order: -1
+          predicates:
+            - Path=/api/orders/pull
+            - Method=POST
+          filters:
+            - name: RequestRateLimiter
+              args:
+                redis-rate-limiter.replenishRate: 1
+                redis-rate-limiter.burstCapacity: 1
+                redis-rate-limiter.requestedTokens: 1
+                key-resolver: "#{@userKeyResolver}"
         - id: order-service
           uri: http://aslp-order-service:8081
           predicates:
@@ -35,6 +57,14 @@ spring:
           uri: http://aslp-auth-service:8084
           predicates:
             - Path=/api/auth/**
+          filters:
+            # 认证入口按 IP 限流：登录前没有用户身份，只能以 IP 为维度防暴力破解
+            - name: RequestRateLimiter
+              args:
+                redis-rate-limiter.replenishRate: 10
+                redis-rate-limiter.burstCapacity: 20
+                redis-rate-limiter.requestedTokens: 1
+                key-resolver: "#{@ipKeyResolver}"
 server:
   port: 8080
 
@@ -49,4 +79,5 @@ management:
   endpoints:
     web:
       exposure:
-        include: health,info,gateway
+        # P1-1：docker profile 同样需要 prometheus（否则此处的 include 会覆盖基础 profile 而丢掉抓取端点）
+        include: health,info,gateway,prometheus,metrics

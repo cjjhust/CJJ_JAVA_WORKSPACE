@@ -247,11 +247,66 @@ services:
     ports:
       - "8085:8085"
 
+  # ---------------------------- 可观测性（P1-1） ----------------------------
+  # 所有 Java 服务已通过 micrometer-registry-prometheus 暴露 /actuator/prometheus；
+  # 这里把它们抓下来存 7 天，Grafana 负责出图。
+  aslp_prometheus:
+    image: prom/prometheus:v2.54.1
+    container_name: aslp_prometheus
+    command:
+      - --config.file=/etc/prometheus/prometheus.yml
+      - --storage.tsdb.path=/prometheus
+      - --storage.tsdb.retention.time=7d
+      # 允许热加载：curl -X POST localhost:9090/-/reload，改抓取配置不用重启容器
+      - --web.enable-lifecycle
+    volumes:
+      - ./monitoring/prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - aslp_prometheus_data:/prometheus
+    ports:
+      - "9090:9090"
+    healthcheck:
+      # 镜像自带 busybox wget（已实测 /bin/wget），故可用 --spider 做探活
+      test: ["CMD", "wget", "--spider", "-q", "http://localhost:9090/-/healthy"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+    networks:
+      - aslp_net
+
+  aslp_grafana:
+    image: grafana/grafana:11.3.0
+    container_name: aslp_grafana
+    environment:
+      # 演示环境：开放匿名只读访问，浏览器直开 http://localhost:3000 就能看图。
+      # 生产环境必须关掉匿名访问并接入统一认证（见 readme §10 限制）。
+      GF_AUTH_ANONYMOUS_ENABLED: "true"
+      GF_AUTH_ANONYMOUS_ORG_ROLE: Viewer
+      GF_USERS_ALLOW_SIGN_UP: "false"
+      GF_SECURITY_ADMIN_PASSWORD: ${GF_SECURITY_ADMIN_PASSWORD:-aslp-admin}
+    volumes:
+      # 数据源 + 看板全部以文件形式版本化管理，容器启动即自动加载
+      - ./monitoring/grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./monitoring/grafana/dashboards:/var/lib/grafana/dashboards:ro
+      - aslp_grafana_data:/var/lib/grafana
+    ports:
+      - "3000:3000"
+    depends_on:
+      aslp_prometheus:
+        condition: service_started
+    # 注：grafana/grafana 镜像内没有 curl/wget（已实测），故不设容器内健康检查；
+    # 就绪与否由冒烟脚本访问 /api/health = database ok 来断言。
+    networks:
+      - aslp_net
+
 volumes:
   aslp_pg_data:
     name: aslp_pg_data
   aslp_redis_data:
     name: aslp_redis_data
+  aslp_prometheus_data:
+    name: aslp_prometheus_data
+  aslp_grafana_data:
+    name: aslp_grafana_data
 
 networks:
   aslp_net:

@@ -4,3 +4,19 @@ server:
 spring:
   application:
     name: route-service
+
+# P1-1：可观测性——暴露 Prometheus 抓取端点并给指标打上服务名标签
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health,info,prometheus,metrics
+  metrics:
+    tags:
+      application: ${spring.application.name}
+    distribution:
+      percentiles-histogram:
+        # 开启直方图桶，Grafana 才能用 histogram_quantile 算 P95/P99
+        http.server.requests: true
+        # VRP 求解是 M3 最重的计算路径，单靠 count/sum 只能算均值，掩盖长尾
+        aslp.vrp.solve: true

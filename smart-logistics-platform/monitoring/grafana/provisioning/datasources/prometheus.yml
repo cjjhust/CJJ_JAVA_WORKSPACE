@@ -1,0 +1,18 @@
+# =============================================================================
+# ASLP — Grafana 数据源自动配置（P1-1）
+#
+# uid 固定为 aslp-prometheus：看板 JSON 里按 uid 引用数据源，
+# 不固定的话每次重建数据源都会拿到新 uid，看板就会「No data」。
+# =============================================================================
+
+apiVersion: 1
+
+datasources:
+  - name: Prometheus
+    uid: aslp-prometheus
+    type: prometheus
+    access: proxy
+    # 走容器网络内的服务名，端口是容器内端口（不是宿主机映射端口）
+    url: http://aslp_prometheus:9090
+    isDefault: true
+    editable: true

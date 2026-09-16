@@ -5,7 +5,9 @@ import com.aslp.order.repository.OrderRepository;
 import com.aslp.order.strategy.OrderDto;
 import com.aslp.order.strategy.OrderPullResult;
 import com.aslp.order.strategy.OrderPullStrategy;
+import io.micrometer.core.instrument.simple.SimpleMeterRegistry;
 import org.junit.jupiter.api.BeforeEach;
+import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
 import org.mockito.Mock;
@@ -42,6 +44,9 @@ class OrderPullServiceTest {
     @Mock
     private OrderRepository repository;
 
+    /** P1-1：内存注册表——断言指标而不依赖 Prometheus。 */
+    private final SimpleMeterRegistry meterRegistry = new SimpleMeterRegistry();
+
     private OrderPullService service;
 
     /** 可替换返回值的测试用策略。 */
@@ -75,7 +80,10 @@ class OrderPullServiceTest {
 
     @BeforeEach
     void setUp() {
-        service = new OrderPullService(new StubStrategy(MOCK_RESULT), repository);
+        // P1-2：平台调用统一经容错网关（注解在纯单元测试中不生效，等价于直接调策略）
+        // P1-1：传入内存注册表，便于断言指标真实递增
+        service = new OrderPullService(
+                new PlatformPullGateway(new StubStrategy(MOCK_RESULT)), repository, meterRegistry);
     }
 
     @Test
@@ -124,14 +132,38 @@ class OrderPullServiceTest {
     @Test
     void platformFailureDoesNotWriteToDatabase() {
         OrderPullService failing = new OrderPullService(
-                new StubStrategy(new OrderPullResult("Amazon", List.of(), false, "401 Unauthorized")),
-                repository);
+                new PlatformPullGateway(new StubStrategy(
+                        new OrderPullResult("Amazon", List.of(), false, "401 Unauthorized"))),
+                repository, meterRegistry);
 
         OrderPullService.PullSummary summary = failing.pullAndPersist();
 
         assertFalse(summary.success());
         assertEquals(0, summary.created());
         assertEquals("401 Unauthorized", summary.errorMsg());
+        assertFalse(summary.degraded(), "平台明确返回的业务失败不算降级");
+        verify(repository, never()).save(any(OrderRecord.class));
+    }
+
+    /**
+     * P1-2 验收（单元层）：降级结果必须被如实透出且不写库。
+     *
+     * <p>降级结果由 {@link PlatformPullGateway} 的降级回退合成
+     * （重试耗尽 / 熔断打开 / 舱壁拒绝），接口层据此返回 200 + degraded=true，而不是 500。
+     */
+    @Test
+    void degradedResultIsSurfacedAndDoesNotWriteToDatabase() {
+        OrderPullService degradedService = new OrderPullService(
+                new PlatformPullGateway(new StubStrategy(OrderPullResult.degraded(
+                        "Amazon-Mock", "平台调用失败已降级（CallNotPermittedException）"))),
+                repository, meterRegistry);
+
+        OrderPullService.PullSummary summary = degradedService.pullAndPersist();
+
+        assertFalse(summary.success());
+        assertTrue(summary.degraded(), "降级标识必须透出，供上游与监控区分处理");
+        assertEquals("Amazon-Mock", summary.platform());
+        assertEquals(0, summary.created());
         verify(repository, never()).save(any(OrderRecord.class));
     }
 
@@ -165,5 +197,55 @@ class OrderPullServiceTest {
                 .filter(r -> "AMZ-1002".equals(r.getOrderId()))
                 .findFirst()
                 .orElseThrow(() -> new AssertionError("未捕获到 AMZ-1002 的保存调用"));
+    }
+
+    // ---------------- P1-1：可观测性（指标真实递增） ----------------
+
+    @Test
+    @DisplayName("P1-1：成功拉取记 outcome=success，并按 created/updated/flagged 分项计数")
+    void successOutcomeAndOrderCountersAreRecorded() {
+        lenient().when(repository.findByOrderId(anyString())).thenReturn(Optional.empty());
+        lenient().when(repository.save(any(OrderRecord.class))).thenAnswer(inv -> inv.getArgument(0));
+
+        service.pullAndPersist();
+
+        assertEquals(1.0, requestCounter("Amazon-Mock", "success"), 1e-9);
+        assertEquals(3.0, orderCounter("Amazon-Mock", "created"), 1e-9);
+        assertEquals(1.0, orderCounter("Amazon-Mock", "flagged"), 1e-9);
+        assertNull(meterRegistry.find(OrderPullService.METRIC_PULL_ORDERS)
+                        .tags("platform", "Amazon-Mock", "result", "updated").counter(),
+                "为 0 的计数不应预先创建时间序列（否则重启后满地是 0）");
+    }
+
+    @Test
+    @DisplayName("P1-1：降级与平台业务失败分别记为 degraded / failed —— 监控可据此区分自家故障与平台故障")
+    void degradedAndFailedOutcomesAreTaggedDifferently() {
+        OrderPullService degradedService = new OrderPullService(
+                new PlatformPullGateway(new StubStrategy(OrderPullResult.degraded("Amazon", "熔断已打开"))),
+                repository, meterRegistry);
+        OrderPullService failingService = new OrderPullService(
+                new PlatformPullGateway(new StubStrategy(
+                        new OrderPullResult("Amazon", List.of(), false, "401 Unauthorized"))),
+                repository, meterRegistry);
+
+        degradedService.pullAndPersist();
+        failingService.pullAndPersist();
+
+        assertEquals(1.0, requestCounter("Amazon", "degraded"), 1e-9);
+        assertEquals(1.0, requestCounter("Amazon", "failed"), 1e-9);
+        assertNull(meterRegistry.find(OrderPullService.METRIC_PULL_REQUESTS)
+                .tags("platform", "Amazon", "outcome", "success").counter());
+    }
+
+    /** 读指定平台/结局的计数值（不存在则抛 MeterNotFoundException）。 */
+    private double requestCounter(String platform, String outcome) {
+        return meterRegistry.get(OrderPullService.METRIC_PULL_REQUESTS)
+                .tags("platform", platform, "outcome", outcome).counter().count();
+    }
+
+    /** 读指定平台/条目结果的计数值。 */
+    private double orderCounter(String platform, String result) {
+        return meterRegistry.get(OrderPullService.METRIC_PULL_ORDERS)
+                .tags("platform", platform, "result", result).counter().count();
     }
 }

@@ -27,7 +27,46 @@ management:
   endpoints:
     web:
       exposure:
-        include: health,info
+        # P1-2：暴露熔断器状态/事件端点，便于端到端断言「熔断已打开」
+        # P1-1：加上 Prometheus 抓取端点与指标清单
+        include: health,info,circuitbreakers,circuitbreakerevents,prometheus,metrics
+  metrics:
+    tags:
+      application: ${spring.application.name}
+    distribution:
+      percentiles-histogram:
+        http.server.requests: true
+
+# P1-2：平台调用容错（注解叠加顺序：Retry -> CircuitBreaker -> Bulkhead）
+resilience4j:
+  retry:
+    instances:
+      platformPull:
+        max-attempts: 3                # 1 次原始调用 + 2 次重试
+        wait-duration: 200ms
+        enable-exponential-backoff: true
+        exponential-backoff-multiplier: 2
+        # 只对「平台不可用」重试；熔断短路异常（CallNotPermittedException）不重试，
+        # 否则熔断打开后还会白跑 3 次（延迟放大且无意义）
+        retry-exceptions:
+          - com.aslp.order.strategy.PlatformUnavailableException
+  circuitbreaker:
+    instances:
+      platformPull:
+        sliding-window-type: COUNT_BASED
+        sliding-window-size: 5
+        minimum-number-of-calls: 3     # 至少 3 次调用才统计，避免冷启动误熔断
+        failure-rate-threshold: 50
+        wait-duration-in-open-state: 3s # 演示值：便于验证「熔断->半开->恢复」；生产建议 30s+
+        permitted-number-of-calls-in-half-open-state: 2
+        automatic-transition-from-open-to-half-open-enabled: true
+        # 不注册 health indicator：避免熔断打开时 /actuator/health 变 DOWN（容器 HEALTHCHECK 依赖它）
+        register-health-indicator: false
+  bulkhead:
+    instances:
+      platformPull:
+        max-concurrent-calls: 4        # 舱壁：平台调用最多 4 并发，保护本服务线程池
+        max-wait-duration: 200ms
 
 aslp:
   order:

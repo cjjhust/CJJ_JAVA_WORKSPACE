@@ -1,7 +1,7 @@
 # Smart Logistics Platform (ASLP) — 海外仓智能物流系统
 
-> 最后更新：2026-09-16 ｜ 版本 `1.0.0-SNAPSHOT`
-> 状态：**M1–M4 全部交付 + P0 基线补齐（P0-1～P0-5）；`mvn clean package -T 1C` 全绿（33 测试），容器全量验证 10/10 healthy + 端到端冒烟 32/32 通过**
+> 最后更新：2026-09-17 ｜ 版本 `1.0.0-SNAPSHOT`
+> 状态：**M1–M4 全部交付 + P0 基线补齐（P0-1～P0-5）+ P1-2 限流与容错 + P1-2b VRP 引擎修复 + P1-1 可观测性（Micrometer / Prometheus / Grafana，含业务指标）；`mvn clean package -T 1C` 全绿（117 个单测全部通过，0 跳过），容器全量验证 12/12 healthy + 端到端冒烟 46/46 通过**
 > 包根：`com.aslp.*`（已脱敏，详见 §12） ｜ 构建：Maven 3.9+ “高铁模式”
 
 ---
@@ -30,6 +30,7 @@
 | 数据 | PostgreSQL 16 + Hibernate 6.5 + Redisson 3.27（分布式锁） |
 | 消息 / 缓存 | Redis 7 + Apache Kafka 7.6.0（Confluent，ZooKeeper 模式） |
 | 算法 | jsprit 1.8（VRP） |
+| 可观测性 | Micrometer + Prometheus 注册表（每服务 `/actuator/prometheus`）+ Prometheus 2.54 + Grafana 11.3（数据源与看板以文件版本化管理） |
 | 构建 | **Maven 3.9+（“高铁模式” `-T 1C` 并行编译）** |
 | 测试 | JUnit 5 + Spring Boot Test + Mockito |
 | 容器 | Docker Compose（容器名统一 `aslp_*`，网络 `aslp_net`） |
@@ -76,7 +77,7 @@ bash scripts/smoke-test.sh
 ### 3.3 方式 B：容器全量启动（推荐验证集成）
 
 ```bash
-# 一键：构建 6 个镜像 → 启动基础设施与全部服务 → 等 healthy → 跑 30 项断言
+# 一键：构建 6 个服务镜像 → 启动基础设施 + 6 服务 + Prometheus + Grafana → 等 healthy → 跑 46 项断言
 bash scripts/container-verify.sh
 
 # 镜像已存在时跳过构建
@@ -102,8 +103,10 @@ docker compose down               # 停止（不加 -v 保留数据卷）
 | `route-service` | 8083 | `/api/routes/**`（兼容 `/api/route/**`） | VRP + 运费 + 追踪 |
 | `auth-service` | 8084 | `/api/auth/**` | JWT 签发（RBAC） |
 | `report-service` | 8085 | `/api/reports/**` | ECharts 看板数据 |
+| `aslp_prometheus` | 9090 | —（直连） | P1-1 指标存储：抓取各服务 `/actuator/prometheus`，保留 7 天 |
+| `aslp_grafana` | 3000 | —（直连） | P1-1 看板：浏览器直接打开 `http://localhost:3000`（演示环境已开匿名只读） |
 
-每服务均暴露 `GET /actuator/health`。
+每服务均暴露 `GET /actuator/health`；P1-1 起均额外暴露 `GET /actuator/prometheus`（Prometheus 文本格式指标）。
 
 ---
 
@@ -148,7 +151,22 @@ curl "http://localhost:8080/bff/orders/search?status=SHIPPED&page=1&size=10&ware
 
 # ── M3 路径优化 / M1 报表 ──────────────────────────────
 curl -X POST "http://localhost:8080/api/routes/optimize"
+# ↑ 不带 body = 内置演示问题（Bruchsal 总仓 → Karlsruhe/Frankfurt/Düsseldorf/Mönchengladbach）
+# 带 body = 真实入参（depot + vehicles + deliveries；可选 speedKmh / maxIterations）
+curl -X POST "http://localhost:8080/api/routes/optimize" -H 'Content-Type: application/json' -d '{
+  "depot":{"id":"Bruchsal-总仓","lat":49.1243,"lon":8.5987},
+  "vehicles":[{"id":"V-01","capacity":20},{"id":"V-02","capacity":20}],
+  "deliveries":[{"id":"D-01","name":"Karlsruhe","lat":49.0069,"lon":8.4037,"demand":3}]
+}'
 curl http://localhost:8080/api/reports/dashboard
+
+# ── M5 可观测性（P1-1）───────────────
+# 单服务指标（Prometheus 文本格式；含 JVM / HTTP / 业务指标）
+curl http://localhost:8081/actuator/prometheus | head -30
+# Prometheus 界面（抓取目标 / PromQL 查询）
+open http://localhost:9090/targets
+# Grafana 看板（演示环境已开匿名只读；admin 密码默认 aslp-admin）
+open http://localhost:3000/d/aslp-overview
 ```
 
 ---
@@ -163,8 +181,13 @@ smart-logistics-platform/
 ├── docker-compose.yml             # PG16 / Redis7 / ZooKeeper+Kafka7.6 / 6 个 Java 服务
 ├── .vscode/settings.json          # 关闭 JDT 自动构建，避免与 Maven 抢占 target/classes
 ├── scripts/
-│   ├── smoke-test.sh              # 端到端冒烟测试 32 项断言（支持 --external 打外部服务）
+│   ├── smoke-test.sh              # 端到端冒烟测试 46 项断言（支持 --external 打外部服务）
 │   └── container-verify.sh        # P0-3 容器全量验证：构建 → 启动 → healthy → 断言
+├── monitoring/                    # P1-1 可观测性（全部以文件版本化，容器启动即加载）
+│   ├── prometheus/prometheus.yml  # 抓取配置（6 个服务的 /actuator/prometheus）
+│   └── grafana/
+│       ├── provisioning/          # 数据源（uid=aslp-prometheus）与看板加载器
+│       └── dashboards/*.json      # ASLP 总览看板（9 个面板）
 ├── test-data/mock-test-data.json  # Amazon/eBay 订单、库存预警、VRP、DHL/DPD 轨迹
 ├── gateway/                       # Spring Cloud Gateway + BFF + 安全配置
 │   └── src/main/java/com/aslp/gateway/
@@ -179,7 +202,7 @@ smart-logistics-platform/
     │   │                          #        + statemachine(按订单隔离) + strategy(策略模式) + task
     │   └── src/main/resources/db/migration/order/              # P0-4：V1 建表
     ├── report-service/            # M1 报表：ECharts 数据源
-    └── route-service/             # M3 路由：engine(运费规则) + service(VRP/追踪)
+    └── route-service/             # M3 路由：engine(运费规则 + VRP 成本模型/问题装配) + service(VRP 求解/追踪) + dto(求解入参/出参)
 ```
 
 > **Java 包根统一为 `com.aslp.*`**，不含任何具体主体标识（详见 §12 命名与脱敏约定）。
@@ -202,9 +225,15 @@ smart-logistics-platform/
 | **分布式锁** | `inventory-service` `InventoryLockService` | Redisson `RLock` key=`inventory:lock:{sku}:{warehouse}`，等待 2s / 持有 10s 防死锁；配合 `@Version` 乐观锁 |
 | **乐观锁** | `InventoryItem.version` | JPA `@Version`，防并发覆盖（种子数据必须写入 `version = 0`） |
 | **规则引擎** | `route-service` `FreightRule` → `EuropeDhlRule` | 基础费 + 距离×0.12 + 重量×0.35，DE 区基础费 5.0 / 其他 8.0 |
-| **VRP 优化** | `VrpRouteService`（jsprit） | `VehicleRoutingProblem` + `SearchStrategyManager` 求解 |
-| **BFF 聚合** | `BffOrderController` | 多条件分页 + `@NotBlank`/`@Min` 校验参数对象 |
+| **VRP 优化** | `route-service` `VrpRouteService` + `VrpProblemFactory`（jsprit 1.8） | 用官方高层入口 `Jsprit.Builder` 装配算法（**不能裸 `new SearchStrategyManager()`**，那是空策略注册表，见 §9 #27）；问题侧绑定 `HaversineCostModel`（**真实 km**，不用 jsprit 默认的「坐标单位欧氏距离」）；固定随机种子保证结果可复现；出参 `VrpPlan` 给出逐车路线、停靠顺序、里程、载重、未指派作业；无解时返回 200 + `feasible:false` 而非 500 |
+| **BFF 聚合** | `BffOrderController` | 多条件分页 + `@NotBlank`/`@Min` 校验参数对象；筛选项按需回显（不传的键不出现） |
+| **网关限流（P1-2）** | `gateway` `RateLimitConfig` + `RequestRateLimiter` | Redis 令牌桶（`RedisRateLimiter`）。**按需挂路由，不用 default-filters 全局限流**：`POST /api/orders/pull` 用户维度 1 次/秒（对应 M1「平台 API 严格限流」）、`/api/auth/**` IP 维度 10 次/秒（登录前无用户身份）。key 带 `user:` / `ip:` 前缀—— **SCG 的令牌桶 key 不含 routeId**（`getKeys(String)` 只收解析器输出），不隔离就会与其它路由共用桶；匿名回落 IP，**绝不返回空 key**（空 key 会被框架 403）。超限返回 **429** |
+| **容错与降级（P1-2）** | `order-service` `PlatformPullGateway` | Resilience4j 注解叠加顺序 **Retry -> CircuitBreaker -> Bulkhead**；回退方法挂**最外层 Retry** 上（挂到 CB 上会被内层吞掉异常，导致重试永不触发）；任何失败合成 `degraded=true` 结果 → 接口返回 **200 降级响应而非 500**；熔断状态可经 `/actuator/circuitbreakers` 查证 |
+| **故障演练（P1-2）** | `PlatformFailureSwitch` + `POST /api/orders/mock/failure-mode` | 可控故障注入（仅 Mock 策略读取，网关 docker 链路限 ADMIN），用于端到端证明「连续失败 -> 熔断打开 -> 降级响应 -> 自动恢复」 |
 | **VPN 安全接入** | `VpnSecurityConfig` | WebFlux `ServerHttpSecurity`；dev 放行 / docker 强制 JWT + 角色（`/bff/orders/search` 需 `USER`，`POST /api/inventory/**` 需 `ADMIN`） |
+| **可观测性（P1-1）** | 每服务 `micrometer-registry-prometheus` + `management.metrics.tags.application` | 指标统一带 `application` 标签（Prometheus 侧可直接按服务聚合）；`/actuator/prometheus` 暴露抓取端点；`percentiles-histogram` 对 `http.server.requests` / `spring.cloud.gateway.requests` / `aslp.vrp.solve` 开启，使 P95 可算。见 §7 与 §9 #30/#31 |
+| **业务指标（P1-1）** | `OrderPullService` / `VrpRouteService` / `InventoryLockService` | 不只暴露 JVM/HTTP：订单拉取结局（success/failed/degraded × 平台）、VRP 求解耗时与里程、库存锁操作结果（applied / rejected_balance / rejected_lock / rejected_invalid_qty）—— 每个标签都能对应一个处置动作 |
+| **监控栈（P1-1）** | `monitoring/` + compose 的 `aslp_prometheus` / `aslp_grafana` | 抓取配置、数据源、看板均以文件版本化（不靠手工点击）；看板 uid 固定为 `aslp-overview`，Prometheus 保留 7 天 |
 | **JWT 签发** | `auth-service` `JwtTokenService` | JJWT 0.12.5 HS384，含 `roles` / `scope` 声明，TTL 可配 |
 | **定时任务** | `OrderSyncTask`（5 分钟，容器启用）、`InventoryWarningTask`（60s）、`DatabaseBackupTask`（每日 02:00） | 订单流水线式自动导入；安全库存预警 + 补货邮件；`pg_dump` 参数化并可开关 |
 
@@ -217,6 +246,8 @@ smart-logistics-platform/
 | PostgreSQL | `localhost:5432/aslp`，`aslp` / `aslp123` | `aslp_postgres:5432/aslp`，同上 |
 | Redis 连接 | `spring.data.redis.host=localhost` / `port=6379` | `spring.data.redis.host=aslp_redis` / `port=6379`（**必须**写 `spring.data.redis.*`；`redisson.singleServerConfig.*` 不被 starter 绑定，会被静默忽略并回落 localhost） |
 | 网关下游 URI | `http://localhost:8081..8085` | `http://aslp-order-service:8081` 等**连字符网络别名**（下划线主机名非法，见 §9 #21） |
+| 网关限流令牌桶（P1-2） | `spring.data.redis=localhost:6379`；`/api/orders/pull` 1 次/秒（用户维度）/ `/api/auth/**` 10 次/秒（IP 维度） | 同上但 Redis 指向 `aslp_redis`；不走 `default-filters` 全局限流（见 §9 #26） |
+| 平台调用容错（P1-2） | `resilience4j.*`：重试 3 次（指数退避 200ms×2）/ 熔断 50% 阈值、窗口 5、最少 3 次调用 / 舱壁 4 并发 | 同上（两个 profile 配置一致，仅注释差异） |
 | Schema 管理 | Flyway（`db/migration/{order,inventory}`），`ddl-auto=validate` | 同上 |
 | Flyway 历史表 | `flyway_schema_history_order` / `flyway_schema_history_inventory` | 同上 |
 | JWT 密钥 | `aslp.jwt.secret`（auth-service 签发用） | `ASLP_JWT_SECRET` 注入，**gateway 与 auth-service 必须一致** |
@@ -224,17 +255,20 @@ smart-logistics-platform/
 | 订单定时同步 | `aslp.order.sync.enabled=false`（本地关闭） | `enabled=true`，cron `0 */5 * * * *` |
 | 数据库备份 | `aslp.backup.enabled=false` | `enabled=true`，host=`aslp_postgres` |
 | 邮件健康探测 | `management.health.mail.enabled=false` | 同上（无 SMTP，避免整服务被判 DOWN） |
+| 指标暴露与抓取（P1-1） | `management.endpoints.web.exposure.include` 含 `prometheus,metrics`；`management.metrics.tags.application=${spring.application.name}` | **docker profile 必须同时写**：profile 里的 `include` 会整体覆盖基础 profile，漏写就抓不到（已踩过）。Prometheus 抓取目标用连字符别名（下划线主机名会让 Tomcat 返回 400，见 §9 #30） |
+| 监控栈（P1-1） | `aslp_prometheus:9090`（保留 7 天）/ `aslp_grafana:3000`（匿名只读） | Grafana 管理密码经 `GF_SECURITY_ADMIN_PASSWORD` 注入（默认 `aslp-admin`，仅演示） |
 
 > 生产部署前必须通过 `ASLP_JWT_SECRET` 注入强随机密钥，并替换 compose 中的 `POSTGRES_PASSWORD`。
 
 ---
 
-## 8. 验证清单（2026-09-16 实测）
+## 8. 验证清单（2026-09-17 实测）
 
 - [x] `mvn clean package -T 1C` — **BUILD SUCCESS**，6 个模块全部产出可执行 fat jar
-- [x] 单元测试 **33 个全部通过**（gateway 3 / order 14 / inventory 12 / route 2 / report 1 / auth 1）
-- [x] `bash scripts/container-verify.sh` — **EXIT=0**：构建 6 镜像 → 启动 → **10/10 容器 healthy** → 端到端断言 **32/32 通过**
-- [x] `bash scripts/smoke-test.sh` — **32/32 通过**（6 服务健康检查 + 4 条网关路由转发 + 业务链路 + JWT 鉴权 + P0-5 库存查询/释放闭环）
+- [x] 单元测试 **117 个全部通过（0 跳过、0 失败）**：gateway 9 / order 31 / inventory 23 / route 48 / auth 5 / report 1
+- [x] `bash scripts/container-verify.sh`（先 `docker compose down -v` 冷启动）— **EXIT=0**：构建 6 个服务镜像 → 启动 → **12/12 容器就绪**（含 Prometheus / Grafana）→ 端到端断言 **46/46 通过**
+- [x] **VRP 引擎（P1-2b）**：求解演示问题得 1 条路线 / 4 个停靠点 / 615.1 km；单作业往返 Bruchsal→Karlsruhe 精确等于 **38.6 km**（几何锁定，同时证明单位是 km 而非「度」）；运力不足返回 200 + `feasible:false` + 未指派作业列表；缺 `deliveries` 返回 400
+- [x] **可观测性（P1-1）**：`/actuator/prometheus` 输出约 200KB 指标（含 `application` 标签与业务指标）；Prometheus **7/7 抓取目标 healthy**（6 业务服务 + 自身）；`aslp_vrp_distance_count` 等业务指标可从 TSDB 查到；Grafana `database ok` 且看板 `aslp-overview` 已自动加载；P95 经 `histogram_quantile` 实测可得（如 route-service 0.063s）
 - [x] Flyway 迁移：`flyway_schema_history_order` / `flyway_schema_history_inventory` + `orders` / `inventory` 四表均由迁移脚本创建，`ddl-auto=validate` 校验通过
 - [x] 订单幂等导入：重复 `POST /api/orders/pull` 只更新不新增
 - [x] 状态机按订单号隔离：A 订单推进不影响 B 订单
@@ -243,7 +277,7 @@ smart-logistics-platform/
 
 ---
 
-## 9. 已修复的阻塞性问题（累计 24 项）
+## 9. 已修复的阻塞性问题（累计 34 项）
 
 | # | 问题 | 根因 | 修复 |
 |---|---|---|---|
@@ -271,6 +305,16 @@ smart-logistics-platform/
 | 22 | **容器内 inventory 连不上 Redis**：Redisson 报 `Connection refused: localhost/127.0.0.1:6379` | `redisson.singleServerConfig.address` **不会被绑定**：`redisson-spring-boot-starter` 只通过 `@EnableConfigurationProperties` 绑定 `spring.data.redis.*`（`RedisProperties`）与 `spring.redis.redisson.{config,file}`（`RedissonProperties`）→ 属性被静默忽略、回落默认 `localhost:6379`；本地开发因 compose 映射了 6379 端口而“碰巧”可用 | 两个 profile 均改用 `spring.data.redis.host/port`（docker = `aslp_redis`，本地 = `localhost`），删除死配置。原 `connectionMinimumIdleSize: 2` 同样从未生效，本次不启用（保持 starter 默认值） |
 | 23 | BFF `GET /bff/orders/search?status=PAID`（**缺 `warehouseCode`**）返回 **HTTP 500** | `BffOrderController.search` 用 `Map.of(...)` 回显可选参数，而 `Map.of` **拒绝 null 值**，缺省筛选项即抛 `NullPointerException` | 改为按需装配 `LinkedHashMap`，仅回显实际传入的筛选项；补回归测试 `bffSearchToleratesOmittedOptionalParameters` |
 | 24 | **释放锁定库存可凭空增加可用库存**（P0-5 实现时发现） | 原 `releaseLockedInventory` 不校验「释放量 ≤ 当前锁定量」，用 `Math.max(0, ...)` 掩盖了越界；扣减/释放均未拦负数；释放路径未加分布式锁，与扣减并发时可互相覆盖 | 越界/非正数一律拒绝；释放与扣减共用 `inventory:lock:{sku}:{warehouse}`；方法返回 boolean 供接口透出 `success` |
+| 25 | **网关启动失败**（P1-2 实现时引入并修复）：`required a single bean, but 2 were found` | `RateLimitConfig` 注入多个 `KeyResolver`，而 `GatewayAutoConfiguration#requestRateLimiterGatewayFilterFactory` 需要唯一 bean 作默认值 | 主解析器标 `@Primary`（`userKeyResolver`），并保留路由内 SpEL 显式引用的能力 |
+| 26 | **全局限流拖垒正常流量**（P1-2 实测发现）：突发后常规请求成片 **429** | SCG 的 `RedisRateLimiter` 令牌桶 key **不含 routeId**（已核对其 4.1.5 字节码：`getKeys(String)` 只收解析器输出）→ 不同阈值的路由会共用令牌桶；且 `default-filters` 全局限流会无差别节流端到端脚本等正常流量 | 改为**按需路由级限流**（仅 `/api/orders/pull` 与 `/api/auth/**`），并为两个维度加 `user:` / `ip:` 前缀隔离令牌桶 |
+| 27 | **M3 的 VRP 引擎实际不可用**（单测生成任务发现，**P1-2b 已修复**）：`IllegalStateException: no search-strategy found` | 两层问题叠加：①`VrpRouteService` 用 `new SearchStrategyManager()` 作策略注册表，但**未注册任何搜索策略**，`searchSolutions()` 必抛异常（已用独立程序复现确认）；②即便算法能跑，jsprit 默认的欧氏距离在经纬度上**单位是「度」**（Bruchsal→Karlsruhe = 0.19），而内置 `GreatCircleCosts` 的经纬度顺序又与项目约定**相反**（同一条路线会被算成 11.2 km，真值 19.3 km）。因 `RouteController.optimize()` 当时是桩方法、未调用该服务，端到端一直未暴露 | ①改用官方高层入口 `Jsprit.Builder.buildAlgorithm()`（一次性装配初始解、搜索策略、状态约束与迭代上限）；②新增 `HaversineCostModel` 自行实现 km 级成本（约定 `Location.newInstance(纬度, 经度)`）并配 `GeoDistance` 单测把约定钉死；③`VrpProblemFactory` 集中校验入参（400 而非静默 truncate/回落 0）；④`RouteController.optimize()` 接入真实引擎并支持省略 body（内置演示问题）；⑤新增 25 个单测（含 8 个“旧写法必错”回归证据） |
+| 28 | **限流端到端断言时序脆弱**（P1-2b 验证时实测到）：`POST /api/orders/pull` 连续第二次拿到 **200** 而非 429 | 断言写成「串行紧接第二次」，隐含要求「首次 `/pull` 在 1 秒内返回」；容器刚就绪时首次调用含 JIT 与首次访问 DB，耗时可能超过 1 秒 → 令牌桶已按 1/s 补充 → 第二次合法放行，断言假失败 | 改为**并发突发**断言（同瞬间并发 4 次，burst=1 时必然有请求被限），并在注释里写明原因；实测 `429 429 429 200`（1 次拿到令牌、3 次被拒） |
+| 29 | 冒烟脚本「期望包含 `["A","B"]`」的断言假失败 | 助手函数用普通 `grep`，而 `[` `]` 在正则里是字符集（bracket expression），JSON 数组内容按字面量永远匹配不上 | 新增的 `check_post_json` 改用 `grep -qF`（固定字符串），并在注释里说明原因 |
+| 30 | **Prometheus 抓不到 5 个服务的指标**：`lastError = server returned HTTP status 400`（响应体为空，应用日志也没记录） | 与 #21 同源但**不在同一层**：抓取目标写了容器名 `aslp_order_service`，而 Host 头里的下划线对 RFC 1123 主机名非法，**Tomcat 10.1 在进入应用前就直接返回 400**（网关是 Netty/WebFlux 不校验 Host，所以只有它没报错） | `prometheus.yml` 的 targets 改用 compose 里已声明的连字符别名 `aslp-order-service:8081`（网关仍可用容器名） |
+| 31 | 抓取网关报 **401**、抓取 auth-service 报 **403** | 观测端点没进安全链的白名单：网关是 `anyExchange().authenticated()` → 401；auth-service 关了 httpBasic 所以无认证机制可用 → **403 而不是 401**（容易误判成权限配置问题） | 两处安全链均放行 `/actuator/prometheus`，并在代码注释里写明权衡：指标不含业务数据，但生产应改用独立 management 端口 + 来源限制 |
+| 32 | **大响应体的断言恒定假失败**：`/actuator/prometheus`（200KB）明明含目标指标，断言却报「未暴露」 | `set -o pipefail` + `grep -q`：**grep 命中即退出**，写端（echo，200KB）收到 SIGPIPE，管道整体返回 **141（非零）** → `if` 走进 else 分支。实测：同一字符串 `case` 匹配成功、`echo|grep -qF` 退出码 141，here-string 为 0。小响应体因写端早已写完而不暴露，故具有欺骗性 | 断言统一改为 **here-string**：`grep -q -- "${expect}" <<< "${body}"`（无写端进程，退出码即真实匹配结果）；三个断言助手一并修正 |
+| 33 | **冷启动时监控断言失败**（暖机时却通过） | 断言与 Prometheus 抓取周期赛跑：`scrape_interval=15s`，指标刚产生时还没被 scrape，立刻查 TSDB 必然空（与 #28 同源的时序脆弱） | 两项抓取相关断言改为**有界轮询**（最多 ~48s，命中即停），而非一次性断言 |
+| 34 | **所有 Java 服务启动失败**：`FileSystemException: /tmp/tomcat.8081.xxx: No space left on device` | Docker 虚拟机根分区 100% 满（58.4G 用满，0 可用）—— 反复构建镜像累积了 66 个悬空镜像 + 14.5GB 构建缓存；错误发生在 Tomcat 建临时目录阶段，看起来像应用配置问题 | 只清理**悬空镜像与构建缓存**（实测腾出 ~15GB），刻意不碰数据卷与网络（本机还跑着其他项目，卷里有 13GB 数据） |
 
 ---
 
@@ -279,6 +323,9 @@ smart-logistics-platform/
 ### 限制
 - **注册中心缺失**：网关使用直连 URI（`lb://` 已移除）。引入 Eureka/Nacos 后应改回服务发现 + `lb://`。
 - **MinIO 未启用**：镜像源在部分网络环境不可达，`docker-compose.yml` 中默认注释。
+- **无日志聚合**：P1-1 已完成指标栈（Micrometer + Prometheus + Grafana），但 Loki/Promtail 日志聚合尚未启用（镜像需另外拉取），归入 P1-1b。
+- **观测端点未鉴权**：`/actuator/prometheus` 在 docker profile 下放行（网关与 auth-service 均放行），仅靠网络隔离。生产建议改用独立 management 端口 + 来源限制/双向 TLS。
+- **Grafana 为匿名只读演示态**：`GF_AUTH_ANONYMOUS_ENABLED=true`，admin 密码为默认值；生产必须关掉匿名并接入统一认证。
 - **无邮件服务器**：补货邮件走 `localhost:1025`，失败仅告警不阻塞（已关闭健康探测）。
 - **安全演示态**：`auth-service` 未接入用户表，按用户名推导角色；JWT 为对称密钥，网关侧 JWKS 端点为占位。
 - **未接入真实平台**：Amazon SP-API / eBay API 为策略骨架 + Mock 实现。
@@ -287,14 +334,16 @@ smart-logistics-platform/
 ### 后续路线（详见 `todo.md`）
 1. ~~P0-1 `order-service` 持久化~~ ✅ **本轮完成**
 2. ~~P0-2 数据库初始化脚本~~ ✅ **本轮完成**
-3. ~~P0-3 全量容器验证~~ ✅ **本轮完成**（`container-verify.sh` EXIT=0，10/10 容器 healthy，30/30 断言）
+3. ~~P0-3 全量容器验证~~ ✅ **本轮完成**（`container-verify.sh` EXIT=0，10/10 容器 healthy；断言数随后续轮次递增，当前 **41 项**）
 4. ~~P0-4 Flyway 版本化迁移~~ ✅ **本轮完成**（`db/migration/{order,inventory}` + `ddl-auto=validate`，替换 `ddl-auto: update`）
 5. ~~P0-5 `inventory-service` 库存 CRUD~~ ✅ **本轮完成**（`GET /api/inventory/{sku}` + `POST /api/inventory/release`；扣减→查询→释放 闭环单测 12 个全绿）
-6. **P1 M5 可观测性**：Micrometer + Prometheus + Grafana + Loki。
-7. **P1 M5 限流熔断**：Resilience4j + Redis 令牌桶。
-8. **P2 M6 服务治理**：Eureka/Nacos + Spring Cloud Config，网关恢复 `lb://`。
-9. **P2 M6 异步解耦**：Kafka 订单异步流水线 + 死信队列。
-10. **P3 M7 生产化**：CI/CD、K8s 清单、SonarQube、Testcontainers 集成测试、安全基线。
+6. ~~**P1 M5 可观测性**：Micrometer + Prometheus + Grafana + Loki。~~ ✅ **已完成（P1-1，2026-09-17）**：Micrometer + Prometheus + Grafana（含业务指标与 9 面板看板）；Loki 日志聚合归入 P1-1b
+7. ~~**P1 M5 限流熔断**：Resilience4j + Redis 令牌桶。~~ ✅ **已完成（P1-2，2026-09-16）**
+8. **P1-1b 日志聚合**：Loki + Promtail（需拉取镜像），接入各服务 stdout 并关联 traceId
+9. **P1-3 追踪链路**：Micrometer Tracing + Zipkin（本地已有 `openzipkin/zipkin` 镜像，可直接用）
+10. **P2 M6 服务治理**：Eureka/Nacos + Spring Cloud Config，网关恢复 `lb://`。
+11. **P2 M6 异步解耦**：Kafka 订单异步流水线 + 死信队列。
+12. **P3 M7 生产化**：CI/CD、K8s 清单、SonarQube、Testcontainers 集成测试、安全基线。
 
 ---
 
@@ -313,6 +362,15 @@ smart-logistics-platform/
 | 网关启动报 `URISyntaxException: Expected scheme-specific part at index 5: http:` | 路由 URI 的主机名含下划线（如 `aslp_order_service`）—— Java 的 `java.net.URI` 无法表示。改用 compose 中的连字符别名（`aslp-order-service`），见 §7 |
 | 容器内服务报 Redis `Connection refused: localhost:6379` | 确认写的是 `spring.data.redis.*`（starter 不识别 `redisson.singleServerConfig.*`），见 §7 / §9 #22 |
 | `.DS_Store` 出现在 `git status` | macOS Finder 生成。已在**仓库根** `.gitignore` 忽略，并一次性执行 `git rm --cached .DS_Store` 取消跟踪 |
+| 接口突然成片返回 429 | 网关限流生效。确认是否命中受限路由（`POST /api/orders/pull` 1 次/秒、`/api/auth/**` 10 次/秒）；响应头 `X-RateLimit-*` 给出桶容量与剩余。验证限流请用**并发突发**而不是串行紧接两次（见 §9 #28） |
+| `POST /api/routes/optimize` 报 `no search-strategy found` | **已修复（P1-2b）**：原 `VrpRouteService` 用了空的 `SearchStrategyManager`，见 §9 #27。若重现，说明有人改回了裸构造写法——`VrpRouteServiceTest.bareSearchStrategyManagerStillFails` 是回归证据 |
+| `POST /api/routes/optimize` 返回 `feasible:false` / `无可行路线` | 运力不足：核对车辆 `capacity` 与作业 `demand`（jsprit 的容量维度是 `int`，小数会被拒绝）；回执的 `unassignedJobIds` 会列出未被指派的作业 |
+| `POST /api/routes/optimize` 返回 400 而不是解 | 入参校验未过（坐标必须成对且在范围内、容量/需求必须为正整数）。**不要用 0 代替“没传”**：0 是合法坐标也合法数值，会被当真 |
+| Prometheus 里某个服务 `health=down` 且报 **400** | Host 头含下划线（抓取目标写了容器名）；Tomcat 在进应用前就回 400，应用日志无记录。改用连字符别名，见 §9 #30 与 monitoring/prometheus/prometheus.yml |
+| Prometheus 里网关报 **401**、auth-service 报 **403** | 观测端点未进安全链白名单（403 而非 401 是因为该服务关了 httpBasic），见 §9 #31 |
+| 断言“明明有却报没有”（大响应体） | `set -o pipefail` 下 `echo "$body" \| grep -q` 会因 grep 提前退出而 SIGPIPE（退出码 141）→ 假失败。改用 here-string：`grep -qF -- "$needle" <<< "$body"`，见 §9 #32 |
+| 服务启动报 `/tmp/tomcat.xxxx: No space left on device` | Docker 虚拟机磁盘满（与业务无关）。`docker image prune -f` + `docker builder prune -f` 清理（**别加 `--volumes`**，本机还跑着其他项目的 13GB 数据卷），见 §9 #34 |
+| Grafana 看板面板全是 **No data** | 确认数据源 uid 仍为 `aslp-prometheus`（看板 JSON 按 uid 引用）；再确认该指标名真实存在：`curl localhost:9090/api/v1/label/__name__/values` |
 
 ---
 
@@ -363,7 +421,10 @@ CJJ_JAVA_WORKSPACE/            <- git 仓库根（.git 在这里）
 | `.gitignore` | 项目级忽略：`target/`、IDE、`.DS_Store`、日志；**特别注明不能写 `*.sql`**（会吞掉 Flyway 迁移脚本） |
 | `.vscode/settings.json` | `java.autobuild.enabled=false` —— 避免 JDT 语言服务器与 Maven 抢占 `target/classes` |
 | `scripts/container-verify.sh` | P0-3 容器全量验证：构建镜像 → 启动 → 等 healthy → 跑断言 |
-| `scripts/smoke-test.sh` | 端到端冒烟（32 项断言）；`--external` 可直接打已运行的容器 |
+| `scripts/smoke-test.sh` | 端到端冒烟（46 项断言）；`--external` 可直接打已运行的容器 |
+| `monitoring/prometheus/prometheus.yml` | P1-1 抓取配置；**targets 用连字符别名**（下划线主机名会被 Tomcat 判 400） |
+| `monitoring/grafana/provisioning/**` | 数据源（uid 固定 `aslp-prometheus`）与看板加载器；容器启动自动生效 |
+| `monitoring/grafana/dashboards/aslp-overview.json` | ASLP 总览看板（9 面板，PromQL 均已对照真实指标名验证） |
 | `test-data/mock-test-data.json` | 假数据：Amazon/eBay 订单、库存预警、VRP、DHL/DPD 轨迹 |
 | `readme.md` / `todo.md` | 架构与接口文档 / 按轮次增量记录的进度与缺陷台账 |
 
@@ -407,7 +468,20 @@ CJJ_JAVA_WORKSPACE/            <- git 仓库根（.git 在这里）
 | `service/ReplenishmentMailService.java` | 补货邮件（SMTP 不可用时仅告警，不阻塞主流程） |
 | `task/InventoryWarningTask.java` | 定时低库存预警，接入补货邮件 |
 
-**`services/route-service/`（M3，:8083）**：`engine/FreightRule` 接口 → `EuropeDhlRule`（首重/续重计费）+ `FreightEngine`（承运商规则选择）；`service/VrpRouteService`（jsprit 求解 VRP）、`service/TrackingService`（轨迹）；`controller/RouteController`
+**`services/route-service/`（M3，:8083）**
+
+| 文件 | 职责 |
+|---|---|
+| `engine/FreightRule.java` → `engine/EuropeDhlRule.java` | 运费规则接口与欧洲 DHL 实现（基础费 + 距离×0.12 + 重量×0.35） |
+| `engine/FreightEngine.java` | 按承运商选规则（DHL / DPD） |
+| `engine/GeoDistance.java` | Haversine 大圆距离（km）。**约定：第一个参数纬度、第二个经度**；与 jsprit 内置 `GreatCircleCosts` 相反，类注释里写明了原因 |
+| `engine/HaversineCostModel.java` | jsprit 成本模型：用真实 km 替代默认「坐标单位欧氏距离」，并把时间折算成小时 |
+| `engine/VrpProblemFactory.java` | **入参门面**：JSON → jsprit 问题 + 集中校验（坐标成对、容量/需求正整数、id 唯一、求解参数区间）；内置演示问题 |
+| `dto/OptimizeRequest.java` | 求解入参（record，字段用包装类型以区分“没传”与“传 0”） |
+| `dto/VrpPlan.java` | 求解出参：逐车路线、停靠顺序、里程(km)、载重、未指派作业（字段与 `mock-test-data.json` 的 `routeResults` 对齐） |
+| `service/VrpRouteService.java` | jsprit 求解与结果翻译（固定随机种子保证可复现） |
+| `service/TrackingService.java` | DHL/DPD 轨迹拉取（硬编码 `RestTemplate` + 真实端点，暂未单测） |
+| `controller/RouteController.java` | `/health`、`POST /optimize`（接入真实引擎；入参错误 400） |
 
 **`services/report-service/`（M1 报表，:8085）**：`controller/ReportController` —— ECharts 看板数据源
 
@@ -426,10 +500,23 @@ CJJ_JAVA_WORKSPACE/            <- git 仓库根（.git 在这里）
 | 类型 | 位置 | 特点 |
 |---|---|---|
 | 切片测试 `@WebMvcTest` | `*/controller/*Test.java` | 只加载 Web 层，`@MockBean` 掉服务与仓库，断言 HTTP 状态与 JSON |
-| 纯单元测试 | `*/service/*Test.java`、`*/statemachine/*Test.java` | Mockito 驱动，不启动 Spring；库存闭环测试用 Mock 的 `RLock` + 真实业务逻辑 |
-| 端到端断言 | `scripts/smoke-test.sh` | 经网关 8080 打真实服务，覆盖路由、鉴权与业务链路 |
+| 纯单元测试 | `*/service/*Test.java`、`*/engine/*Test.java`、`*/statemachine/*Test.java` | Mockito 驱动，不启动 Spring；库存闭环测试用 Mock 的 `RLock` + 真实业务逻辑；`GeoDistanceTest` / `HaversineCostModelTest` 用真实城市坐标把「纬度在前」的约定钉死 |
+| 端到端断言 | `scripts/smoke-test.sh` | 经网关 8080 打真实服务，覆盖路由、鉴权与业务链路；限流用并发突发断言（见 §9 #28），带 JSON body 的断言用 `grep -F`（见 §9 #29）；涉及监控的两项做**有界轮询**（见 §9 #33）；断言一律用 here-string 而非管道（见 §9 #32） |
 
-### 13.6 建议的阅读顺序
+### 13.6 可观测性怎么读（P1-1）
+
+四个层次，从上往下看：
+
+| 层次 | 看哪里 | 说明 |
+|---|---|---|
+| ① 应用埋点 | 各服务 `application.yml` 的 `management.*` + 代码里的 `MeterRegistry` | 配置只决定「暴露什么」；业务指标在 `OrderPullService` / `VrpRouteService` / `InventoryLockService` 中直接写入 |
+| ② 抓取 | `monitoring/prometheus/prometheus.yml` | 一个 job（`aslp-services`）扫 6 个服务；targets 必须是连字符别名（§9 #30） |
+| ③ 存储与查询 | `http://localhost:9090/targets`、`/graph` | 排查先看 targets 的 `health` 与 `lastError`，再看 PromQL |
+| ④ 展示 | `monitoring/grafana/**` → `http://localhost:3000/d/aslp-overview` | 数据源与看板都是文件版本化，改完 JSON 重启 `aslp_grafana` 生效 |
+
+**指标命名约定**：Micrometer 名 `aslp.order.pull.requests` → Prometheus 名 `aslp_order_pull_requests_total`（点转下划线、Counter 加 `_total`、Timer 加 `_seconds`）。在应用里断言用前者，在看板里用后者。
+
+### 13.7 建议的阅读顺序
 
 1. `docker-compose.yml` —— 先看系统长什么样、谁依赖谁
 2. `readme.md` §2 / §4 —— 技术栈与接口速查

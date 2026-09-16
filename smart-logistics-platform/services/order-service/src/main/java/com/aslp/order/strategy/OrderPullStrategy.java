@@ -5,6 +5,15 @@ package com.aslp.order.strategy;
  *
  * <p>把 Amazon / eBay 等平台「认证机制、报文格式、限流策略」的异构性封装在实现类内部，
  * 对外暴露统一的 {@link #pullOrders()}。无真实账号时切换到 Mock 实现，保证流水线可测。
+ *
+ * <p><b>容错契约（P1-2）</b>：实现类可以二选一 ——
+ * <ul>
+ *   <li>自行吞掉平台异常并写入 {@code errorMsg}（返回 success=false，保留原有行为）；或</li>
+ *   <li>抛出 {@link PlatformUnavailableException}（超时 / 429 / 5xx）——
+ *       {@link com.aslp.order.service.PlatformPullGateway} 会用 Resilience4j
+ *       做重试 + 舱壁 + 熔断，最终由降级回退合成 {@code degraded=true} 的结果，
+ *       保证上游接口不会因为平台故障而返回 500。</li>
+ * </ul>
  */
 public interface OrderPullStrategy {
 

@@ -46,6 +46,9 @@ FAIL=0
 # 注意：macOS 自带 bash 3.2 在 set -u 下展开空数组会报错，故使用 ${A[@]+"${A[@]}"} 惯用法。
 AUTH_ARGS=()
 
+# P1-1：Grafana 看板自动加载断言需要用 admin 认证（匿名只能看 Viewer 页面，读不到 /api/search）
+GRAFANA_ADMIN_PASSWORD="${GF_SECURITY_ADMIN_PASSWORD:-aslp-admin}"
+
 cleanup() {
     if [ "${EXTERNAL}" -eq 1 ]; then
         return 0
@@ -90,10 +93,15 @@ wait_http() {
     return 1
 }
 
+# 【重要】断言一律用 `grep -q -- "${expect}" <<< "${body}"`（here-string），
+# 不要写 `echo "${body}" | grep -q ...`：本脚本开了 set -o pipefail，
+# 而 grep -q 一旦命中就立即退出，写端（echo，200KB 响应体）会收到 SIGPIPE，
+# 管道整体返回 141（非零）→ 明明命中却走进 else 分支（小响应体因写完得快而不暴露）。
+# 实测：指标端点 200KB 旧写法恒为 141，here-string 为 0。
 check() {
     local label="$1" url="$2" expect="$3" body
     body="$(curl -fsS --max-time 5 ${AUTH_ARGS[@]+"${AUTH_ARGS[@]}"} "${url}" 2>/dev/null)"
-    if echo "${body}" | grep -q "${expect}"; then
+    if grep -q -- "${expect}" <<< "${body}"; then
         echo "  ✅ ${label}"
         PASS=$((PASS + 1))
     else
@@ -107,13 +115,63 @@ check() {
 check_post() {
     local label="$1" url="$2" expect="$3" body
     body="$(curl -fsS --max-time 15 -X POST ${AUTH_ARGS[@]+"${AUTH_ARGS[@]}"} "${url}" 2>/dev/null)"
-    if echo "${body}" | grep -q "${expect}"; then
+    if grep -q -- "${expect}" <<< "${body}"; then
         echo "  ✅ ${label}"
         PASS=$((PASS + 1))
     else
         echo "  ❌ ${label}"
         echo "     期望包含: ${expect}"
         echo "     实际返回: ${body:0:220}"
+        FAIL=$((FAIL + 1))
+    fi
+}
+
+# P1-2b：带 JSON body 的 POST 断言（VRP 求解需要真实入参，不能发空 body）。
+# 用 grep -F（固定字符串）而不是 grep：期望值里含 ["a","b"] 这类方括号，
+# 常规 grep 会把它当字符集（bracket expression），导致明明命中也判失败。
+check_post_json() {
+    local label="$1" url="$2" payload="$3" expect="$4" body
+    body="$(curl -fsS --max-time 30 -X POST -H 'Content-Type: application/json' \
+        ${AUTH_ARGS[@]+"${AUTH_ARGS[@]}"} -d "${payload}" "${url}" 2>/dev/null)"
+    if grep -qF -- "${expect}" <<< "${body}"; then
+        echo "  ✅ ${label}"
+        PASS=$((PASS + 1))
+    else
+        echo "  ❌ ${label}"
+        echo "     期望包含: ${expect}"
+        echo "     实际返回: ${body:0:220}"
+        FAIL=$((FAIL + 1))
+    fi
+}
+
+# P1-2b：带 JSON body 且「期望非 2xx」的断言（入参校验 400）。
+check_post_json_status() {
+    local label="$1" url="$2" payload="$3" expect="$4" code
+    code="$(curl -s -o /dev/null -w '%{http_code}' --max-time 10 -X POST \
+        -H 'Content-Type: application/json' \
+        ${AUTH_ARGS[@]+"${AUTH_ARGS[@]}"} -d "${payload}" "${url}" 2>/dev/null)"
+    if [ "${code}" = "${expect}" ]; then
+        echo "  ✅ ${label}（HTTP ${code}）"
+        PASS=$((PASS + 1))
+    else
+        echo "  ❌ ${label}"
+        echo "     期望状态码: ${expect}，实际: ${code}"
+        FAIL=$((FAIL + 1))
+    fi
+}
+
+# P1-2：断言 HTTP 状态码（限流 429 等「非 2xx 即预期」的场景）。
+# 不能复用 check/check_post —— 它们用 curl -f，非 2xx 直接失败拿不到响应体。
+check_status() {
+    local label="$1" url="$2" method="$3" expect="$4" code
+    code="$(curl -s -o /dev/null -w '%{http_code}' --max-time 10 -X "${method}" \
+        ${AUTH_ARGS[@]+"${AUTH_ARGS[@]}"} "${url}" 2>/dev/null)"
+    if [ "${code}" = "${expect}" ]; then
+        echo "  ✅ ${label}（HTTP ${code}）"
+        PASS=$((PASS + 1))
+    else
+        echo "  ❌ ${label}"
+        echo "     期望状态码: ${expect}，实际: ${code}"
         FAIL=$((FAIL + 1))
     fi
 }
@@ -196,6 +254,25 @@ echo "=== 5/5 业务链路验证 ==="
 echo "--- M1 订单统一接入流水线（P0-1：策略拉取 → DTO 标准化 → 幂等落库 → 异常打标）---"
 check_post "触发订单拉取        POST /api/orders/pull" \
     "http://localhost:8080/api/orders/pull" '"success":true'
+# P1-2：平台拉取接口限流（Redis 令牌桶：每用户 1 次/秒、burst 1）。
+#
+# 用「并发突发」而非「串行紧接第二次」来断言：令牌桶按时间补充，
+# 串行写法隐含要求「首个 /pull 在 1 秒内返回」，而容器刚就绪时首次调用（JIT + 首访问 DB）
+# 可能超过 1 秒 → 令牌已补充 → 第二次拿到 200，断言假失败（本次实测到 200 而非 429 即此原因）。
+# 并发 4 次落在同一瞬间，桶里只有 1 个令牌，必然至少 1 次 429 —— 这才真正验证了「burst 限流」。
+RATE_CODES="$(for _ in 1 2 3 4; do
+    curl -s -o /dev/null -w '%{http_code} ' --max-time 10 -X POST \
+        ${AUTH_ARGS[@]+"${AUTH_ARGS[@]}"} \
+        "http://localhost:8080/api/orders/pull" &
+done
+wait)"
+if echo "${RATE_CODES}" | grep -qF '429'; then
+    echo "  ✅ 限流生效（并发 4 次至少有 1 次 429）：${RATE_CODES}"
+    PASS=$((PASS + 1))
+else
+    echo "  ❌ 限流未生效（并发 4 次全部放行）：${RATE_CODES}"
+    FAIL=$((FAIL + 1))
+fi
 check "订单统计查询         GET  /api/orders/stats" \
     "http://localhost:8080/api/orders/stats" '"total":3'
 check "多条件分页（PAID）   GET  /api/orders?status=PAID" \
@@ -268,6 +345,125 @@ if [ "${AUTH_CODE}" = "200" ]; then
     PASS=$((PASS + 1))
 else
     echo "  ❌ 携带 JWT 访问失败（HTTP ${AUTH_CODE}）"
+    FAIL=$((FAIL + 1))
+fi
+
+echo "--- P1-2 容错：熔断 + 降级 + 自动恢复 ---"
+# 注意：/pull 有「1 次/秒」的令牌桶，故调用间隔 1.2s 避开限流（否则拿到的是 429 而非业务响应）
+post_quiet "http://localhost:8080/api/orders/mock/failure-mode?mode=ERROR"
+sleep 2.2
+# 注入故障后连续拉取：每次调用会重试 3 次，而每次重试都计入熔断统计窗口
+for _ in 1 2 3; do
+    post_quiet "http://localhost:8080/api/orders/pull"
+    sleep 1.2
+done
+# 验收：熔断打开后仍返回 200 + degraded=true（降级响应，而不是 500）
+check_post "平台故障返回降级响应  POST /api/orders/pull" \
+    "http://localhost:8080/api/orders/pull" '"degraded":true'
+check "熔断状态已打开       GET  :8081/actuator/circuitbreakers" \
+    "http://localhost:8081/actuator/circuitbreakers" '"state":"OPEN"'
+# 恢复：关闭故障开关 -> 等熔断自动转半开 -> 下一次调用应成功
+post_quiet "http://localhost:8080/api/orders/mock/failure-mode?mode=NONE"
+sleep 4
+check_post "熔断自动恢复（半开->成功）POST /api/orders/pull" \
+    "http://localhost:8080/api/orders/pull" '"success":true'
+
+echo "--- M3 路径优化（P1-2b：RouteController 已接入真实 jsprit 引擎）---"
+# 不带 body：走内置演示问题（Bruchsal 总仓 -> 4 个德国收货点，2 辆车）
+check_post "VRP 求解（演示入参）  POST /api/routes/optimize" \
+    "http://localhost:8080/api/routes/optimize" '"feasible":true'
+check_post "VRP 覆盖全部作业     POST /api/routes/optimize" \
+    "http://localhost:8080/api/routes/optimize" '"stopCount":4'
+# 单作业往返：Bruchsal -> Karlsruhe -> Bruchsal = 38.6 km（几何锁定）。
+# 这个数字同时证明三件事：引擎真在跑、距离单位是 km（旧实现是「度」= 0.2）、成本模型用的是大圆距离。
+check_post_json "VRP 里程为真实 km    POST /api/routes/optimize(自定义入参)" \
+    "http://localhost:8080/api/routes/optimize" \
+    '{"depot":{"id":"Bruchsal-总仓","lat":49.1243,"lon":8.5987},'\
+'"vehicles":[{"id":"V-01","capacity":10}],'\
+'"deliveries":[{"id":"SMOKE-D-1","name":"Karlsruhe","lat":49.0069,"lon":8.4037,"demand":2}]}' \
+    '"totalDistanceKm":38.6'
+# 运力不足：不报 500，而是 200 + 无可行路线 + 列出未指派作业
+check_post_json "VRP 无解降级响应    POST /api/routes/optimize(运力不足)" \
+    "http://localhost:8080/api/routes/optimize" \
+    '{"depot":{"id":"Bruchsal-总仓","lat":49.1243,"lon":8.5987},'\
+'"vehicles":[{"id":"V-01","capacity":1}],'\
+'"deliveries":[{"id":"SMOKE-D-BIG","name":"Karlsruhe","lat":49.0069,"lon":8.4037,"demand":50}]}' \
+    '"unassignedJobIds":["SMOKE-D-BIG"]'
+# 入参校验：缺 deliveries -> 400（不是 500，也不是静默当成演示问题）
+check_post_json_status "VRP 非法入参 400    POST /api/routes/optimize(缺 deliveries)" \
+    "http://localhost:8080/api/routes/optimize" \
+    '{"depot":{"id":"B","lat":49.1243,"lon":8.5987},"vehicles":[{"id":"V-01","capacity":10}]}' \
+    "400"
+
+echo "--- M5 可观测性（P1-1：Micrometer -> /actuator/prometheus -> Prometheus -> Grafana）---"
+# 1) 服务侧：Prometheus 抓取端点可用。这里直连 8081（不走网关），
+#    这样失败时能立即区分「应用没暴露指标」还是「网关/鉴权挡住了」。
+#    用 here-string 而非管道：本脚本开了 pipefail，而 grep -q 命中即退出会让写端 SIGPIPE，
+#    200KB 级的响应体必定假失败（实测旧写法 exit code = 141）。
+METRICS_BODY="$(curl -s --max-time 25 http://localhost:8081/actuator/prometheus 2>/dev/null)"
+if grep -qF -- 'aslp_order_pull_requests_total' <<< "${METRICS_BODY}"; then
+    echo "  ✅ 服务指标端点         GET  :8081/actuator/prometheus（$(( ${#METRICS_BODY} / 1024 ))KB，含业务指标）"
+    PASS=$((PASS + 1))
+else
+    echo "  ❌ 服务指标端点未暴露业务指标（返回 $(( ${#METRICS_BODY} / 1024 ))KB）"
+    FAIL=$((FAIL + 1))
+fi
+# 2) 抓取侧：用 count(up==1) 精确断言 6 个业务服务全部被抓到。
+#    不数 JSON 里的 "health":"up" 个数 —— 键顺序与嵌套都不稳定，断言会变脆。
+#    冷启动时 Prometheus 需要一轮抓取（scrape_interval=15s）才能判定目标健康，
+#    故这里与下一项都做**有界轮询**（最多 ~48s），而不是立刻断言（与 #28 同源的时序脆弱）。
+PROM_UP=""
+for _ in $(seq 1 16); do
+    PROM_UP="$(curl -fsS 'http://localhost:9090/api/v1/query' \
+        --data-urlencode 'query=count(up{job="aslp-services"} == 1)' 2>/dev/null \
+        | sed -n 's/.*"value":\[[0-9.]*,"\([0-9]*\)"\].*/\1/p')"
+    [ "${PROM_UP}" = "6" ] && break
+    sleep 3
+done
+if [ "${PROM_UP}" = "6" ]; then
+    echo "  ✅ Prometheus 抓取 6/6 服务存活"
+    PASS=$((PASS + 1))
+else
+    echo "  ❌ Prometheus 抓取异常：存活的 aslp-services 目标数 = ${PROM_UP:-未知}（期望 6）"
+    FAIL=$((FAIL + 1))
+fi
+# 3) 指标已入库：前面跑过的 VRP 求解必须能在 Prometheus 里查到，
+#    证明「应用 -> 抓取 -> TSDB -> 查询」整条链路真通，而不只是端口能访问。
+#    同样需要等一轮抓取（冷启动时指标刚产生，还没被 scrape 到）。
+TSDB_HIT=0
+for _ in $(seq 1 16); do
+    if grep -qF '"aslp_vrp_distance_count"' \
+        <<< "$(curl -fsS --max-time 5 'http://localhost:9090/api/v1/query?query=aslp_vrp_distance_count' 2>/dev/null)"; then
+        TSDB_HIT=1
+        break
+    fi
+    sleep 3
+done
+if [ "${TSDB_HIT}" -eq 1 ]; then
+    echo "  ✅ 指标已入 TSDB        GET  :9090 查到 aslp_vrp_distance_count"
+    PASS=$((PASS + 1))
+else
+    echo "  ❌ Prometheus 在 ~48s 内未查到 VRP 里程指标（抓取或写入链路有问题）"
+    FAIL=$((FAIL + 1))
+fi
+# 4) Grafana 自身健康。用正则容忍空白：Grafana 的 /api/health 是**带缩进**的 JSON
+#    （实际返回 `"database": "ok"` 冒号后有空格），写死无空格的子串会假失败。
+GRAFANA_HEALTH="$(curl -fsS --max-time 10 http://localhost:3000/api/health 2>/dev/null)"
+if grep -qE -- '"database"[[:space:]]*:[[:space:]]*"ok"' <<< "${GRAFANA_HEALTH}"; then
+    echo "  ✅ Grafana 健康         GET  :3000/api/health（database ok）"
+    PASS=$((PASS + 1))
+else
+    echo "  ❌ Grafana 不健康：${GRAFANA_HEALTH:0:200}"
+    FAIL=$((FAIL + 1))
+fi
+# 5) 看板已由 provisioning 自动加载（需 admin 认证，匿名是 Viewer 读不到 /api/search）
+GRAFANA_DASHBOARDS="$(curl -fsS -u "admin:${GRAFANA_ADMIN_PASSWORD}" \
+    --max-time 10 'http://localhost:3000/api/search?type=dash-db' 2>/dev/null)"
+if grep -qF -- 'aslp-overview' <<< "${GRAFANA_DASHBOARDS}"; then
+    echo "  ✅ Grafana 看板已自动加载（uid=aslp-overview）"
+    PASS=$((PASS + 1))
+else
+    echo "  ❌ Grafana 看板未加载，返回：${GRAFANA_DASHBOARDS:0:200}"
     FAIL=$((FAIL + 1))
 fi
 

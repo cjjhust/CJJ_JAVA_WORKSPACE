@@ -1,12 +1,35 @@
 spring:
   application:
     name: gateway
+  # P1-2：网关限流（RequestRateLimiter -> RedisRateLimiter）依赖 Redis 令牌桶
+  data:
+    redis:
+      host: localhost
+      port: 6379
   cloud:
     gateway:
       # Bug 修复：原使用 lb://service-name，但项目未部署服务注册中心（Eureka/Nacos），
       # 且缺少 spring-cloud-starter-loadbalancer，导致路由无法解析（503）。
       # 现改为直连 URI（本地开发指向 localhost 端口）。
+      #
+      # P1-2：限流采用**按需路由级**而非 default-filters 全局（原因见 RateLimitConfig 类注释）。
       routes:
+        # P1-2：平台拉取接口单独收口（每用户 1 次/秒，burst 1）。
+        # 对应 M1「针对电商平台 API 的严格限流」：一次拉取会放大成 N 次平台调用，
+        # 必须比普通查询更严；order=-1 保证先于通用 order-service 路由匹配。
+        - id: order-pull-throttle
+          uri: http://localhost:8081
+          order: -1
+          predicates:
+            - Path=/api/orders/pull
+            - Method=POST
+          filters:
+            - name: RequestRateLimiter
+              args:
+                redis-rate-limiter.replenishRate: 1
+                redis-rate-limiter.burstCapacity: 1
+                redis-rate-limiter.requestedTokens: 1
+                key-resolver: "#{@userKeyResolver}"
         - id: order-service
           uri: http://localhost:8081
           predicates:
@@ -27,12 +50,32 @@ spring:
           uri: http://localhost:8084
           predicates:
             - Path=/api/auth/**
+          filters:
+            # 认证入口按 IP 限流：登录前没有用户身份，只能以 IP 为维度防暴力破解
+            - name: RequestRateLimiter
+              args:
+                redis-rate-limiter.replenishRate: 10
+                redis-rate-limiter.burstCapacity: 20
+                redis-rate-limiter.requestedTokens: 1
+                key-resolver: "#{@ipKeyResolver}"
 
 management:
   endpoints:
     web:
       exposure:
-        include: health,info,gateway
+        # P1-1：prometheus = 抓取端点（/actuator/prometheus）；metrics = 指标清单（排查指标是否存在）
+        include: health,info,gateway,prometheus,metrics
+  metrics:
+    tags:
+      # 所有指标带上服务名标签，Prometheus 侧才能按服务区分（否则只能靠 instance 猜）
+      application: ${spring.application.name}
+    distribution:
+      percentiles-histogram:
+        # 让 http_server_requests 输出直方图桶，Grafana 里可用 histogram_quantile 算 P95/P99
+        http.server.requests: true
+        # 网关的 SCG 路由级耗时（spring_cloud_gateway_requests_seconds）同样开启直方图，
+        # 否则只能看到各路由的均值，看不到尾延迟
+        spring.cloud.gateway.requests: true
 
 server:
   port: 8080

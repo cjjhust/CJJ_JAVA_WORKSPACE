@@ -17,4 +17,11 @@ management:
   endpoints:
     web:
       exposure:
-        include: health,info
+        # P1-1：暴露 Prometheus 抓取端点
+        include: health,info,prometheus,metrics
+  metrics:
+    tags:
+      application: ${spring.application.name}
+    distribution:
+      percentiles-histogram:
+        http.server.requests: true

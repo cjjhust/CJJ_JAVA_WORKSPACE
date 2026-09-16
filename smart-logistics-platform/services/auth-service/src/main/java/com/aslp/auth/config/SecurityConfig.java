@@ -34,6 +34,11 @@ public class SecurityConfig {
                 .authorizeHttpRequests(auth -> auth
                         .requestMatchers("/api/auth/**").permitAll()
                         .requestMatchers("/actuator/health/**", "/actuator/info").permitAll()
+                        // P1-1：放行 Prometheus 抓取端点。本服务关了 httpBasic，
+                        // 不放行的结果是 403（不是 401）——Prometheus 侧只看到「403」，
+                        // 排查时容易误判成权限配置问题。
+                        // 权衡：指标不含业务数据；生产应改用独立 management 端口 + 来源限制。
+                        .requestMatchers("/actuator/prometheus").permitAll()
                         .requestMatchers(HttpMethod.OPTIONS, "/**").permitAll()
                         .anyRequest().authenticated());
         return http.build();

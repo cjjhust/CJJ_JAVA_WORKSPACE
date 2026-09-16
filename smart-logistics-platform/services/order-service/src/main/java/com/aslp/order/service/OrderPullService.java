@@ -4,7 +4,7 @@ import com.aslp.order.entity.OrderRecord;
 import com.aslp.order.repository.OrderRepository;
 import com.aslp.order.strategy.OrderDto;
 import com.aslp.order.strategy.OrderPullResult;
-import com.aslp.order.strategy.OrderPullStrategy;
+import io.micrometer.core.instrument.MeterRegistry;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.stereotype.Service;
@@ -18,11 +18,25 @@ import java.util.Optional;
  *
  * <p>幂等保障：以平台单号 {@code orderId} 为唯一键，重复拉取只更新不新增，
  * 从而支撑「定时轮询 + 手动补拉」并存而不会产生重复订单。
+ *
+ * <p>P1-1：同时把拉取结果写成 Micrometer 指标（Prometheus 端可见）：
+ * <ul>
+ *   <li>{@code aslp_order_pull_requests_total{platform,outcome}} —— 每次拉取的结局（success/failed/degraded）；</li>
+ *   <li>{@code aslp_order_pull_orders_total{platform,result}} —— 订单条目级的 created/updated/flagged 计数。</li>
+ * </ul>
+ * 这两个指标能直接回答运维最常见的问题：
+ * 「平台是挂了、还是被限流了（failed/degraded 上升）、还是根本没有新单（fetched=0）」。
  */
 @Service
 public class OrderPullService {
 
     private static final Logger log = LoggerFactory.getLogger(OrderPullService.class);
+
+    /** P1-1：拉取请求结局计数器（带 platform / outcome 标签）。 */
+    public static final String METRIC_PULL_REQUESTS = "aslp.order.pull.requests";
+
+    /** P1-1：订单条目级计数器（带 platform / result 标签）。 */
+    public static final String METRIC_PULL_ORDERS = "aslp.order.pull.orders";
 
     /** 仓库编码归一化：兼容 API 返回的无变音符写法，统一为业务展示口径。 */
     private static final Map<String, String> WAREHOUSE_ALIASES = Map.of(
@@ -32,15 +46,22 @@ public class OrderPullService {
             "mönchengladbach", "Mönchengladbach"
     );
 
-    private final OrderPullStrategy strategy;
+    private final PlatformPullGateway platformPull;
     private final OrderRepository repository;
+    private final MeterRegistry meterRegistry;
 
-    public OrderPullService(OrderPullStrategy strategy, OrderRepository repository) {
-        this.strategy = strategy;
+    public OrderPullService(PlatformPullGateway platformPull, OrderRepository repository, MeterRegistry meterRegistry) {
+        this.platformPull = platformPull;
         this.repository = repository;
+        this.meterRegistry = meterRegistry;
     }
 
-    /** 单次拉取结果摘要。 */
+    /**
+     * 单次拉取结果摘要。
+     *
+     * <p>P1-2 新增 {@code degraded}：区分「平台业务性失败」与「容错降级」
+     * （重试耗尽 / 熔断打开 / 舱壁拒绝），便于上游与监控按不同等级处理。
+     */
     public record PullSummary(
             String platform,
             boolean success,
@@ -48,7 +69,8 @@ public class OrderPullService {
             int created,
             int updated,
             int flagged,
-            String errorMsg
+            String errorMsg,
+            boolean degraded
     ) {
     }
 
@@ -59,11 +81,15 @@ public class OrderPullService {
      */
     @Transactional
     public PullSummary pullAndPersist() {
-        OrderPullResult result = strategy.pullOrders();
+        // P1-2：平台调用统一走容错网关（重试 -> 熔断 -> 舱壁 -> 降级回退），此处拿到的一定是结果而非异常
+        OrderPullResult result = platformPull.pull();
 
         if (!result.success()) {
-            log.warn("[订单接入] 平台 {} 拉取失败：{}", result.platform(), result.errorMsg());
-            return new PullSummary(result.platform(), false, 0, 0, 0, 0, result.errorMsg());
+            log.warn("[订单接入] 平台 {} 拉取失败（degraded={}）：{}",
+                    result.platform(), result.degraded(), result.errorMsg());
+            // P1-1：降级与业务性失败分开打标 —— 前者是自家熔断/重试耗尽，后者是平台侧返回错误
+            countPullRequests(result.platform(), result.degraded() ? "degraded" : "failed");
+            return new PullSummary(result.platform(), false, 0, 0, 0, 0, result.errorMsg(), result.degraded());
         }
 
         int created = 0;
@@ -97,8 +123,36 @@ public class OrderPullService {
         log.info("[订单接入] 平台 {}：拉取 {} 条，新增 {}，更新 {}，异常打标 {}",
                 result.platform(), result.orders().size(), created, updated, flagged);
 
+        // P1-1：一次拉取只记 1 次请求结局；条目级计数用 increment(amount) 一次性上报，
+        // 避免在大循环里反复查表（每次 counter(...) 都是一次带锁的查表）
+        countPullRequests(result.platform(), "success");
+        countPullOrders(result.platform(), "created", created);
+        countPullOrders(result.platform(), "updated", updated);
+        countPullOrders(result.platform(), "flagged", flagged);
+
         return new PullSummary(result.platform(), true,
-                result.orders().size(), created, updated, flagged, null);
+                result.orders().size(), created, updated, flagged, null, false);
+    }
+
+    /** P1-1：拉取请求结局计数。 */
+    private void countPullRequests(String platform, String outcome) {
+        meterRegistry.counter(METRIC_PULL_REQUESTS, "platform", tagValue(platform), "outcome", outcome)
+                .increment();
+    }
+
+    /** P1-1：订单条目级计数。 */
+    private void countPullOrders(String platform, String result, int amount) {
+        if (amount <= 0) {
+            // 不预先创建零值计数器：否则每次重启都会充满一堆数值为 0 的时间序列
+            return;
+        }
+        meterRegistry.counter(METRIC_PULL_ORDERS, "platform", tagValue(platform), "result", result)
+                .increment(amount);
+    }
+
+    /** 标签值不能为 null（Micrometer 会直接抛异常），未知平台统一记为 unknown。 */
+    private static String tagValue(String platform) {
+        return platform == null || platform.isBlank() ? "unknown" : platform;
     }
 
     /** 按订单号查询。 */

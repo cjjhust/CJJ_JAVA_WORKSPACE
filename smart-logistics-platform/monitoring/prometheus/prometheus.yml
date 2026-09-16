@@ -1,0 +1,33 @@
+# =============================================================================
+# ASLP — Prometheus 抓取配置（P1-1 可观测性）
+#
+# 【为什么 targets 用连字符别名 aslp-xxx 而不是容器名 aslp_xxx】
+# 与网关路由的坑同源但不在同一层（见 readme §9 #21）：
+# Host 头里的下划线对 RFC 1123 主机名非法，Tomcat 10.1 会直接回 **400 Bad Request**
+# （已实测：scrape 容器名 → 五个服务全部 400，日志无从下手因为请求根本没进应用）。
+# 网关本身是 Netty/WebFlux，不校验 Host，所以它可以用 aslp_gateway。
+# =============================================================================
+
+global:
+  scrape_interval: 15s
+  evaluation_interval: 15s
+
+scrape_configs:
+  - job_name: aslp-services
+    metrics_path: /actuator/prometheus
+    static_configs:
+      - targets:
+          # 网关：Netty 不校验 Host 头，可直接用容器名（鉴权已单独放行，见 VpnSecurityConfig）
+          - aslp_gateway:8080
+          # 以下 5 个是 Tomcat，必须用连字符别名（compose 里为它们声明的网络别名）
+          - aslp-order-service:8081
+          - aslp-inventory-service:8082
+          - aslp-route-service:8083
+          - aslp-auth-service:8084
+          - aslp-report-service:8085
+
+  # 自监控：能看到 Prometheus 自己的抓取耗时、样本数等
+  - job_name: prometheus
+    static_configs:
+      - targets:
+          - localhost:9090

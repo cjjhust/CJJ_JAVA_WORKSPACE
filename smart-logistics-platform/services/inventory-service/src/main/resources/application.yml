@@ -46,7 +46,14 @@ management:
   endpoints:
     web:
       exposure:
-        include: health,info
+        # P1-1：暴露 Prometheus 抓取端点
+        include: health,info,prometheus,metrics
+  metrics:
+    tags:
+      application: ${spring.application.name}
+    distribution:
+      percentiles-histogram:
+        http.server.requests: true
   health:
     # Bug 修复：默认 MailHealthIndicator 会在每次 /actuator/health 时探测 SMTP，
     # 本地/容器无邮件服务器时整个服务被判为 DOWN（HTTP 503），

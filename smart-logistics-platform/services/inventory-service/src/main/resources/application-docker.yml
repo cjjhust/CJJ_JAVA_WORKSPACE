@@ -45,7 +45,8 @@ management:
   endpoints:
     web:
       exposure:
-        include: health,info
+        # P1-1：docker profile 必须同步加上 prometheus（否则 include 会覆盖基础 profile）
+        include: health,info,prometheus,metrics
   health:
     # 容器环境同样未部署 SMTP，关闭邮件健康探测（补货邮件为尽力而为）
     mail:

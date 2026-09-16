@@ -24,7 +24,37 @@ management:
   endpoints:
     web:
       exposure:
-        include: health,info
+        # P1-2：暴露熔断器状态/事件端点，便于端到端断言「熔断已打开」
+        # P1-1：docker profile 必须同步加上 prometheus（否则 include 会覆盖基础 profile）
+        include: health,info,circuitbreakers,circuitbreakerevents,prometheus,metrics
+
+# P1-2：平台调用容错（与本地 profile 保持一致，仅注释差异）
+resilience4j:
+  retry:
+    instances:
+      platformPull:
+        max-attempts: 3
+        wait-duration: 200ms
+        enable-exponential-backoff: true
+        exponential-backoff-multiplier: 2
+        retry-exceptions:
+          - com.aslp.order.strategy.PlatformUnavailableException
+  circuitbreaker:
+    instances:
+      platformPull:
+        sliding-window-type: COUNT_BASED
+        sliding-window-size: 5
+        minimum-number-of-calls: 3
+        failure-rate-threshold: 50
+        wait-duration-in-open-state: 3s
+        permitted-number-of-calls-in-half-open-state: 2
+        automatic-transition-from-open-to-half-open-enabled: true
+        register-health-indicator: false
+  bulkhead:
+    instances:
+      platformPull:
+        max-concurrent-calls: 4
+        max-wait-duration: 200ms
 
 aslp:
   order:
