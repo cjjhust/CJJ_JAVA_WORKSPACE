@@ -1,0 +1,55 @@
+server:
+  port: 8082
+
+spring:
+  application:
+    name: inventory-service
+  # Bug 修复：原 redisson.singleServerConfig.* 不会被 redisson-spring-boot-starter 绑定
+  #（该 starter 仅绑定 spring.data.redis.* 与 spring.redis.redisson.{config,file}），
+  # 属性被静默忽略后回落默认值 localhost:6379；本地因端口映射"碰巧"可用，
+  # 容器内必然 Connection refused。现改用 starter 真正识别的命名空间。
+  data:
+    redis:
+      host: localhost
+      port: 6379
+  # Bug 修复：原配置为 db=smart_logistics / user=postgres，与 docker-compose 的
+  # aslp/aslp123 不一致，导致服务连不上数据库。现统一为 aslp。
+  datasource:
+    url: jdbc:postgresql://localhost:5432/aslp
+    username: aslp
+    password: aslp123
+  # P0-4：架构由 Flyway 版本化管理（含两仓种子数据），Hibernate 仅校验
+  flyway:
+    enabled: true
+    locations: classpath:db/migration/inventory
+    # 与 order-service 共用同一库，各自使用独立历史表
+    table: flyway_schema_history_inventory
+    baseline-on-migrate: true
+    baseline-version: 0
+    validate-on-migrate: true
+  jpa:
+    hibernate:
+      ddl-auto: validate
+    open-in-view: false
+    show-sql: true
+  mail:
+    host: localhost
+    port: 1025
+    properties:
+      mail:
+        smtp:
+          auth: false
+          starttls:
+            enable: false
+
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health,info
+  health:
+    # Bug 修复：默认 MailHealthIndicator 会在每次 /actuator/health 时探测 SMTP，
+    # 本地/容器无邮件服务器时整个服务被判为 DOWN（HTTP 503），
+    # 导致网关健康检查与容器 HEALTHCHECK 失败、日志被 MailConnectException 刷屏。
+    mail:
+      enabled: false

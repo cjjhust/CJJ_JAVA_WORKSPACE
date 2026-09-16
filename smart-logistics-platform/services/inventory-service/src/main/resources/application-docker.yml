@@ -1,0 +1,52 @@
+server:
+  port: 8082
+
+spring:
+  application:
+    name: inventory-service
+  # Bug 修复：原 redisson.singleServerConfig.* 不会被 redisson-spring-boot-starter 绑定
+  #（该 starter 仅通过 @EnableConfigurationProperties 绑定 spring.data.redis.*
+  #  与 spring.redis.redisson.{config,file}），属性被静默忽略后回落默认值 localhost:6379。
+  # 本地开发因 compose 映射了 6379 端口而"碰巧"可用，容器内则必然 Connection refused。
+  # 现改用 starter 真正识别的命名空间。
+  # 注：原 redisson.singleServerConfig.connectionMinimumIdleSize（2）同样从未生效，
+  #     本次不启用，保持 starter 默认值，避免引入非修复所需的行为变化。
+  data:
+    redis:
+      host: aslp_redis
+      port: 6379
+  datasource:
+    url: jdbc:postgresql://aslp_postgres:5432/aslp
+    username: aslp
+    password: aslp123
+  flyway:
+    enabled: true
+    locations: classpath:db/migration/inventory
+    table: flyway_schema_history_inventory
+    baseline-on-migrate: true
+    baseline-version: 0
+    validate-on-migrate: true
+  jpa:
+    hibernate:
+      ddl-auto: validate
+    open-in-view: false
+    show-sql: false
+  mail:
+    host: localhost
+    port: 1025
+    properties:
+      mail:
+        smtp:
+          auth: false
+          starttls:
+            enable: false
+
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health,info
+  health:
+    # 容器环境同样未部署 SMTP，关闭邮件健康探测（补货邮件为尽力而为）
+    mail:
+      enabled: false

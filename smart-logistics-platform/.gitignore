@@ -1,0 +1,35 @@
+# Build artifacts
+target/
+build/
+.gradle/
+*.jar
+*.class
+
+# IDE
+.idea/
+*.iml
+
+# VS Code：保留团队共享配置（含关键的 java.autobuild.enabled=false 修复）
+.vscode/*
+!.vscode/settings.json
+!.vscode/extensions.json
+!.vscode/launch.json
+
+# OS
+.DS_Store
+
+# Runtime
+*.log
+logs/
+target/smoke-logs/
+target/run-logs/
+
+# 数据库转储产物（pg_dump 输出）。
+# 注意：**不要**写成 `*.sql` —— Flyway 迁移脚本
+# （src/main/resources/db/migration/**/*.sql）必须以 .sql 提交，否则架构变更丢失。
+*.dump
+*.dump.sql
+**/aslp_backup_*.sql
+
+# 本地覆盖配置（含密钥）
+application-local.yml

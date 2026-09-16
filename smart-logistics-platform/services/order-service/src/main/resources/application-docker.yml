@@ -1,0 +1,43 @@
+spring:
+  application:
+    name: order-service
+  datasource:
+    url: jdbc:postgresql://aslp_postgres:5432/aslp
+    username: aslp
+    password: aslp123
+  flyway:
+    enabled: true
+    locations: classpath:db/migration/order
+    table: flyway_schema_history_order
+    baseline-on-migrate: true
+    baseline-version: 0
+    validate-on-migrate: true
+  jpa:
+    hibernate:
+      ddl-auto: validate
+    open-in-view: false
+    show-sql: false
+server:
+  port: 8081
+
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health,info
+
+aslp:
+  order:
+    mock-enabled: true
+    sync:
+      # 容器环境开启定时自动导入（M1 流水线式导入）
+      enabled: true
+      cron: "0 */5 * * * *"
+  # M4 数据库定时备份（容器内指向 aslp_postgres 服务名）
+  backup:
+    host: aslp_postgres
+    port: 5432
+    database: aslp
+    username: aslp
+    output-dir: /tmp
+    enabled: true
