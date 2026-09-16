@@ -1,0 +1,43 @@
+server:
+  port: 8082
+
+spring:
+  application:
+    name: inventory-service
+  # Bug 修复：原配置为 db=smart_logistics / user=postgres，与 docker-compose 的
+  # aslp/aslp123 不一致，导致服务连不上数据库。现统一为 aslp。
+  datasource:
+    url: jdbc:postgresql://localhost:5432/aslp
+    username: aslp
+    password: aslp123
+  jpa:
+    hibernate:
+      ddl-auto: update
+    open-in-view: false
+    show-sql: true
+  mail:
+    host: localhost
+    port: 1025
+    properties:
+      mail:
+        smtp:
+          auth: false
+          starttls:
+            enable: false
+
+redisson:
+  singleServerConfig:
+    address: redis://localhost:6379
+    connectionMinimumIdleSize: 2
+
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health,info
+  health:
+    # Bug 修复：默认 MailHealthIndicator 会在每次 /actuator/health 时探测 SMTP，
+    # 本地/容器无邮件服务器时整个服务被判为 DOWN（HTTP 503），
+    # 导致网关健康检查与容器 HEALTHCHECK 失败、日志被 MailConnectException 刷屏。
+    mail:
+      enabled: false

@@ -1,0 +1,19 @@
+server:
+  port: 8084
+
+spring:
+  application:
+    name: auth-service
+
+aslp:
+  jwt:
+    # 容器环境请通过 docker-compose 的 environment 注入 ASLP_JWT_SECRET
+    secret: ${ASLP_JWT_SECRET:aslp-dev-secret-key-change-me-in-production-0123456789}
+    ttl-minutes: 120
+    issuer: aslp-auth-service
+
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health,info

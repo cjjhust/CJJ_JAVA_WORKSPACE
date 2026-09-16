@@ -1,0 +1,39 @@
+server:
+  port: 8082
+
+spring:
+  application:
+    name: inventory-service
+  datasource:
+    url: jdbc:postgresql://aslp_postgres:5432/aslp
+    username: aslp
+    password: aslp123
+  jpa:
+    hibernate:
+      ddl-auto: update
+    open-in-view: false
+    show-sql: false
+  mail:
+    host: localhost
+    port: 1025
+    properties:
+      mail:
+        smtp:
+          auth: false
+          starttls:
+            enable: false
+
+redisson:
+  singleServerConfig:
+    address: redis://aslp_redis:6379
+    connectionMinimumIdleSize: 2
+
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health,info
+  health:
+    # 容器环境同样未部署 SMTP，关闭邮件健康探测（补货邮件为尽力而为）
+    mail:
+      enabled: false

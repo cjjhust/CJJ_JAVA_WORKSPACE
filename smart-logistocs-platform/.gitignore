@@ -1,0 +1,29 @@
+# Build artifacts
+target/
+build/
+.gradle/
+*.jar
+*.class
+
+# IDE
+.idea/
+*.iml
+
+# VS Code：保留团队共享配置（含关键的 java.autobuild.enabled=false 修复）
+.vscode/*
+!.vscode/settings.json
+!.vscode/extensions.json
+!.vscode/launch.json
+
+# OS
+.DS_Store
+
+# Runtime
+*.log
+logs/
+target/smoke-logs/
+target/run-logs/
+*.sql
+
+# 本地覆盖配置（含密钥）
+application-local.yml

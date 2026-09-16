@@ -1,0 +1,42 @@
+spring:
+  application:
+    name: gateway
+  cloud:
+    gateway:
+      # Bug 修复：原使用 lb://service-name，但项目未部署服务注册中心（Eureka/Nacos），
+      # 且缺少 spring-cloud-starter-loadbalancer，导致路由无法解析（503）。
+      # 现改为直连 URI（本地开发指向 localhost 端口）。
+      routes:
+        - id: order-service
+          uri: http://localhost:8081
+          predicates:
+            - Path=/api/orders/**
+        - id: inventory-service
+          uri: http://localhost:8082
+          predicates:
+            - Path=/api/inventory/**
+        - id: route-service
+          uri: http://localhost:8083
+          predicates:
+            - Path=/api/routes/**,/api/route/**
+        - id: report-service
+          uri: http://localhost:8085
+          predicates:
+            - Path=/api/reports/**
+        - id: auth-service
+          uri: http://localhost:8084
+          predicates:
+            - Path=/api/auth/**
+
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health,info,gateway
+
+server:
+  port: 8080
+
+logging:
+  level:
+    org.springframework.cloud.gateway: INFO

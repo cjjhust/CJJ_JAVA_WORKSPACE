@@ -1,0 +1,30 @@
+# 构建产物（由镜像内 Maven 重新生成，无需从上下文传入）
+**/target/
+build/
+.gradle/
+*.jar
+*.class
+
+# 版本控制与 IDE
+.git/
+.gitignore
+.github/
+.idea/
+.vscode/
+*.iml
+
+# 操作系统与文档
+.DS_Store
+*.md
+todo.md
+test-data/
+
+# 基础设施与本地运行
+docker-compose.yml
+Dockerfile
+.dockerignore
+
+# 日志与临时文件
+*.log
+logs/
+*.sql

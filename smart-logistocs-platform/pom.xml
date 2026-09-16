@@ -1,0 +1,89 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<project xmlns="http://maven.apache.org/POM/4.0.0"
+         xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+         xsi:schemaLocation="http://maven.apache.org/POM/4.0.0
+                             http://maven.apache.org/xsd/maven-4.0.0.xsd">
+    <modelVersion>4.0.0</modelVersion>
+
+    <parent>
+        <groupId>org.springframework.boot</groupId>
+        <artifactId>spring-boot-starter-parent</artifactId>
+        <version>3.3.0</version>
+        <relativePath/>
+    </parent>
+
+    <groupId>com.aslp</groupId>
+    <artifactId>smart-logistocs-platform</artifactId>
+    <version>1.0.0-SNAPSHOT</version>
+    <packaging>pom</packaging>
+
+    <name>Smart Logistics Platform</name>
+    <description>海外仓智能物流系统 — Maven 3.9+ / Maven 4.0 “高铁模式”</description>
+
+    <modules>
+        <module>gateway</module>
+        <module>services/auth-service</module>
+        <module>services/inventory-service</module>
+        <module>services/order-service</module>
+        <module>services/report-service</module>
+        <module>services/route-service</module>
+    </modules>
+
+    <properties>
+        <java.version>21</java.version>
+        <!--
+          Bug 修复：spring-cloud 2023.0.0（Leyton）仅兼容 Spring Boot 3.2.x，
+          与 Boot 3.3.0 搭配时网关启动报：
+            'Spring Boot [3.3.0] is not compatible with this Spring Cloud release train'
+          2023.0.3 起官方允许 Boot 3.3.x。
+        -->
+        <spring-cloud.version>2023.0.3</spring-cloud.version>
+        <maven.compiler.plugin.version>3.11.0</maven.compiler.plugin.version>
+    </properties>
+
+    <dependencyManagement>
+        <dependencies>
+            <dependency>
+                <groupId>org.springframework.cloud</groupId>
+                <artifactId>spring-cloud-dependencies</artifactId>
+                <version>${spring-cloud.version}</version>
+                <type>pom</type>
+                <scope>import</scope>
+            </dependency>
+        </dependencies>
+    </dependencyManagement>
+
+    <build>
+        <pluginManagement>
+            <plugins>
+                <plugin>
+                    <groupId>org.apache.maven.plugins</groupId>
+                    <artifactId>maven-compiler-plugin</artifactId>
+                    <version>${maven.compiler.plugin.version}</version>
+                    <configuration>
+                        <release>${java.version}</release>
+                        <!--
+                          Bug 修复：maven-shared-incremental 的 stale 检测在 APFS
+                          （1 秒时间戳粒度）上会误删刚生成的 .class 文件，导致
+                          「主类编译成功但 surefire 报 NoClassDefFoundError」。
+                          关闭增量编译检测，换取 100% 可重复构建（Reproducible Builds）。
+                        -->
+                        <useIncrementalCompilation>false</useIncrementalCompilation>
+                        <parameters>true</parameters>
+                    </configuration>
+                </plugin>
+                <plugin>
+                    <groupId>org.apache.maven.plugins</groupId>
+                    <artifactId>maven-surefire-plugin</artifactId>
+                    <configuration>
+                        <argLine>-Xshare:off</argLine>
+                    </configuration>
+                </plugin>
+                <plugin>
+                    <groupId>org.springframework.boot</groupId>
+                    <artifactId>spring-boot-maven-plugin</artifactId>
+                </plugin>
+            </plugins>
+        </pluginManagement>
+    </build>
+</project>

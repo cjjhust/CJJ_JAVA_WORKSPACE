@@ -1,0 +1,32 @@
+{
+  "orders": [
+    {
+      "orderId": "AMZ-TEST-001",
+      "platform": "Amazon",
+      "status": "PENDING",
+      "items": [{"sku": "SKU-001", "qty": 2}],
+      "shippingAddress": {"postalCode": "76131", "city": "Karlsruhe"},
+      "createdAt": "2026-09-15T10:00:00Z"
+    },
+    {
+      "orderId": "EBAY-TEST-002",
+      "platform": "eBay",
+      "status": "SHIPPED",
+      "items": [{"sku": "SKU-002", "qty": 1}],
+      "shippingAddress": {"postalCode": "41061", "city": "Mönchengladbach"},
+      "createdAt": "2026-09-15T09:30:00Z"
+    }
+  ],
+  "inventoryWarnings": [
+    {"sku": "SKU-001", "warehouse": "Bruchsal", "currentQty": 5, "threshold": 10, "message": "库存低于安全库存，建议补货"},
+    {"sku": "SKU-003", "warehouse": "Mönchengladbach", "currentQty": 2, "threshold": 8, "message": "库存预警：即将缺货"}
+  ],
+  "routeResults": [
+    {"routeId": "VRP-001", "vehicleId": "V-01", "stops": ["Bruchsal", "Karlsruhe", "Mönchengladbach"], "distanceKm": 245.3, "costEuro": 89.50},
+    {"routeId": "VRP-002", "vehicleId": "V-02", "stops": ["Mönchengladbach", "Düsseldorf"], "distanceKm": 32.1, "costEuro": 18.20}
+  ],
+  "trackingEvents": [
+    {"trackingNumber": "DHL-123456789", "status": "IN_TRANSIT", "location": "Karlsruhe", "updatedAt": "2026-09-15T14:00:00Z"},
+    {"trackingNumber": "DPD-987654321", "status": "DELIVERED", "location": "Mönchengladbach", "updatedAt": "2026-09-15T13:45:00Z"}
+  ]
+}

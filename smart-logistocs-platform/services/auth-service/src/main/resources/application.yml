@@ -1,0 +1,20 @@
+server:
+  port: 8084
+
+spring:
+  application:
+    name: auth-service
+
+# JWT 签发配置（M1 认证服务 / M4 网关 VPN 接入的令牌来源）
+aslp:
+  jwt:
+    # 生产环境请通过环境变量 ASLP_JWT_SECRET 注入，切勿使用默认值
+    secret: ${ASLP_JWT_SECRET:aslp-dev-secret-key-change-me-in-production-0123456789}
+    ttl-minutes: 120
+    issuer: aslp-auth-service
+
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health,info

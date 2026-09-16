@@ -1,0 +1,22 @@
+{
+    // =========================================================================
+    // 重要：关闭 VS Code Java 语言服务器的自动构建。
+    //
+    // 原因：JDT Language Server（redhat.java）把 Maven 项目的 target/classes
+    // 作为自己的输出目录。开启自动构建时，它会在 Maven 构建过程中清理/重建该目录，
+    // 造成「主类编译成功但 surefire 报 NoClassDefFoundError」的随机失败：
+    //   [ERROR] GatewayApplicationTest.applicationClassIsPresent:17
+    //           NoClassDefFound com/aslp/gateway/GatewayApplication
+    //
+    // 关闭后命令行 Maven 构建 100% 稳定；IDE 内仍可手动触发构建
+    // （命令面板 → Java: Rebuild Projects）。
+    // =========================================================================
+    "java.autobuild.enabled": false,
+    "java.configuration.updateBuildConfiguration": "automatic",
+    "java.compile.nullAnalysis.mode": "automatic",
+    "java.import.maven.enabled": true,
+    "java.maven.downloadSources": true,
+    "files.eol": "\n",
+    "files.trimTrailingWhitespace": true,
+    "files.insertFinalNewline": true
+}
