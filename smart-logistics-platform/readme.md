@@ -1,7 +1,7 @@
 # Smart Logistics Platform (ASLP) — 海外仓智能物流系统
 
 > 最后更新：2026-09-16 ｜ 版本 `1.0.0-SNAPSHOT`
-> 状态：**M1–M4 全部交付 + P0 基线补齐（P0-1～P0-4）；`mvn clean package -T 1C` 全绿（22 测试），P0-3 容器全量验证 10/10 healthy + 端到端冒烟 30/30 通过**
+> 状态：**M1–M4 全部交付 + P0 基线补齐（P0-1～P0-5）；`mvn clean package -T 1C` 全绿（33 测试），容器全量验证 10/10 healthy + 端到端冒烟 32/32 通过**
 > 包根：`com.aslp.*`（已脱敏，详见 §12） ｜ 构建：Maven 3.9+ “高铁模式”
 
 ---
@@ -128,6 +128,10 @@ curl -X POST "http://localhost:8080/api/auth/login?username=admin"
 
 # ── M2 多仓库存（Redisson 锁 + 乐观锁）────────────────
 curl -X POST "http://localhost:8080/api/inventory/deduct?sku=AMZ-1001&warehouseCode=Bruchsal&qty=2"
+# P0-5 查询：返回「SKU 汇总 + 各仓明细」；不带 warehouseCode 则返回全部仓库
+curl "http://localhost:8080/api/inventory/AMZ-1001?warehouseCode=Bruchsal"
+# P0-5 释放锁定库存（支付失败 / 订单取消 / 超时未支付）
+curl -X POST "http://localhost:8080/api/inventory/release?sku=AMZ-1001&warehouseCode=Bruchsal&qty=2"
 
 # ── M4 订单状态机（FBA 退货换标，状态按订单号隔离）─────
 curl -X POST "http://localhost:8080/api/orders/state/DEMO-001/trigger?event=PAY"
@@ -159,7 +163,7 @@ smart-logistics-platform/
 ├── docker-compose.yml             # PG16 / Redis7 / ZooKeeper+Kafka7.6 / 6 个 Java 服务
 ├── .vscode/settings.json          # 关闭 JDT 自动构建，避免与 Maven 抢占 target/classes
 ├── scripts/
-│   ├── smoke-test.sh              # 端到端冒烟测试 30 项断言（支持 --external 打外部服务）
+│   ├── smoke-test.sh              # 端到端冒烟测试 32 项断言（支持 --external 打外部服务）
 │   └── container-verify.sh        # P0-3 容器全量验证：构建 → 启动 → healthy → 断言
 ├── test-data/mock-test-data.json  # Amazon/eBay 订单、库存预警、VRP、DHL/DPD 轨迹
 ├── gateway/                       # Spring Cloud Gateway + BFF + 安全配置
@@ -169,7 +173,7 @@ smart-logistics-platform/
 │       └── security/VpnSecurityConfig.java                     # M4 VPN JWT + 角色映射
 └── services/
     ├── auth-service/              # M1 认证：SecurityConfig + JwtTokenService + AuthController
-    ├── inventory-service/         # M2 库存：entity/repository/service(锁)/task(预警+邮件)
+    ├── inventory-service/         # M2 库存：entity/repository/service(锁)/dto(查询响应)/controller/task(预警+邮件)
     │   └── src/main/resources/db/migration/inventory/          # P0-4：V1 建表 + V2 种子数据
     ├── order-service/             # M1/M4：entity(OrderRecord) + repository + service(幂等落库)
     │   │                          #        + statemachine(按订单隔离) + strategy(策略模式) + task
@@ -181,6 +185,8 @@ smart-logistics-platform/
 > **Java 包根统一为 `com.aslp.*`**，不含任何具体主体标识（详见 §12 命名与脱敏约定）。
 > **数据库架构由 Flyway 版本化管理**（P0-4），`ddl-auto` 已切换为 `validate`，
 > 两个服务各用独立历史表（`flyway_schema_history_order` / `_inventory`）共用同一物理库。
+>
+> 逐文件职责、配置读法与建议阅读顺序见 **§13 新人阅读指引（代码地图）**。
 
 ---
 
@@ -226,9 +232,9 @@ smart-logistics-platform/
 ## 8. 验证清单（2026-09-16 实测）
 
 - [x] `mvn clean package -T 1C` — **BUILD SUCCESS**，6 个模块全部产出可执行 fat jar
-- [x] 单元测试 **22 个全部通过**（gateway 3 / order 14 / route 2 / report 1 / inventory 1 / auth 1）
-- [x] `bash scripts/container-verify.sh` — **EXIT=0**：构建 6 镜像 → 启动 → **10/10 容器 healthy** → 端到端断言 **30/30 通过**
-- [x] `bash scripts/smoke-test.sh` — **30/30 通过**（6 服务健康检查 + 4 条网关路由转发 + 业务链路 + JWT 鉴权）
+- [x] 单元测试 **33 个全部通过**（gateway 3 / order 14 / inventory 12 / route 2 / report 1 / auth 1）
+- [x] `bash scripts/container-verify.sh` — **EXIT=0**：构建 6 镜像 → 启动 → **10/10 容器 healthy** → 端到端断言 **32/32 通过**
+- [x] `bash scripts/smoke-test.sh` — **32/32 通过**（6 服务健康检查 + 4 条网关路由转发 + 业务链路 + JWT 鉴权 + P0-5 库存查询/释放闭环）
 - [x] Flyway 迁移：`flyway_schema_history_order` / `flyway_schema_history_inventory` + `orders` / `inventory` 四表均由迁移脚本创建，`ddl-auto=validate` 校验通过
 - [x] 订单幂等导入：重复 `POST /api/orders/pull` 只更新不新增
 - [x] 状态机按订单号隔离：A 订单推进不影响 B 订单
@@ -237,7 +243,7 @@ smart-logistics-platform/
 
 ---
 
-## 9. 已修复的阻塞性问题（累计 23 项）
+## 9. 已修复的阻塞性问题（累计 24 项）
 
 | # | 问题 | 根因 | 修复 |
 |---|---|---|---|
@@ -264,6 +270,7 @@ smart-logistics-platform/
 | 21 | **容器内网关启动即失败并反复重启**：`URISyntaxException: Expected scheme-specific part at index 5: http:` | 服务名/容器名 `aslp_order_service` 含下划线，而 RFC 2396 的 `hostname` 不允许 `_` → `java.net.URI` 把 authority 解析为 registry-based（实测 `getHost()==null`、`getPort()==-1`）→ 网关 `Route.AbstractBuilder.uri(URI)` 命中「http 且无显式端口」分支，用 `UriComponentsBuilder.fromUri(...).port(80).build(true).toUri()` 重建 URI，authority 丢失后生成非法串 `http:` | 为 5 个被网关路由的服务声明**连字符网络别名**（`aslp-order-service` 等），路由 URI 改用别名；`container_name` 保留 `aslp_*` 约定。JDBC / Kafka / Redisson 用各自宽松解析器，实测无需改动 |
 | 22 | **容器内 inventory 连不上 Redis**：Redisson 报 `Connection refused: localhost/127.0.0.1:6379` | `redisson.singleServerConfig.address` **不会被绑定**：`redisson-spring-boot-starter` 只通过 `@EnableConfigurationProperties` 绑定 `spring.data.redis.*`（`RedisProperties`）与 `spring.redis.redisson.{config,file}`（`RedissonProperties`）→ 属性被静默忽略、回落默认 `localhost:6379`；本地开发因 compose 映射了 6379 端口而“碰巧”可用 | 两个 profile 均改用 `spring.data.redis.host/port`（docker = `aslp_redis`，本地 = `localhost`），删除死配置。原 `connectionMinimumIdleSize: 2` 同样从未生效，本次不启用（保持 starter 默认值） |
 | 23 | BFF `GET /bff/orders/search?status=PAID`（**缺 `warehouseCode`**）返回 **HTTP 500** | `BffOrderController.search` 用 `Map.of(...)` 回显可选参数，而 `Map.of` **拒绝 null 值**，缺省筛选项即抛 `NullPointerException` | 改为按需装配 `LinkedHashMap`，仅回显实际传入的筛选项；补回归测试 `bffSearchToleratesOmittedOptionalParameters` |
+| 24 | **释放锁定库存可凭空增加可用库存**（P0-5 实现时发现） | 原 `releaseLockedInventory` 不校验「释放量 ≤ 当前锁定量」，用 `Math.max(0, ...)` 掩盖了越界；扣减/释放均未拦负数；释放路径未加分布式锁，与扣减并发时可互相覆盖 | 越界/非正数一律拒绝；释放与扣减共用 `inventory:lock:{sku}:{warehouse}`；方法返回 boolean 供接口透出 `success` |
 
 ---
 
@@ -282,7 +289,7 @@ smart-logistics-platform/
 2. ~~P0-2 数据库初始化脚本~~ ✅ **本轮完成**
 3. ~~P0-3 全量容器验证~~ ✅ **本轮完成**（`container-verify.sh` EXIT=0，10/10 容器 healthy，30/30 断言）
 4. ~~P0-4 Flyway 版本化迁移~~ ✅ **本轮完成**（`db/migration/{order,inventory}` + `ddl-auto=validate`，替换 `ddl-auto: update`）
-5. **P0-5 `inventory-service` 库存 CRUD**：查询 / 释放锁定库存闭环。
+5. ~~P0-5 `inventory-service` 库存 CRUD~~ ✅ **本轮完成**（`GET /api/inventory/{sku}` + `POST /api/inventory/release`；扣减→查询→释放 闭环单测 12 个全绿）
 6. **P1 M5 可观测性**：Micrometer + Prometheus + Grafana + Loki。
 7. **P1 M5 限流熔断**：Resilience4j + Redis 令牌桶。
 8. **P2 M6 服务治理**：Eureka/Nacos + Spring Cloud Config，网关恢复 `lb://`。
@@ -325,5 +332,111 @@ smart-logistics-platform/
 
 > 约定：**不得**在代码、配置、文档、测试数据中写入真实企业名称、门店地址、联系人、订单号或密钥。
 > 第三方平台名（Amazon / eBay / DHL / DPD / OpenStreetMap 等）仅作为**对外集成对象**出现，属业务必需。
+
+---
+
+## 13. 新人阅读指引（代码地图）
+
+> 目标：让第一次接触本项目的人（或三个月后的自己）在半小时内建立「文件 -> 职责 -> 先看哪个」的地图。
+
+### 13.1 先确认你在哪一层（多项目工作区）
+
+本仓库是一个 git 仓库装了多个独立项目，本项目只是其中之一：
+
+```text
+CJJ_JAVA_WORKSPACE/            <- git 仓库根（.git 在这里）
+├── .gitignore                 # 仓库根忽略规则（macOS 元数据，含 .DS_Store）
+├── smart-logistics-platform/  # 本项目（项目内另有 .gitignore，管 target/ IDE 日志等）
+└── cloud-native-api-gateway/  # 另有 6 个兄弟项目并列，各自独立构建
+```
+
+> 因此 `git status` 看到的路径都带 `smart-logistics-platform/` 前缀，提交发生在仓库根。
+
+### 13.2 顶层文件
+
+| 文件 | 作用 |
+|---|---|
+| `pom.xml` | 聚合 POM：parent=`spring-boot-starter-parent:3.3.0`、`<java.version>21</java.version>`、`spring-cloud.version=2023.0.3`；声明 6 个 module；`pluginManagement` 统一 compiler/surefire/boot 插件（含关闭增量编译的 APFS 修复） |
+| `Dockerfile` | 多阶段：`maven:3.9-eclipse-temurin-21-alpine` 构建 → `eclipse-temurin:21-jre-alpine` 运行；`ARG MODULE` 选择模块；非 root 运行 + 健康检查 |
+| `docker-compose.yml` | PG16 / Redis7 / ZooKeeper+Kafka7.6 / 6 个 Java 服务；`x-java-service` 锚点复用；`healthcheck` + `depends_on: service_healthy`；URI 安全连字符别名 |
+| `.dockerignore` | 排除 `target/`、`.git/`、`.gradle/`，让 POM 预下载层可被 6 个镜像复用 |
+| `.gitignore` | 项目级忽略：`target/`、IDE、`.DS_Store`、日志；**特别注明不能写 `*.sql`**（会吞掉 Flyway 迁移脚本） |
+| `.vscode/settings.json` | `java.autobuild.enabled=false` —— 避免 JDT 语言服务器与 Maven 抢占 `target/classes` |
+| `scripts/container-verify.sh` | P0-3 容器全量验证：构建镜像 → 启动 → 等 healthy → 跑断言 |
+| `scripts/smoke-test.sh` | 端到端冒烟（32 项断言）；`--external` 可直接打已运行的容器 |
+| `test-data/mock-test-data.json` | 假数据：Amazon/eBay 订单、库存预警、VRP、DHL/DPD 轨迹 |
+| `readme.md` / `todo.md` | 架构与接口文档 / 按轮次增量记录的进度与缺陷台账 |
+
+### 13.3 六个模块逐文件职责
+
+**`gateway/`（Spring Cloud Gateway + BFF，WebFlux，:8080）**
+
+| 文件 | 职责 |
+|---|---|
+| `GatewayApplication.java` | 启动类 |
+| `bff/BffOrderController.java` | BFF 聚合端点 `GET /bff/orders/search`（多条件分页，筛选项按需回显） |
+| `bff/OrderQueryRequest.java` | 查询参数对象（Spring Validation 校验） |
+| `security/VpnSecurityConfig.java` | WebFlux 安全链：dev 全放行；docker 强制 JWT + `roles` -> `ROLE_*` 映射 + HS384 解码器 |
+
+**`services/auth-service/`（M1 认证，:8084）**：`config/SecurityConfig`（放行 `/api/auth/**`）、`controller/AuthController`（`/login` 签发、`/health`）、`service/JwtTokenService`（JJWT 0.12.5，HS384，claims 含 roles/scope）
+
+**`services/order-service/`（M1/M4，:8081）**
+
+| 文件 | 职责 |
+|---|---|
+| `entity/OrderRecord.java` | `orders` 表映射：`orderId` 唯一键、`@Version` 乐观锁、`errorTag` 异常标签 |
+| `repository/OrderRepository.java` | 派生查询：单号 / 多条件分页 / 状态与异常统计 |
+| `service/OrderPullService.java` | **主流程**：策略拉取 → DTO 标准化 → 幂等落库（重复只更新）→ 异常打标，整体 `@Transactional` |
+| `controller/OrderController.java` | 查询、多条件分页、统计、`/correct` 客服修正 |
+| `controller/OrderPullController.java` | `POST /pull` 触发拉取 |
+| `controller/OrderStateController.java` | 状态机触发与查询 |
+| `statemachine/` | `OrderStates` / `OrderEvents` / `SimpleOrderStateMachine`（纯 Java）/ `OrderStateMachineService`（按 `orderId` 隔离实例） |
+| `strategy/` | `OrderPullStrategy` 接口 + `MockAmazonStrategy` / `AmazonSpApiStrategy` + `OrderDto` / `OrderPullResult` |
+| `task/OrderSyncTask.java` | 定时流水线式导入（`aslp.order.sync.enabled`） |
+| `task/DatabaseBackupTask.java` | `pg_dump` 定时备份，参数化可开关 |
+
+**`services/inventory-service/`（M2，:8082）**
+
+| 文件 | 职责 |
+|---|---|
+| `entity/InventoryItem.java` | `inventory` 表映射：`availableQty` / `lockedQty` 双状态 + `@Version` |
+| `repository/InventoryRepository.java` | `findBySkuAndWarehouseCode`、`findBySku`、低库存查询 `findByAvailableQtyLessThan` |
+| `service/InventoryLockService.java` | **并发核心**：Redisson `RLock`（键 `inventory:lock:{sku}:{warehouse}`）+ 乐观锁；扣减（预占）与释放（回退） |
+| `dto/InventoryView.java` | 查询响应：SKU 汇总 + 各仓明细（record，天然规避 `Map.of` 的 null 限制） |
+| `controller/InventoryController.java` | `/health`、`/deduct`、`GET /{sku}` 查询、`POST /release` 释放 |
+| `service/ReplenishmentMailService.java` | 补货邮件（SMTP 不可用时仅告警，不阻塞主流程） |
+| `task/InventoryWarningTask.java` | 定时低库存预警，接入补货邮件 |
+
+**`services/route-service/`（M3，:8083）**：`engine/FreightRule` 接口 → `EuropeDhlRule`（首重/续重计费）+ `FreightEngine`（承运商规则选择）；`service/VrpRouteService`（jsprit 求解 VRP）、`service/TrackingService`（轨迹）；`controller/RouteController`
+
+**`services/report-service/`（M1 报表，:8085）**：`controller/ReportController` —— ECharts 看板数据源
+
+### 13.4 配置怎么读（最容易踩坑的地方）
+
+| 路径 | 含义 |
+|---|---|
+| `src/main/resources/application.yml` | 默认 profile：面向本机（`localhost` 数据库 / Redis） |
+| `src/main/resources/application-docker.yml` | `docker` profile：面向容器（服务名寻址、定时任务与备份开启） |
+| `src/main/resources/db/migration/<svc>/V<n>__<desc>.sql` | Flyway 迁移；order 读 `db/migration/order`，inventory 读 `db/migration/inventory`，两服务共用同一物理库但历史表独立 |
+
+三条血泪教训（均已登记到 §9）：只有 `SPRING_PROFILES_ACTIVE=docker` 才会加载 docker 覆盖；`redisson.singleServerConfig.*` 不会被 starter 绑定（要写 `spring.data.redis.*`）；容器主机名的下划线对 `java.net.URI` 非法（网关路由要用连字符别名）。
+
+### 13.5 测试怎么读
+
+| 类型 | 位置 | 特点 |
+|---|---|---|
+| 切片测试 `@WebMvcTest` | `*/controller/*Test.java` | 只加载 Web 层，`@MockBean` 掉服务与仓库，断言 HTTP 状态与 JSON |
+| 纯单元测试 | `*/service/*Test.java`、`*/statemachine/*Test.java` | Mockito 驱动，不启动 Spring；库存闭环测试用 Mock 的 `RLock` + 真实业务逻辑 |
+| 端到端断言 | `scripts/smoke-test.sh` | 经网关 8080 打真实服务，覆盖路由、鉴权与业务链路 |
+
+### 13.6 建议的阅读顺序
+
+1. `docker-compose.yml` —— 先看系统长什么样、谁依赖谁
+2. `readme.md` §2 / §4 —— 技术栈与接口速查
+3. `gateway/.../application-docker.yml` + `security/VpnSecurityConfig.java` —— 流量入口与鉴权
+4. `order-service/service/OrderPullService.java` —— 最能体现工程能力的主流程（策略 + 幂等 + 事务）
+5. `order-service/statemachine/SimpleOrderStateMachine.java` —— 纯 Java 状态机与按订单号隔离
+6. `inventory-service/service/InventoryLockService.java` —— 分布式锁 + 乐观锁双层防超卖
+7. `scripts/smoke-test.sh` —— 反向检验自己对上面各环节的理解
 
 ---

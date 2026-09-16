@@ -1,14 +1,22 @@
 package com.aslp.inventory.controller;
 
+import com.aslp.inventory.entity.InventoryItem;
 import com.aslp.inventory.repository.InventoryRepository;
 import com.aslp.inventory.service.InventoryLockService;
+import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.autoconfigure.web.servlet.WebMvcTest;
 import org.springframework.boot.test.mock.mockito.MockBean;
 import org.springframework.test.web.servlet.MockMvc;
 
+import java.math.BigDecimal;
+import java.util.List;
+import java.util.Optional;
+
+import static org.mockito.Mockito.when;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.get;
+import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.post;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.jsonPath;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.status;
 
@@ -37,5 +45,84 @@ class InventoryControllerTest {
                 .andExpect(status().isOk())
                 .andExpect(jsonPath("$.status").value("inventory-service up"))
                 .andExpect(jsonPath("$.warehouse").value("Bruchsal / Mönchengladbach"));
+    }
+
+    private static InventoryItem item(String warehouse, int available, int locked) {
+        InventoryItem entity = new InventoryItem();
+        entity.setSku("AMZ-1001");
+        entity.setWarehouseCode(warehouse);
+        entity.setAvailableQty(available);
+        entity.setLockedQty(locked);
+        entity.setUnitPrice(new BigDecimal("89.90"));
+        return entity;
+    }
+
+    @Test
+    @DisplayName("P0-5 查询：不带仓库参数时返回全部仓库汇总（按仓库编码排序）")
+    void queryReturnsAllWarehouses() throws Exception {
+        when(repository.findBySku("AMZ-1001")).thenReturn(List.of(
+                item("Mönchengladbach", 95, 3),
+                item("Bruchsal", 320, 12)));
+
+        mockMvc.perform(get("/api/inventory/AMZ-1001"))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.sku").value("AMZ-1001"))
+                .andExpect(jsonPath("$.totalAvailable").value(415))
+                .andExpect(jsonPath("$.totalLocked").value(15))
+                .andExpect(jsonPath("$.items.length()").value(2))
+                .andExpect(jsonPath("$.items[0].warehouseCode").value("Bruchsal"))
+                .andExpect(jsonPath("$.items[1].warehouseCode").value("Mönchengladbach"));
+    }
+
+    @Test
+    @DisplayName("P0-5 查询：按仓库过滤时只返回该仓明细")
+    void queryFiltersByWarehouse() throws Exception {
+        when(repository.findBySkuAndWarehouseCode("AMZ-1001", "Bruchsal"))
+                .thenReturn(Optional.of(item("Bruchsal", 318, 14)));
+
+        mockMvc.perform(get("/api/inventory/AMZ-1001").param("warehouseCode", "Bruchsal"))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.totalAvailable").value(318))
+                .andExpect(jsonPath("$.totalLocked").value(14))
+                .andExpect(jsonPath("$.items.length()").value(1))
+                .andExpect(jsonPath("$.items[0].availableQty").value(318))
+                .andExpect(jsonPath("$.items[0].lockedQty").value(14));
+    }
+
+    @Test
+    @DisplayName("P0-5 查询：SKU 完全不存在时返回 404")
+    void queryReturns404ForUnknownSku() throws Exception {
+        when(repository.findBySku("NOPE")).thenReturn(List.of());
+
+        mockMvc.perform(get("/api/inventory/NOPE"))
+                .andExpect(status().isNotFound());
+    }
+
+    @Test
+    @DisplayName("P0-5 释放：服务成功后透出 success=true")
+    void releaseReturnsSuccess() throws Exception {
+        when(lockService.releaseLockedInventory("AMZ-1001", "Bruchsal", 2)).thenReturn(true);
+
+        mockMvc.perform(post("/api/inventory/release")
+                        .param("sku", "AMZ-1001")
+                        .param("warehouseCode", "Bruchsal")
+                        .param("qty", "2"))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.sku").value("AMZ-1001"))
+                .andExpect(jsonPath("$.warehouse").value("Bruchsal"))
+                .andExpect(jsonPath("$.success").value(true));
+    }
+
+    @Test
+    @DisplayName("P0-5 释放：服务拒绝（超锁定量）时透出 success=false")
+    void releaseReturnsFailure() throws Exception {
+        when(lockService.releaseLockedInventory("AMZ-1001", "Bruchsal", 50)).thenReturn(false);
+
+        mockMvc.perform(post("/api/inventory/release")
+                        .param("sku", "AMZ-1001")
+                        .param("warehouseCode", "Bruchsal")
+                        .param("qty", "50"))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.success").value(false));
     }
 }

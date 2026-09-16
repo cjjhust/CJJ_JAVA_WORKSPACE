@@ -1,5 +1,40 @@
 ---
-## � P0-3 容器全量验证（2026-09-16 轮次 4）— 用户要求：跑完 P0-3 → 更新 todo → 提交变更
+## P0-5 库存 CRUD 闭环（2026-09-16 轮次 5）— 用户要求：接着做 P0-5 + 把「代码地图」沉淀进 readme
+
+> 结果：**`mvn clean package -T 1C` BUILD SUCCESS（33 单测全绿）｜ `container-verify.sh` EXIT=0（10/10 healthy，端到端断言 32/32）**
+
+### A. 交付内容
+
+- [x] `GET /api/inventory/{sku}`（可选 `?warehouseCode=`）：统一返回「SKU 汇总 + 各仓明细」，SKU 不存在返 404
+- [x] `POST /api/inventory/release`：释放锁定库存（支付失败 / 订单取消 / 超时未支付），对接 `releaseLockedInventory`
+- [x] `releaseLockedInventory` 改造：改为返回 boolean（供接口透出结果），并与扣减**共用同一把分布式锁**
+- [x] 新增 `dto/InventoryView`（record）：汇总可用/锁定量 + 各仓明细按仓库编码排序，输出稳定便于断言
+- [x] 新增 `InventoryLockServiceTest`（6 例）：**扣减 -> 查询 -> 释放三步闭环** + 余额不足 / 释放越界 / 非正数 / 抢锁失败 / 行不存在
+- [x] 扩展 `InventoryControllerTest`（1 -> 6 例）：全仓汇总 / 按仓过滤 / 404 / 释放成功 / 释放被拒
+- [x] 冒烟脚本新增 2 项端到端断言（库存查询 + 释放），并修正 M2 段落里「P0-2 初始化脚本」的过时描述
+
+### B. 本轮修复的缺陷
+
+| # | 问题 | 根因 | 修复 |
+|---|---|---|---|
+| 24 | 释放锁定库存可**凭空增加可用库存**；扣减传负数同样会造库存 | 原 `releaseLockedInventory` 不校验「释放量 ≤ 当前锁定量」，用 `Math.max(0, ...)` 掩盖了越界；扣减/释放都未拦负数；释放路径未加分布式锁，与扣减并发时可互相覆盖 | 越界/非正数一律拒绝（返回 false）；释放与扣减共用 `inventory:lock:{sku}:{warehouse}`；方法返回 boolean 供接口透出结果 |
+
+### C. 验证证据
+
+| 验证项 | 结果 |
+|---|---|
+| `mvn clean package -T 1C` | ✅ BUILD SUCCESS；**33 个单测全绿**（gateway 3 / order 14 / inventory 12 / route 2 / report 1 / auth 1） |
+| inventory 闭环单测 | ✅ `InventoryLockServiceTest` 6/6 —— 扣减后可用 320->318、锁定 12->14，释放后回到 320/12；释放 50（锁定仅 3）被拒且可用量不变 |
+| `bash scripts/container-verify.sh` | ✅ **EXIT=0**；10/10 容器 healthy；端到端断言 **32/32**（含新增的库存查询、释放闭环断言） |
+| 释放断言的强度 | 服务侧校验「释放量 ≤ 锁定量」→ `success:true` 同时证明前一步扣减真的把 2 件转成了锁定库存（双状态一致） |
+
+### D. 附带的文档修复
+
+- [x] 修复 `todo.md` 顶部 2 处编码损坏（上轮写入的 4 字节 emoji 被替换为 U+FFFD），`## 🔒 脱敏重构` 标题完整恢复
+- [x] `readme.md` 新增 **§13 新人阅读指引（代码地图）**：仓库分层、顶层文件、逐文件职责、profile 读法、测试布局、建议阅读顺序
+
+---
+## P0-3 容器全量验证（2026-09-16 轮次 4）— 用户要求：跑完 P0-3 → 更新 todo → 提交变更
 
 > 结果：**`bash scripts/container-verify.sh` EXIT=0 ｜ 10/10 容器 `healthy` ｜ 端到端断言 30/30 通过**
 > 过程中定位并修复 **3 个真实缺陷**：2 个容器启动阻塞项 + 1 个接口 500。
@@ -22,7 +57,7 @@
 | Flyway 迁移 | ✅ 库内 `flyway_schema_history_order` / `flyway_schema_history_inventory` / `orders` / `inventory` 四张表均由迁移脚本创建，`ddl-auto: validate` 校验通过 |
 
 ---
-## �🔒 脱敏重构 + P0 基线补齐（2026-09-16 轮次 3）— 用户要求：去除全部具体公司字样 / 启动 P0 任务
+## 🔒 脱敏重构 + P0 基线补齐（2026-09-16 轮次 3）— 用户要求：去除全部具体公司字样 / 启动 P0 任务
 
 ### A. 信息安全脱敏（全量，含代码/配置/文档）
 
@@ -96,7 +131,7 @@
 
 - [x] **P0-3 全量容器验证** ✅ **2026-09-16 完成** — `bash scripts/container-verify.sh` EXIT=0，10/10 容器 healthy，端到端断言 30/30 通过（本轮修复 3 个缺陷，详见顶部「轮次 4」）
 - [x] **P0-4 Flyway** ✅ **2026-09-16 完成** — `order-service` / `inventory-service` 各自持有版本化迁移（`db/migration/order`、`db/migration/inventory`）+ `ddl-auto: validate`；库内 `flyway_schema_history_*` 与业务表均由迁移创建
-- [ ] **P0-5 `inventory-service` 库存 CRUD**：查询 / 释放锁定库存闭环
+- [x] **P0-5 `inventory-service` 库存 CRUD** ✅ **2026-09-16 完成** — `GET /api/inventory/{sku}`（可选按仓过滤）+ `POST /api/inventory/release`；验收：扣减 → 查询 → 释放三步闭环单测 6 例全绿（详见顶部「轮次 5」）
 
 ---
 
@@ -172,8 +207,8 @@
   - 后续变更：该挂载方式已被 **P0-4 的 Flyway 版本化迁移取代**（`docker/postgres/init/` 目录与其 compose 挂载均已移除），本条仅作历史记录保留
 - [x] **P0-3 全量容器验证** ✅ **2026-09-16 完成** — `bash scripts/container-verify.sh` EXIT=0，10/10 容器 `healthy`，并跑通 `scripts/smoke-test.sh`（30/30）；顺带修复 2 个容器启动阻塞缺陷 + 1 个 BFF 500 缺陷（详见顶部「轮次 4」）
 - [x] **P0-4 引入 Flyway** ✅ **2026-09-16 完成** — `order-service` / `inventory-service` 统一用 `flyway-core` 管理版本化迁移，`ddl-auto: validate`（旧 `docker/postgres/init/` 脚本与其 `docker-entrypoint-initdb.d` 挂载已移除，避免双真相源漂移）
-- [ ] **P0-5 补齐 `inventory-service` 库存 CRUD**：`GET /api/inventory/{sku}`、`POST /api/inventory/release`（释放锁定库存，对接 `releaseLockedInventory`）
-  - 验收：扣减 → 查询 → 释放 三步闭环单元测试通过
+- [x] **P0-5 补齐 `inventory-service` 库存 CRUD** ✅ **2026-09-16 完成** — `GET /api/inventory/{sku}`、`POST /api/inventory/release`（对接 `releaseLockedInventory`）；
+  - 验收：扣减 → 查询 → 释放 三步闭环单元测试通过（`InventoryLockServiceTest` 6/6，含「释放量 > 锁定量」拒绝）
 
 ### 🟠 P1 — M5 能力补齐（预计 1-2 周）
 

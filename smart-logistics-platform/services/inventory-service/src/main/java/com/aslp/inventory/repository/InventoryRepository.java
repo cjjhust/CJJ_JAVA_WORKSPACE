@@ -11,6 +11,12 @@ public interface InventoryRepository extends JpaRepository<InventoryItem, Long> 
     Optional<InventoryItem> findBySkuAndWarehouseCode(String sku, String warehouseCode);
 
     /**
+     * P0-5 查询：按 SKU 列出全部仓库的库存行（同一 SKU 在两仓各有一行）。
+     * 结果由调用方按 warehouseCode 排序后再输出，保证响应稳定。
+     */
+    List<InventoryItem> findBySku(String sku);
+
+    /**
      * 安全库存预警查询：按「可用库存」字段名派生（availableQty）。
      * 注意：方法名必须与实体属性一致，否则 Spring Data JPA 启动时抛 PropertyReferenceException。
      */

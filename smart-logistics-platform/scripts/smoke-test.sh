@@ -207,13 +207,20 @@ check_post "客服远程修正异常单   POST /api/orders/AMZ-1003/correct" \
 check "修正后异常清零       GET  /api/orders/stats" \
     "http://localhost:8080/api/orders/stats" '"withErrorTag":0'
 
-echo "--- M2 多仓库存（P0-2：数据库初始化脚本已灌入两仓种子数据）---"
+echo "--- M2 多仓库存（种子数据由 P0-4 的 Flyway 迁移灌入）---"
 check "库存健康检查         GET  /api/inventory/health" \
     "http://localhost:8080/api/inventory/health" 'Bruchsal / Mönchengladbach'
 check_post "Redisson 锁扣减库存  POST /api/inventory/deduct" \
     "http://localhost:8080/api/inventory/deduct?sku=AMZ-1001&warehouseCode=Bruchsal&qty=2" '"success":true'
 check_post "库存不足应被拒绝     POST /api/inventory/deduct(超量)" \
     "http://localhost:8080/api/inventory/deduct?sku=AMZ-1001&warehouseCode=Bruchsal&qty=999999" '"success":false'
+# P0-5：扣减 -> 查询 -> 释放 三步闭环。
+# 释放断言不只是「接口通了」：服务侧会校验「释放量 <= 当前锁定量」，
+# 因此 success=true 同时证明了前面扣减真的把 2 件转成了锁定库存（双状态一致）。
+check "库存查询            GET  /api/inventory/{sku}" \
+    "http://localhost:8080/api/inventory/AMZ-1001?warehouseCode=Bruchsal" '"sku":"AMZ-1001"'
+check_post "释放锁定库存        POST /api/inventory/release" \
+    "http://localhost:8080/api/inventory/release?sku=AMZ-1001&warehouseCode=Bruchsal&qty=2" '"success":true'
 
 echo "--- M4 订单状态机（FBA 退货换标，按订单号隔离）---"
 STATE_ORDER="SMOKE-$(date +%s)"
