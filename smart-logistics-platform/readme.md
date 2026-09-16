@@ -1,7 +1,7 @@
 # Smart Logistics Platform (ASLP) — 海外仓智能物流系统
 
 > 最后更新：2026-09-16 ｜ 版本 `1.0.0-SNAPSHOT`
-> 状态：**M1–M4 全部交付 + P0 基线补齐；`mvn clean package -T 1C` 全绿（18 测试），28 项端到端冒烟测试通过**
+> 状态：**M1–M4 全部交付 + P0 基线补齐（P0-1～P0-4）；`mvn clean package -T 1C` 全绿（22 测试），P0-3 容器全量验证 10/10 healthy + 端到端冒烟 30/30 通过**
 > 包根：`com.aslp.*`（已脱敏，详见 §12） ｜ 构建：Maven 3.9+ “高铁模式”
 
 ---
@@ -209,8 +209,8 @@ smart-logistics-platform/
 | 配置项 | 本地（默认 profile） | 容器（`SPRING_PROFILES_ACTIVE=docker`） |
 |---|---|---|
 | PostgreSQL | `localhost:5432/aslp`，`aslp` / `aslp123` | `aslp_postgres:5432/aslp`，同上 |
-| Redis | `redis://localhost:6379` | `redis://aslp_redis:6379` |
-| 网关下游 URI | `http://localhost:8081..8085` | `http://aslp_order_service:8081` 等容器名 |
+| Redis 连接 | `spring.data.redis.host=localhost` / `port=6379` | `spring.data.redis.host=aslp_redis` / `port=6379`（**必须**写 `spring.data.redis.*`；`redisson.singleServerConfig.*` 不被 starter 绑定，会被静默忽略并回落 localhost） |
+| 网关下游 URI | `http://localhost:8081..8085` | `http://aslp-order-service:8081` 等**连字符网络别名**（下划线主机名非法，见 §9 #21） |
 | Schema 管理 | Flyway（`db/migration/{order,inventory}`），`ddl-auto=validate` | 同上 |
 | Flyway 历史表 | `flyway_schema_history_order` / `flyway_schema_history_inventory` | 同上 |
 | JWT 密钥 | `aslp.jwt.secret`（auth-service 签发用） | `ASLP_JWT_SECRET` 注入，**gateway 与 auth-service 必须一致** |
@@ -226,17 +226,18 @@ smart-logistics-platform/
 ## 8. 验证清单（2026-09-16 实测）
 
 - [x] `mvn clean package -T 1C` — **BUILD SUCCESS**，6 个模块全部产出可执行 fat jar
-- [x] 单元测试 **18 个全部通过**（gateway 2 / order 14 / route 2 / report 1 / inventory 1 / auth 1）
-- [x] `bash scripts/smoke-test.sh` — **28/28 通过**（6 服务健康检查 + 6 条网关路由 + 15 项业务链路 + JWT 签发）
+- [x] 单元测试 **22 个全部通过**（gateway 3 / order 14 / route 2 / report 1 / inventory 1 / auth 1）
+- [x] `bash scripts/container-verify.sh` — **EXIT=0**：构建 6 镜像 → 启动 → **10/10 容器 healthy** → 端到端断言 **30/30 通过**
+- [x] `bash scripts/smoke-test.sh` — **30/30 通过**（6 服务健康检查 + 4 条网关路由转发 + 业务链路 + JWT 鉴权）
+- [x] Flyway 迁移：`flyway_schema_history_order` / `flyway_schema_history_inventory` + `orders` / `inventory` 四表均由迁移脚本创建，`ddl-auto=validate` 校验通过
 - [x] 订单幂等导入：重复 `POST /api/orders/pull` 只更新不新增
 - [x] 状态机按订单号隔离：A 订单推进不影响 B 订单
-- [x] 浏览器访问 `http://localhost:8080/bff/orders/search` 返回 BFF JSON（原 `chrome-error` 已消除）
-- [x] `docker compose up -d aslp_postgres aslp_redis` — 两容器 healthy，`01-schema.sql` 自动建表 + 灌入 8 条两仓种子数据
+- [x] 匿名访问 `/bff/orders/search` 返回 401、携带 JWT 返回 200（docker profile 鉴权生效）
 - [x] `docker compose config` — 全部服务配置有效
 
 ---
 
-## 9. 已修复的阻塞性问题（本轮累计 17 项）
+## 9. 已修复的阻塞性问题（累计 23 项）
 
 | # | 问题 | 根因 | 修复 |
 |---|---|---|---|
@@ -260,6 +261,9 @@ smart-logistics-platform/
 | 18 | **docker profile 下 VPN 鉴权形同虚设** | 网关用 `withJwkSetUri` 校验，但 auth-service 只签发 HS384 对称令牌、**没有 JWKS 端点**，公钥永远拉不到；且默认转换器只识别 `scope`，`hasRole("USER")` 永不匹配（403） | 改为与 auth-service 共享 HS384 密钥解码（`ASLP_JWT_SECRET`），并新增 `roles` → `ROLE_*` 权限映射；RS256+JWKS 保留为 P2-5 |
 | 19 | **`.gitignore` 的 `*.sql` 会吞掉所有数据库脚本** | 规则本意是忽略 `pg_dump` 转储，但 `*.sql` 无差别匹配 —— 导致原 `01-schema.sql` 从未被提交，Flyway 迁移脚本也会同样丢失 | 改为精确匹配 `*.dump` / `*.dump.sql` / `**/aslp_backup_*.sql`，并加注释说明原因 |
 | 20 | 目录名拼写错误 `smart-logistocs-platform` | 建项目时手滑（`logistocs`） | 重命名为 `smart-logistics-platform`，同步 Maven `artifactId` 与文档引用（git 识别为纯重命名） |
+| 21 | **容器内网关启动即失败并反复重启**：`URISyntaxException: Expected scheme-specific part at index 5: http:` | 服务名/容器名 `aslp_order_service` 含下划线，而 RFC 2396 的 `hostname` 不允许 `_` → `java.net.URI` 把 authority 解析为 registry-based（实测 `getHost()==null`、`getPort()==-1`）→ 网关 `Route.AbstractBuilder.uri(URI)` 命中「http 且无显式端口」分支，用 `UriComponentsBuilder.fromUri(...).port(80).build(true).toUri()` 重建 URI，authority 丢失后生成非法串 `http:` | 为 5 个被网关路由的服务声明**连字符网络别名**（`aslp-order-service` 等），路由 URI 改用别名；`container_name` 保留 `aslp_*` 约定。JDBC / Kafka / Redisson 用各自宽松解析器，实测无需改动 |
+| 22 | **容器内 inventory 连不上 Redis**：Redisson 报 `Connection refused: localhost/127.0.0.1:6379` | `redisson.singleServerConfig.address` **不会被绑定**：`redisson-spring-boot-starter` 只通过 `@EnableConfigurationProperties` 绑定 `spring.data.redis.*`（`RedisProperties`）与 `spring.redis.redisson.{config,file}`（`RedissonProperties`）→ 属性被静默忽略、回落默认 `localhost:6379`；本地开发因 compose 映射了 6379 端口而“碰巧”可用 | 两个 profile 均改用 `spring.data.redis.host/port`（docker = `aslp_redis`，本地 = `localhost`），删除死配置。原 `connectionMinimumIdleSize: 2` 同样从未生效，本次不启用（保持 starter 默认值） |
+| 23 | BFF `GET /bff/orders/search?status=PAID`（**缺 `warehouseCode`**）返回 **HTTP 500** | `BffOrderController.search` 用 `Map.of(...)` 回显可选参数，而 `Map.of` **拒绝 null 值**，缺省筛选项即抛 `NullPointerException` | 改为按需装配 `LinkedHashMap`，仅回显实际传入的筛选项；补回归测试 `bffSearchToleratesOmittedOptionalParameters` |
 
 ---
 
@@ -271,13 +275,13 @@ smart-logistics-platform/
 - **无邮件服务器**：补货邮件走 `localhost:1025`，失败仅告警不阻塞（已关闭健康探测）。
 - **安全演示态**：`auth-service` 未接入用户表，按用户名推导角色；JWT 为对称密钥，网关侧 JWKS 端点为占位。
 - **未接入真实平台**：Amazon SP-API / eBay API 为策略骨架 + Mock 实现。
-- **DDL 非版本化**：目前用 `01-schema.sql` + `ddl-auto: update`，尚未引入 Flyway（见路线 P0-4）。
+- ~~DDL 非版本化~~ ✅ **已解决（P0-4）**：数据库结构由 Flyway 版本化管理（`db/migration/{order,inventory}`），`ddl-auto=validate`。
 
 ### 后续路线（详见 `todo.md`）
 1. ~~P0-1 `order-service` 持久化~~ ✅ **本轮完成**
 2. ~~P0-2 数据库初始化脚本~~ ✅ **本轮完成**
-3. **P0-3 全量容器验证**：`docker compose up -d --build` 六服务全部 healthy。
-4. **P0-4 Flyway 版本化迁移**：替代 `ddl-auto: update`，切换为 `validate`。
+3. ~~P0-3 全量容器验证~~ ✅ **本轮完成**（`container-verify.sh` EXIT=0，10/10 容器 healthy，30/30 断言）
+4. ~~P0-4 Flyway 版本化迁移~~ ✅ **本轮完成**（`db/migration/{order,inventory}` + `ddl-auto=validate`，替换 `ddl-auto: update`）
 5. **P0-5 `inventory-service` 库存 CRUD**：查询 / 释放锁定库存闭环。
 6. **P1 M5 可观测性**：Micrometer + Prometheus + Grafana + Loki。
 7. **P1 M5 限流熔断**：Resilience4j + Redis 令牌桶。
@@ -299,6 +303,9 @@ smart-logistics-platform/
 | 库存扣减报 `StaleStateException` / 0 rows updated | 检查 `inventory.version` 是否被写成 NULL（种子数据必须为 `0`） |
 | 邮件相关告警刷屏 | 已关闭 mail 健康探测；如需真实邮件请部署 SMTP 并改 `spring.mail.host` |
 | Docker 构建缓慢 | `docker compose build` 会命中 POM 预下载层；`target/` 已在 `.dockerignore` 中排除 |
+| 网关启动报 `URISyntaxException: Expected scheme-specific part at index 5: http:` | 路由 URI 的主机名含下划线（如 `aslp_order_service`）—— Java 的 `java.net.URI` 无法表示。改用 compose 中的连字符别名（`aslp-order-service`），见 §7 |
+| 容器内服务报 Redis `Connection refused: localhost:6379` | 确认写的是 `spring.data.redis.*`（starter 不识别 `redisson.singleServerConfig.*`），见 §7 / §9 #22 |
+| `.DS_Store` 出现在 `git status` | macOS Finder 生成。已在**仓库根** `.gitignore` 忽略，并一次性执行 `git rm --cached .DS_Store` 取消跟踪 |
 
 ---
 
@@ -311,6 +318,7 @@ smart-logistics-platform/
 | Java 包根 | 统一 `com.aslp.*`（`aslp` = Smart Logistics Platform 项目缩写，不含任何主体标识） |
 | Maven groupId | `com.aslp` |
 | 容器 / 网络 / 数据卷 | `aslp_*` 前缀（`aslp_postgres`、`aslp_net`、`aslp_pg_data` 等） |
+| 供 URI 寻址的主机名 | 下划线不是合法 `hostname` 字符（RFC 2396）→ 被网关路由寻址的服务额外声明**连字符网络别名**（`aslp-order-service` 等）供 URI 使用；`container_name` 仍为 `aslp_*` |
 | 邮件地址 | `warehouse-manager@aslp.internal`（保留域名 `.internal`，不可投递） |
 | 密钥 | 仅以占位符 `aslp-dev-secret-key-change-me-in-production-*` 出现；生产必须由 `ASLP_JWT_SECRET` 注入 |
 | 仓库 / 组织名 | 文本中的克隆地址为占位示例 |

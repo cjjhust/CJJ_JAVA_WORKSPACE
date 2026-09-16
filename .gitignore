@@ -1,0 +1,19 @@
+# =============================================================================
+# 仓库根 .gitignore（CJJ_JAVA_WORKSPACE —— 多项目工作区）
+#
+# 说明：各子项目有各自的 .gitignore（如 smart-logistics-platform/.gitignore），
+# 本文件只负责「跨项目共用的系统级垃圾文件」，避免 macOS 元数据被误提交。
+# =============================================================================
+
+# macOS Finder 元数据。
+# 历史遗留：仓库根的 .DS_Store 曾被跟踪并随提交进入版本库，
+# 已执行一次性 `git rm --cached .DS_Store` 取消跟踪；此后由本规则忽略。
+.DS_Store
+
+# macOS 其他系统级文件
+.AppleDouble
+.LSOverride
+._*
+.Spotlight-V100
+.Trashes
+.fseventsd
