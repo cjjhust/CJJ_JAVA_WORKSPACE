@@ -1,0 +1,24 @@
+{
+  "request": {
+    "method": "GET",
+    "urlPath": "/orders/v0/orders",
+    "queryParameters": {
+      "MarketplaceIds": {
+        "equalTo": "AMZN-TIMEOUT"
+      }
+    }
+  },
+  "response": {
+    "status": 200,
+    "fixedDelayMilliseconds": 3000,
+    "headers": {
+      "Content-Type": "application/json"
+    },
+    "jsonBody": {
+      "payload": {
+        "Orders": [],
+        "comment": "延迟 3s 才返回：order-service 容器 read-timeout=1s，用于验证「读超时 -> 可重试异常」"
+      }
+    }
+  }
+}

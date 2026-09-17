@@ -3,6 +3,7 @@ package com.aslp.inventory.controller;
 import com.aslp.inventory.entity.InventoryItem;
 import com.aslp.inventory.repository.InventoryRepository;
 import com.aslp.inventory.service.InventoryLockService;
+import com.aslp.inventory.task.InventoryWarningTask;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
@@ -38,6 +39,9 @@ class InventoryControllerTest {
 
     @MockBean
     private InventoryLockService lockService;
+
+    @MockBean
+    private InventoryWarningTask warningTask;
 
     @Test
     void healthEndpointReturnsUp() throws Exception {
@@ -124,5 +128,47 @@ class InventoryControllerTest {
                         .param("qty", "50"))
                 .andExpect(status().isOk())
                 .andExpect(jsonPath("$.success").value(false));
+    }
+
+    @Test
+    @DisplayName("P1-5 手动触发预警：透出 lowStockCount / mailSent / forced")
+    void triggerWarningReturnsScanResult() throws Exception {
+        when(warningTask.scan(true)).thenReturn(
+                new InventoryWarningTask.WarningScanResult(2, 10, true, false, "已发送补货建议邮件"));
+
+        mockMvc.perform(post("/api/inventory/warnings/trigger").param("force", "true"))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.lowStockCount").value(2))
+                .andExpect(jsonPath("$.threshold").value(10))
+                .andExpect(jsonPath("$.mailSent").value(true))
+                .andExpect(jsonPath("$.mailSkipped").value(false))
+                .andExpect(jsonPath("$.forced").value(true));
+    }
+
+    @Test
+    @DisplayName("P1-5 手动触发预警：默认 force=true（CLI 里不用额外带参数）")
+    void triggerWarningDefaultsToForce() throws Exception {
+        when(warningTask.scan(true)).thenReturn(
+                new InventoryWarningTask.WarningScanResult(0, 10, false, false, "库存充足"));
+
+        mockMvc.perform(post("/api/inventory/warnings/trigger"))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.mailSent").value(false));
+    }
+
+    @Test
+    @DisplayName("P1-5 预警状态：透出阈值、节流剩余秒数与低库存明细")
+    void warningStatusExposesLowStockAndThrottle() throws Exception {
+        when(warningTask.threshold()).thenReturn(10);
+        when(warningTask.secondsUntilMailAllowed()).thenReturn(1800L);
+        when(repository.findByAvailableQtyLessThan(10))
+                .thenReturn(List.of(item("Bruchsal", 4, 0)));
+
+        mockMvc.perform(get("/api/inventory/warnings/status"))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.threshold").value(10))
+                .andExpect(jsonPath("$.secondsUntilMailAllowed").value(1800))
+                .andExpect(jsonPath("$.lowStock.length()").value(1))
+                .andExpect(jsonPath("$.lowStock[0].warehouse").value("Bruchsal"));
     }
 }

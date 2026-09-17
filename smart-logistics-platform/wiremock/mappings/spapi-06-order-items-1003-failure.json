@@ -1,0 +1,20 @@
+{
+  "request": {
+    "method": "GET",
+    "urlPath": "/orders/v0/orders/AMZ-DE-1003/orderItems"
+  },
+  "response": {
+    "status": 500,
+    "headers": {
+      "Content-Type": "application/json"
+    },
+    "jsonBody": {
+      "errors": [
+        {
+          "code": "InternalFailure",
+          "message": "商品明细接口模拟故障：用于验证「明细失败不影响主流程」"
+        }
+      ]
+    }
+  }
+}

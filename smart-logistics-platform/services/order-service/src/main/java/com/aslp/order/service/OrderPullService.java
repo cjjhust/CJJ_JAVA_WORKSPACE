@@ -5,6 +5,8 @@ import com.aslp.order.repository.OrderRepository;
 import com.aslp.order.strategy.OrderDto;
 import com.aslp.order.strategy.OrderPullResult;
 import io.micrometer.core.instrument.MeterRegistry;
+import io.micrometer.observation.Observation;
+import io.micrometer.observation.ObservationRegistry;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.stereotype.Service;
@@ -38,6 +40,12 @@ public class OrderPullService {
     /** P1-1：订单条目级计数器（带 platform / result 标签）。 */
     public static final String METRIC_PULL_ORDERS = "aslp.order.pull.orders";
 
+    /**
+     * P1-3：拉取的观测名（Zipkin 里就能看到这次拉取，以及它内部的策略调用）。
+     * 经 Boot 自动注册的 MeterObservationHandler 也会产生同名 Timer 指标。
+     */
+    public static final String OBSERVATION_PULL = "aslp.order.pull";
+
     /** 仓库编码归一化：兼容 API 返回的无变音符写法，统一为业务展示口径。 */
     private static final Map<String, String> WAREHOUSE_ALIASES = Map.of(
             "bruchsal", "Bruchsal",
@@ -49,11 +57,14 @@ public class OrderPullService {
     private final PlatformPullGateway platformPull;
     private final OrderRepository repository;
     private final MeterRegistry meterRegistry;
+    private final ObservationRegistry observationRegistry;
 
-    public OrderPullService(PlatformPullGateway platformPull, OrderRepository repository, MeterRegistry meterRegistry) {
+    public OrderPullService(PlatformPullGateway platformPull, OrderRepository repository,
+                            MeterRegistry meterRegistry, ObservationRegistry observationRegistry) {
         this.platformPull = platformPull;
         this.repository = repository;
         this.meterRegistry = meterRegistry;
+        this.observationRegistry = observationRegistry;
     }
 
     /**
@@ -81,6 +92,34 @@ public class OrderPullService {
      */
     @Transactional
     public PullSummary pullAndPersist() {
+        Observation observation = Observation.createNotStarted(OBSERVATION_PULL, observationRegistry).start();
+        // openScope 会把 traceId/spanId 放进 MDC：日志里能直接搜到同一条链路
+        try (Observation.Scope ignored = observation.openScope()) {
+            PullSummary summary = doPullAndPersist();
+
+            // 低基数：平台 + 结局（会同时出现在 span 与指标标签上）
+            observation.lowCardinalityKeyValue("platform", tagValue(summary.platform()));
+            observation.lowCardinalityKeyValue("outcome",
+                    summary.success() ? "success" : (summary.degraded() ? "degraded" : "failed"));
+            // 高基数：只进 span（跟着指标走会炸时间序列）
+            observation.highCardinalityKeyValue("fetched", String.valueOf(summary.fetched()));
+            observation.highCardinalityKeyValue("created", String.valueOf(summary.created()));
+            observation.highCardinalityKeyValue("updated", String.valueOf(summary.updated()));
+            observation.highCardinalityKeyValue("flagged", String.valueOf(summary.flagged()));
+            if (summary.errorMsg() != null) {
+                observation.highCardinalityKeyValue("errorMsg", summary.errorMsg());
+            }
+            return summary;
+        } catch (RuntimeException e) {
+            observation.error(e);
+            throw e;
+        } finally {
+            observation.stop();
+        }
+    }
+
+    /** 实际拉取与落库逻辑（放外层只负责埋点与作用域管理）。 */
+    private PullSummary doPullAndPersist() {
         // P1-2：平台调用统一走容错网关（重试 -> 熔断 -> 舱壁 -> 降级回退），此处拿到的一定是结果而非异常
         OrderPullResult result = platformPull.pull();
 

@@ -1,0 +1,48 @@
+{
+  "request": {
+    "method": "GET",
+    "urlPath": "/orders/v0/orders",
+    "queryParameters": {
+      "MarketplaceIds": {
+        "equalTo": "A1PA6795UKMFR9"
+      },
+      "NextToken": {
+        "absent": true
+      },
+      "CreatedAfter": {
+        "matches": "\\d{4}-\\d{2}-\\d{2}T.*Z"
+      }
+    }
+  },
+  "response": {
+    "status": 200,
+    "headers": {
+      "Content-Type": "application/json"
+    },
+    "jsonBody": {
+      "payload": {
+        "Orders": [
+          {
+            "AmazonOrderId": "AMZ-DE-1001",
+            "OrderStatus": "Shipped",
+            "PurchaseDate": "2026-09-16T08:12:00Z",
+            "ShippingAddress": {
+              "City": "Bruchsal",
+              "CountryCode": "DE"
+            }
+          },
+          {
+            "AmazonOrderId": "AMZ-DE-1002",
+            "OrderStatus": "Pending",
+            "PurchaseDate": "2026-09-16T09:30:00Z",
+            "ShippingAddress": {
+              "City": "Moenchengladbach",
+              "CountryCode": "DE"
+            }
+          }
+        ],
+        "NextToken": "PAGE-2"
+      }
+    }
+  }
+}

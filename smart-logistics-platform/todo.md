@@ -1,4 +1,252 @@
 ---
+## P1-5 邮件真实化 + P1-6 对象存储（2026-09-17 轮次 12）— 用户要求：P1-5 与 P1-6 一起做
+
+> 结果：**`mvn clean package -T 1C` BUILD SUCCESS（178 个单测全通过）｜ `container-verify.sh` EXIT=0（18/18 容器就绪，端到端断言 96/96）**
+
+### A. 交付内容
+
+**P1-5 邮件真实化（MailHog + Thymeleaf）**
+
+- [x] **compose 增 `aslp_mailhog`**（真实 SMTP :1025 + Web 收件箱 :8025，连字符别名 `aslp-mailhog`）；
+      inventory 的 `spring.mail.host` 从 `localhost`（容器内的 localhost = 它自己，邮件必然发不出去）改为 `aslp-mailhog`
+- [x] **邮件模板化**：`templates/email/replenishment.html`（Thymeleaf；**行内样式 + `<table>` 布局** —— 邮件客户端对 `<style>` 与现代 CSS 支持极差）；
+      正文改为 **multipart/alternative 双份**（纯文本兜底 + HTML），避免「只认 text/plain 的网关收到空邮件」
+- [x] **模板引擎手装配**：只引 `thymeleaf-spring6` + `ClassLoaderTemplateResolver`，**不引 web starter**（避免顺带给 Web 层注册视图解析器），也让渲染逻辑能在纯单测里跑
+- [x] **一封汇总邮件替代 N 封**：旧实现「每个低库存 SKU 一封」，收件人会被邮件淹没；现改为一张待办清单（含 SKU/仓库/可用/锁定/建议补货量/告急标记）
+- [x] **邮件节流**：扫描周期（60s）与发信周期（30m）解耦；手动触发端点 `POST /api/inventory/warnings/trigger` 默认 `force=true` 绕过节流；**发信失败不计入节流窗口**（下一轮立即重试）
+- [x] **恢复 `management.health.mail`**（docker profile 开启、本地保持关闭）：容器里真有 SMTP，「邮件发不出去」必须能被健康检查看见
+- [x] 顺带把 `System.out.println` 换成 SLF4J（原来既没有级别、也无法被 Loki 的 `level` 标签过滤）
+- [x] 运维端点：`GET /api/inventory/warnings/status`（阈值 / 低库存明细 / 还要等多久才能再发信 —— 直接回答「邮件为什么没来」）
+
+**P1-6 对象存储（MinIO + 面单/报关单 PDF）**
+
+- [x] **compose 启用 `aslp_minio`**：镜像改 **quay.io**（Docker Hub 的 `minio/minio` 已下线，pull 直接报 repository does not exist），版本按 release tag 钉死
+- [x] **PDF 生成**（OpenPDF，LGPL；不用 iText 7 的 AGPL）：`SHIPPING_LABEL`（仓内作业联）与 `CUSTOMS_DECLARATION`（CN22 摘要）；
+      正文只用 ASCII（内置字体无中文字形）；压缩级别 0（牺牲几十 KB 换「排障时能直接搜单号」）
+- [x] **对象存储层**：对象键 `orders/{orderId}/{kind}-{UTC时间戳}.pdf`（按订单分组 + **重打留痕**，「最新一版」= 键最大者）；
+      sha256 随对象存元数据；`DocumentStorageService` 提供 store/load（最新版）/list（含历史版本）/预签名 URL
+- [x] **双客户端**：上传下载走内网端点，**预签名走对外端点**（签名覆盖 Host，用内网端点签出来的浏览器打不开）+ 显式 `region` 跳过 SDK 的桶区域查询
+- [x] **失败语义**：订单不存在/未生成 → 404；对象存储不可用 → **503**（依赖故障可重试）；类型不在白名单 → 400
+- [x] **`minio` 健康组件**：带桶名/端点/**失败原因**（本轮就是靠它把根因从「猜」变成「读」）
+- [x] **端到端断言 74 → 96**：新增 22 项 —— 邮件（MailHog 就绪 / mail 健康 UP / mailSent / 解码后主题与 SKU / 建议补货量 / HTML 表格 / multipart / 节流生效）
+      与单据（MinIO 存活 / minio 健康 / 生成面单 / sha256 / **下载 3771 字节合法 PDF 并落盘留证** / 报关单 / 版本留痕 / 预签名可下载 / 非法类型 400）
+
+### B. 本轮修复的缺陷
+
+| # | 问题 | 根因 | 修复 |
+|---|---|---|---|
+| 41 | **邮件测试断言读不懂自己发的邮件**：正文实际是 HTML + 纯文本两份，测试读到 `text/plain` 且 part=1 | 断言写在**未发送**的 `MimeMessage` 上：JavaMail 的 MIME 头与嵌套结构要等 `writeTo()` 时才确定 | 改为**序列化 → 重新解析 → 再断言**（以收件人视角验收），并递归遍历 MIME 树收集正文 |
+| 42 | MinIO 元数据断言拿到空集 | SDK 在 `build()` 时已给用户元数据加 `x-amz-meta-` 前缀，访问器里不是裸键名 | 断言改用 `x-amz-meta-sha256` 等；失败信息直接打印实际 Map |
+| 43 | **order-service 容器反复重启**（`DocumentProperties` 找不到 bean） | 新建的 `@ConfigurationProperties` 类忘写进 `@EnableConfigurationProperties`。**编译无错、单测全绿**（单测都是直接 new），**只有启动上下文会炸** | 补注册；把「容器冷启动」当作不可省的验证环节 |
+| 44 | **inventory-service 容器反复重启**（`Invalid fixedDelayString value "60s"`） | `@Scheduled` 的 String 形式只认毫秒数或 ISO-8601，**不认 Boot 的 `60s` 简写**（那是 `@ConfigurationProperties` 绑定器才有的能力） | 改用 `check-interval-ms: 60000`，并删掉 `WarningProperties.checkInterval` 避免双真相源 |
+| 45 | **MinIO 报 `InvalidAccessKeyId`**（服务端凭据用 `mc` 验证是对的） | 把 shell 风格 `${VAR:-default}` 当成 Spring 占位符 —— Spring 是 `${VAR:default}`，于是默认值被解析成 **`-aslp-minio-admin`（带前导减号）** | 改为单冒号写法 + 注释；沉淀排查顺序：先验服务端凭据，再看客户端送了什么 |
+| 46 | **上传成功却返回 503**（预签名报 `Failed to connect to localhost:9000`） | 预签名客户端用对外端点（容器内不可达），而 SDK 签名前会先 `GET /{bucket}?location=` 查区域 → 查询失败把整个操作拖成 503 | 显式配 `aslp.minio.region`（默认 us-east-1）让 SDK 跳过查询；健康详情加上失败原因 |
+| 47 | **邮件断言全部假失败**（邮件明明收到了） | 两层编码：主题/正文是 **quoted-printable**（中文变 `=E5=BA=93…`，短 ASCII 也会被折行拆开）；MailHog 是 Go 写的，`json.Marshal` 默认把 `<` `>` `&` 转义成 `\u003c` | 断言改为「**先解码再看**」：用标准库 `email` 解析 `Raw.Data` 后再断言（python3 不可用时优雅跳过） |
+
+### C. 验证证据
+
+| 验证项 | 结果 |
+|---|---|
+| `mvn clean package -T 1C` | ✅ BUILD SUCCESS；**178 个单测全通过**（order 60→78、inventory 23→36） |
+| `docker compose down -v` + `container-verify.sh`（含镜像构建） | ✅ **EXIT=0**；**18/18 容器就绪**；端到端断言 **96/96** |
+| 稳定性 | ✅ 连续两次 `smoke-test.sh --external` 均 96/96 |
+| 邮件（容器内） | ✅ `mailSent=true`；MailHog 收到邮件，**解码后**主题=`[库存补货建议] AMZ-9999@Mönchengladbach 剩余 5（阈值 10）`；HTML 5591 字符含 `<table>`；`multipart/alternative`；`force=false` → `mailSkipped=true` |
+| 邮件健康 | ✅ inventory `/actuator/health` 的 `mail` 组件 = UP |
+| 单据（容器内） | ✅ 生成面单返回 `orders/AMZ-1001/shipping-label-<UTC>.pdf` + 64 位 sha256；**下载 3771 字节合法 PDF**（已落盘 `target/smoke-logs/p1-6-label-e2e.pdf`）；报关单走独立键；列举到 8 个版本；**预签名 URL 宿主可直接下载** |
+| 存储健康 | ✅ order `/actuator/health` 的 `minio` 组件 = UP，details 带 `bucket=aslp-documents / detail=bucket reachable` |
+| 非法输入 | ✅ `POST .../documents/packing-slip` → 400 + 可选类型清单 |
+
+### D. 经验记录
+
+1. **「单测全绿」与「服务能起来」是两件事**（#43/#44）：`@ConfigurationProperties` 忘注册、`@Scheduled` 写 `60s`，这两类问题**编译期与单测阶段都不会报错**，因为单测是直接 `new` 对象、不启动上下文。教训：新依赖/新配置类落地后，**必须真跑一次容器冷启动**，不能只看 `mvn test` 绿。
+2. **配置语法要看清楚是谁的语法**（#45）：`${VAR:-default}` 是 **shell/docker-compose** 的写法，Spring 是 `${VAR:default}`。写错不会报错，只会在运行期得到 `-aslp-minio-admin` 这种「看起来像秘密的错值」。排查时先分清「服务端状态」与「客户端送出的值」。
+3. **报错信息要“带上根因”，不要只给结论**（#46 的延伸）：`minio` 健康详情一开始只有桶名与端点，看不出为什么 DOWN；加上 `detail`（SDK 的原始错误）后，一次 curl 就能定位。**可观测性投入在“排查时刻”回报最高**。
+4. **通知与凭证的失败等级不同**（P1-5 vs P1-6）：邮件是通知渠道 → 吞掉异常记 WARN，不能拖垮库存巡检；单据是随货凭证 → 必须 503 + 健康检查 DOWN。把这条分界线写进代码注释与文档，比事后讨论更省事。
+5. **邮件现在真的会“发出去”了，所以“邮件轰炸”这类被掩盖的缺陷会立刻暴露**：旧实现扫一次发 N 封、且失败被吞 —— SMTP 不可用时完全看不出来。**修复一个“静默失效”的链路时，要顺带检查它原本承担的业务责任是否也需要重新设计**（本轮因此加了汇总邮件 + 30 分钟节流）。
+
+---
+## P1-4 平台契约测试（真实 SP-API 客户端 + WireMock 契约桩）（2026-09-17 轮次 11）— 用户要求：P1-4 WireMock 契约测试
+
+> 结果：**`mvn clean package -T 1C` BUILD SUCCESS（147 个单测全通过）｜ `container-verify.sh` EXIT=0（16/16 容器就绪，端到端断言 74/74）**
+
+### A. 交付内容
+
+- [x] **把 SP-API 策略从骨架升级为真实实现**（这是「契约测试」的前提 —— 没有真实 HTTP 客户端就没有契约可测）
+  - `spapi/SpApiOrderClient`：`GET /orders/v0/orders`（`NextToken` 分页 + `max-pages` 收敛护栏）、
+    `GET /orders/v0/orders/{id}/orderItems`（补商品名，失败不影响主流程）、鉴权头 `x-amz-access-token`、
+    `CreatedAfter` 按 ISO-8601 UTC 生成
+  - `spapi/LwaTokenClient`：LWA OAuth 2.0 `refresh_token` 换 `access_token`，进程内缓存 + 提前 60s 失效；
+    收到 401 只主动刷一次令牌（无限刷会触发平台限流）
+  - `spapi/SpApiOrderMapper`：平台报文 → M1 统一 DTO；收货城市按**配置**映射履约仓（城市未命中落默认仓），
+    地址缺失打 `ADDRESS_INVALID`（接上 M1 异常打标链路）
+  - `spapi/SpApiHttp`：统一 **connect / read 超时**（默认 JDK 客户端读超时是「无限等待」，
+    平台僵死时熔断器救不了被占住的线程）
+- [x] **失败分类（本轮最核心的产出）**：把「可重试 ↔ 不可重试」写进异常继承线
+  - 429 → `RateLimitedException`（**继承** `PlatformUnavailableException`，带 `Retry-After`）
+  - 5xx / 连接或读取超时 → `PlatformUnavailableException` → 命中 P1-2 的 `retry-exceptions` → 重试 → 熔断 → 降级
+  - 401 → 刷一次令牌重试；其他 4xx → `SpApiClientException`（**不在可重试家族内**，不浪费平台配额）
+  - `AmazonSpApiStrategy`：可重试的原样**向上抛**（吞掉就永远不重试）；不可重试的**就地转** `success=false`
+- [x] **WireMock 契约测试**（26 个新单测，平台是假的、客户端是真的）
+  - `SpApiOrderClientContractTest`（15 例）：成功映射 / 分页与令牌缓存 / 空结果 / max-pages 截断 /
+    明细失败回退 / 429 / 5xx / 读超时 / 400 / 401 刷新成功 / 401 持续 / LWA 400 / LWA 503 / 两条映射规则
+  - `SpApiProbeControllerTest`（6 例）：诊断报文形状与分支覆盖（含「缺凭据不发任何请求」）
+  - `SpApiRetryClassificationTest`（3 例）：用**真实** `RetryConfig.getExceptionPredicate()` 断言
+    「429 子类命中重试配置、4xx 不命中」——spapi 包与 yml 两处任意漂移都会变红
+  - `SpApiTestFixture`：共享夹具（真实 `RestClient` + WireMock 随机端口），避免各测试各写一套装配
+  - `AmazonSpApiStrategyTest` 由 3 → 7 例（新增 429 上抛 / 400 转业务失败 / 截断提示）
+- [x] **诊断探针**：`POST /api/orders/spapi/probe` —— 单次拉取 + 固定形状诊断报文（`ok/errorType/retryable/pages/count/orders/elapsedMs`），
+  **无副作用**（不落库、不写指标、不经熔断器），可随时体检对外契约
+- [x] **契约桩容器**：`wiremock/mappings/*.json`（11 个桩）+ compose 的 `aslp_wiremock`（`:8099`）
+  - 靠 `MarketplaceIds` 查询参数分流：正常两步分页 / 429 / 超时（延迟 3s）/ 503 / 400 / 空结果
+  - 桩以**文件**版本化（与 `monitoring/` 同一思路：契约是要进代码评审的资产）
+- [x] **端到端断言 56 → 74**：新增 18 项 —— 桩加载、探针成功、分页 2 页、跨页 3 条、商品名来自 `/orderItems`、
+  城市→仓映射、`ADDRESS_INVALID` 打标、明细失败回退、**平台调用计数 = 2 次（分页的唯一硬证据）**、
+  429/503/超时/400 的异常分类与 `retryable` 标志、空结果不算失败
+
+### B. 本轮修复的缺陷
+
+| # | 问题 | 根因 | 修复 |
+|---|---|---|---|
+| 39 | **自己新写的商品名断言假失败** | 为了让 WireMock 管理端点的「带空格 JSON」好匹配，对响应体做了 `tr -d ' \n'`，而这行被复用到**探针响应**上 —— 探针是 Jackson 紧凑 JSON，**空格在字符串值里有意义**（`AeroSleep 婴儿床 6 件套` 被压成 `AeroSleep婴儿床6件套`），断言永远匹配不上 | 区分两类响应：探针响应用原样 body；只有 WireMock 管理端点才去空白。并写进脚本注释，避免后人「统一清理空白」 |
+| 40 | **整套容器验证白跑一轮**（EXIT=2） | 用编辑工具插入新断言段时，把原有 `echo "..."` 与下一行 `for entry in ...` **合并成一行**，脚本在解析阶段就挂 | 教训：**改完 shell 脚本先跑 `bash -n` 再执行**（毫秒级静态解析能拦住全部这类人工拼接错误）；已补为后续固定动作 |
+
+> 另有 1 项**环境**问题（非代码）：`docker compose build` 首次因 Maven Central 握手抖动
+> （`Could not transfer artifact com.fasterxml:classmate:1.7.0 ... Remote host terminated the handshake`）失败，
+> 重跑即过；已记入 readme §11 速查（避免后人误判为依赖问题）。
+
+### C. 验证证据
+
+| 验证项 | 结果 |
+|---|---|
+| `mvn clean package -T 1C` | ✅ BUILD SUCCESS；**147 个单测全通过**（order-service 32 → 60） |
+| `docker compose down -v` + `container-verify.sh` | ✅ **EXIT=0**；**16/16 容器就绪**（含新 `aslp_wiremock` healthy）；端到端断言 **74/74** |
+| 契约桩加载 | ✅ `/__admin/mappings` 解析到 **11** 个桩；`__admin/health` = healthy |
+| 分页契约（容器内） | ✅ 探针 `pages=2 / count=3`；`/__admin/requests/count` 确认订单列表接口**恰好被调 2 次** |
+| 商品明细契约（容器内） | ✅ 商品名来自 `/orderItems`；明细桩 500 时回退占位符「未知商品（明细接口未返回）」 |
+| 映射规则（容器内） | ✅ `Moenchengladbach → Mönchengladbach`；缺收货城市 → `errorTag=ADDRESS_INVALID` |
+| 429 分类（容器内） | ✅ `{"errorType":"RateLimitedException","retryable":true,"retryAfterSeconds":7}` |
+| 超时分类（容器内） | ✅ `elapsedMs=1005`（= 配置的 1s 读超时，**没有等满桩的 3s**），`Read timed out` |
+| 4xx 分类（容器内） | ✅ `SpApiClientException` + `retryable=false`（不重试） |
+| 重试配置一致性 | ✅ 真实 `RetryConfig` 断言：`RateLimitedException` 命中、`SpApiClientException` 不命中 |
+
+### D. 经验记录
+
+1. **「契约测试」的前提是有一个真实客户端**：原来 `AmazonSpApiStrategy` 是骨架（永远返回
+   `No real Amazon SP-API credentials configured`），此时写 WireMock 测试只能测到自己写的桩，
+   没有任何契约价值。先把 HTTP 客户端写实（LWA + 分页 + 超时），契约测试才有意义。
+2. **可重试语义应该由「异常继承线」承载，而不是散落在各处的 `if`**：429 继承
+   `PlatformUnavailableException` → 自动命中既有 `retry-exceptions` 配置，一行配置都不用改；
+   而 4xx 落在继承体系之外 → 天然不被重试。**这条分界线是「平台抖动」与「我们自己写错了」的分界线**，
+   用 `RetryConfig.getExceptionPredicate()` 直接断言，比读配置可靠。
+3. **「部分失败」必须显式表达，不要让「看起来正常」掩盖不完整**：商品明细失败 → 占位符 + WARN；
+   分页被上限截断 → `truncated=true` + WARN。反过来，**空结果不是失败**（区间内真的没新单），
+   这一点如果判成失败，会让监控天天误报。
+4. **探针端点值得存在**：契约测试证明「代码与桩一致」，但证明不了「打包进镜像、跨容器网络之后还通」。
+   一个无副作用的探针（不落库/不经熔断器）+ 靠 `MarketplaceIds` 分流的多场景桩，
+   让 6 种故障场景共用一个入口即可全测，不必为每种故障重启容器。
+5. **改 shell 脚本必须先 `bash -n`**（#40）：文本编辑器大段插入很容易把相邻两行粘成一行，
+   这类错误静态解析就能拦住，而执行一次全量容器验证要几分钟。
+
+---
+## P1-1b 日志聚合（Promtail → Loki → Grafana）（2026-09-17 轮次 10）— 用户要求：开始 P1-1b Loki 日志聚合
+
+> 结果：**`mvn clean package -T 1C` BUILD SUCCESS（119 个单测全通过，本轮未改业务代码）｜ `container-verify.sh` EXIT=0（15/15 容器就绪，端到端断言 56/56）**
+
+### A. 交付内容
+
+- [x] **Loki 3.2 单机**：`monitoring/loki/loki.yml`（tsdb + 文件系统存储、`allow_structured_metadata`、`volume_enabled` 供日志量直方图用）；
+  compose 新增 `aslp_loki:3100`（连字符别名 `aslp-loki`，带 healthcheck）
+- [x] **Promtail 3.2 采集**：`monitoring/promtail/promtail.yml`
+  - **走 Docker API（`docker_sd_configs`）而不是 tail 容器日志文件**：Docker Desktop for macOS 的 `/var/lib/docker` 在虚拟机里，
+    挂进容器只会得到空目录（已实测），而 `/var/run/docker.sock` 可挂载（已实测）
+  - 按容器名前缀 `aslp_` 过滤，只采本项目；标签只保留低基数：`container` / `service` / `project` / `level`
+  - pipeline stage 从日志行首抽 `level`（TRACE…ERROR），便于在 Grafana 里筛错误
+- [x] **traceId 不做成标签**：高基数字段进 Loki 索引会让基数爆炸（Loki 官方明确不推荐），
+  改为在 Grafana Loki 数据源配 `derivedFields` 正则抽取，生成「在 Zipkin 中查看这条链路」的可点击链接
+  —— 零额外组件（不需要 Tempo）就把日志与链路打通
+- [x] **Grafana 集成**：新增 Loki 数据源（uid `aslp-loki`）；看板 9 → **11 面板**（新增「服务日志」logs 面板 +
+  「日志量（按服务，含 ERROR 单独计量）」）；顺手把 Prometheus 数据源也改成连字符别名 `aslp-prometheus`（与 #35 的教训保持一致）
+- [x] **端到端断言 51 → 56**：Loki 就绪、**Promtail 采集指标（已读条数 > 0 且解析错误 = 0）**、
+  Loki 能查到 `{project="aslp"}` 日志流、**日志行含 traceId**、Grafana Loki 数据源连通
+
+### B. 本轮修复的缺陷
+
+| # | 问题 | 根因 | 修复 |
+|---|---|---|---|
+| 37 | **业务 span 断言偶发失败**（验证过程中实际碰到） | 按 `serviceName` + 固定 `limit` 拉 trace 时，窗口会被**监控抓取自身产生的 trace 淹没**——Prometheus 每 15s 抓 `/actuator/health` 与 `/actuator/prometheus`，每次抓取都是一条新 trace，业务 span 被挤出窗口；叠加单次断言无重试（#33 的教训） | 改用 `?spanName=aslp.vrp.solve` 精确查询并加有界重试；跨服务查询的 limit 提到 200 |
+| 38 | **所有 compose 命令直接失败**：`mapping key "networks" already defined at line 257` | 给 Prometheus 加连字符别名时在服务头部新增了 `networks:`（带 aliases）块，而同服务末尾原本已有 `networks: - aslp_net`——**YAML 不允许同名键** | 删掉末尾那条；经验：给已有服务加网络别名前，先搜该服务内是否已有 `networks:` 键（`docker compose config` 会立即拦住，不会静默丢失） |
+
+### C. 验证证据
+
+| 验证项 | 结果 |
+|---|---|
+| `mvn clean package -T 1C` | ✅ BUILD SUCCESS；119 个单测全通过（本轮未改业务代码） |
+| `docker compose down -v` + `container-verify.sh` | ✅ **EXIT=0**；**15/15 容器就绪**；端到端断言 **56/56** |
+| 冒烟稳定性 | ✅ 连续两次独立运行均 56/56（修正 #37 前该断言偶发失败） |
+| Promtail 采集 | ✅ `promtail_docker_target_entries_total` 2000+ 条、`parsing_errors_total` = 0 |
+| Loki 查询 | ✅ `{project="aslp"}` 有日志流；标签为 `container/service/project/level`（level 由 pipeline stage 抽取） |
+| 日志与链路关联 | ✅ 采样 80~93 行日志均含 `[32hex-16hex]` 形式的 traceId → Grafana 里可一键跳 Zipkin |
+| Grafana | ✅ Loki 数据源 health = OK；看板 11 面板；历史看板 JSON 解析通过 |
+
+### D. 经验记录
+
+1. **macOS 上「采集容器日志」的标准做法（mount /var/lib/docker/containers）在本机不可用**：Docker Desktop 的 `/var/lib/docker`
+   在虚拟机里，宿主不存在该路径，挂进容器得到空目录。正解是用 **Docker API**（Promtail 的 `docker_sd_configs` + 挂 `/var/run/docker.sock`），
+   两者都实测确认（socket 探针 + 采集指标）。
+2. **高基数日志字段（traceId/订单号）不要做成 Loki 标签，也别急着上 Tempo**：Loki 标签会进索引 → 基数爆炸；
+   在 Grafana 数据源用 `derivedFields` 查询时正则抽取 + 生成链接，就能实现「日志 → 链路」跳转，成本几乎为零。
+3. **断言要挑对维度**：同一个 Zipkin 后端，按 `serviceName` 查会被监控流量洗掉窗口，按 `spanName` 查就能直达业务 span
+   —— 断言失败时先想「我查的维度是否会被无关流量污染」，而不是先加长超时。
+
+---
+## P1-3 链路追踪（Micrometer Tracing + Brave + Zipkin）（2026-09-17 轮次 9）— 用户要求：P1-1 / P1-3 / P1-4 中选一，本轮做 P1-3
+
+> 结果：**`mvn clean package -T 1C` BUILD SUCCESS（119 个单测全部通过）｜ `container-verify.sh` EXIT=0（13/13 容器就绪，端到端断言 51/51）**
+
+### A. 交付内容
+
+- [x] **6 个模块接入追踪**：`micrometer-tracing-bridge-brave` + `zipkin-reporter-brave`（声明在聚合 POM 统一继承；
+  Boot 3 默认 W3C `traceparent` 传播，网关（WebFlux）与 Servlet 下游实测可互通）
+- [x] **12 个 profile 配置**：`management.tracing.sampling.probability=1.0`（演示全量采样）+ `management.zipkin.tracing.endpoint`
+  （本地 `localhost:9411`、容器 `aslp-zipkin:9411`）
+- [x] **业务 span（一份埋点同时产 span 与指标）**：
+  - `aslp.order.pull`：低基数 `platform`/`outcome` + 高基数 `fetched`/`created`/`updated`/`flagged`/`errorMsg`
+  - `aslp.vrp.solve`：低基数 `feasible` + 高基数 `routeCount`/`stopCount`/`totalDistanceKm`/`unassignedJobIds`
+  - 关键设计：**删掉了原先手写的同名 Timer** —— Boot 会把 `MeterObservationHandler` 注册进 ObservationRegistry，
+    Observation 自己就产出指标，再手写一份会**重复计时**（实测一次拉取 → `aslp_order_pull_seconds_count` = 1，无翻倍）
+- [x] **traceId 进日志（MDC）**：`openScope()` 让业务日志带上 `[traceId-spanId]`，可从一条报错日志直接跳 Zipkin 查整条链路
+- [x] **Zipkin 后端**：compose 新增 `aslp_zipkin:9411`（内存存储、带 healthcheck），纳入 `container-verify.sh` 期望列表（12 → 13 容器）
+- [x] **单测 117 → 119**：新增 2 个 span 断言用例（同时验证「低基数/高基数分层」——高基数混进低基数会炸指标维度）
+- [x] **端到端断言 46 → 51**：Zipkin 健康、6 个服务均上报 span、**跨服务同一 traceId（核心）**、业务 span 带业务属性、日志含 traceId
+
+### B. 本轮修复的缺陷
+
+| # | 问题 | 根因 | 修复 |
+|---|---|---|---|
+| 35 | **网关上上报 span 失败**：Zipkin 里始终看不到 `gateway`，日志报 `IllegalArgumentException: Host is not specified`（其他 5 个服务都正常） | **下划线主机名的第三次现身，这次在 WebClient + `java.net.URI` 层**：上报地址写成 `http://aslp_zipkin:9411/...`，下划线使 URI 变成 registry-based（`getHost()==null`）；网关是 WebFlux，走 `ZipkinWebClientSender` 构建 URI 后直接抛错，而 Servlet 服务的上报用较宽松的 `URLConnection` 解析 → 只有网关掉队 | 给 Zipkin 加连字符网络别名 `aslp-zipkin`，6 个 docker profile 的上报地址全改别名（与 #21 网关路由、#30 Tomcat Host 头同一套约定） |
+| 36 | **日志 traceId 断言假失败**（我新写的断言，与 #32 同根）：日志里明明有 traceId 却判失败 | 两个原因叠加：①`set -o pipefail` + `grep -q` 提前退出 → `docker logs` 收到 SIGPIPE → 管道返回 141（**#32 的规矩没机械执行到底，只在助手函数里改了**）；②固定 `tail 500` 在故障演练刷日志时会把业务日志挤出窗口 | 改用 `docker logs --since 10m` 存变量 + here-string 匹配；并把脚本里剩余的 `\| grep -q` 全部扫出来改掉 |
+
+### C. 验证证据
+
+| 验证项 | 结果 |
+|---|---|
+| `mvn clean package -T 1C` | ✅ BUILD SUCCESS；**119 个单测全部通过**（gateway 9 / order 32 / inventory 23 / route 49 / auth 5 / report 1），0 跳过 |
+| `docker compose down -v` + `container-verify.sh` | ✅ **EXIT=0**；**13/13 容器就绪**；端到端断言 **51/51** |
+| span 上报覆盖 | ✅ Zipkin `/api/v2/services` = 6 个服务（含 WebFlux 网关） |
+| **跨服务同一 traceId** | ✅ 实测 **23 条 trace** 同一条里同时含 `gateway` 与 `order-service` 的 span（证明上下文真传播过去了，不是各说各话） |
+| 业务 span 属性 | ✅ `aslp.vrp.solve` 带 `feasible` / `routeCount` / `stopCount` / `totalDistanceKm` |
+| traceId 进日志 | ✅ order-service 日志出现 `[<32hex>-<16hex>]` |
+| 无指标重复计时 | ✅ 一次拉取 → `aslp_order_pull_seconds_count` = 1、`aslp_order_pull_requests_total` = 1 |
+
+### D. 经验记录（本轮最值钱的两条）
+
+1. **下划线主机名已经在地下三层各埋了一次雷**：①`java.net.URI` 解析（网关路由，#21）；②HTTP Host 头（Tomcat 直接 400，#30）；
+   ③WebClient 构建上报 URI（`Host is not specified`，#35）。**结论：凡是要拼 URL/hostname 的地方，一律用连字符别名**，
+   `container_name` 保留 `aslp_*` 只为防冲突。Servlet 服务"能用"只是因为它用的解析器更宽松，不代表约定正确。
+2. **踩过的坑要写成可机械执行的规则**：#32 已经总结了「pipefail + `grep -q` 会 SIGPIPE」，但当轮只改了 3 个助手函数，
+   新写的断言又踩了一次（#36）。**规则要一次性全量扫描**（`grep -n "| grep -q" scripts/`），而不是遇到一处改一处。
+
+---
 ## P1-1 可观测性（Micrometer + Prometheus + Grafana）（2026-09-17 轮次 8）— 用户要求：做 P1-1 / P1-3 / P1-4 中选一
 
 > 选 P1-1 的依据：它是路线图第一项；且先探测了镜像可用性（`prom/prometheus` / `grafana/grafana` / `openzipkin/zipkin` 本地已存在或可拉取），确认没有此前 MinIO 那类「镜像源不可达」的阻塞风险。
@@ -370,15 +618,28 @@
 - [x] **P1-1 可观测性栈** ✅ **2026-09-17 完成** — 各服务接入 Micrometer + Prometheus registry；compose 增 `aslp_prometheus:9090` / `aslp_grafana:3000`；`monitoring/` 下以文件版本化抓取配置 + 数据源 + 9 面板看板
   - 验收：`container-verify.sh` EXIT=0（12/12 容器、46/46 断言）；Prometheus 7/7 目标 healthy；业务指标（订单拉取结局 / VRP 耗时里程 / 库存锁结果）已入 TSDB 并可在 Grafana 出图
   - 未完成部分另立 **P1-1b**：Loki + Promtail 日志聚合（镜像需额外拉取）
-- [ ] **P1-1b 日志聚合**：Loki + Promtail（需拉取 `grafana/loki`），采集各服务 stdout，并在日志中串联 traceId（与 P1-3 配合）
+- [x] **P1-1b 日志聚合** ✅ **2026-09-17 完成** — Promtail 3（经 Docker API 采集容器 stdout）→ Loki 3（tsdb + 文件系统）→ Grafana 日志面板；日志里的 traceId 可一键跳 Zipkin
+  - 验收：`container-verify.sh` EXIT=0（15/15 容器、56/56 断言）；Promtail 已读 2000+ 条且解析错误 0；Loki 能查到 `{project="aslp"}` 且日志行含 traceId；Grafana Loki 数据源 health=OK
+  - 关键选择：高基数 traceId 不做成 Loki 标签（避免索引基数爆炸），改用 Grafana `derivedFields` 查询时抽取 + 生成链接
 - [x] **P1-2 限流与容错** ✅ **2026-09-16 完成** — 网关 Redis 令牌桶（按需路由级：`/api/orders/pull` 用户维度 1 次/秒、`/api/auth/**` IP 维度）+ order-service Resilience4j 熔断/重试/舱壁 + 降级回退（`degraded` 透出，不返回 500）
   - 验收：压测触发熔断后返回降级响应而非 500 ✅ **已达成**（端到端 4 项断言全绿：429 / 降级响应 / 熔断 OPEN / 自动恢复）
 - [x] **P1-2b 修复 M3 VRP 引擎** ✅ **2026-09-16 完成** — 改 `Jsprit.Builder` 装配算法（原空 `SearchStrategyManager` 必抛异常）+ 自带 `HaversineCostModel` 修掉距离量纲（原默认欧氏距离在经纬度上单位是「度」）+ `VrpProblemFactory` 集中校验 + `RouteController.optimize()` 真接入引擎
   - 验收：`VrpRouteServiceTest`（已去掉 `@Disabled`，9 例全绿）；route-service 共 46 个单测全通过；端到端 5 项 VRP 断言全绿（含几何锁定的 38.6 km 往返里程）
-- [ ] **P1-3 追踪链路**：Spring Cloud Sleuth/Micrometer Tracing + Zipkin，串联 gateway → service 调用链
-- [ ] **P1-4 Amazon/eBay 真实契约测试**：WireMock 模拟 SP-API 限流（429）、超时、分页场景，覆盖 `OrderPullStrategy` 分支
-- [ ] **P1-5 邮件真实化**：compose 增 MailHog；补货邮件模板化（Thymeleaf），并恢复 `management.health.mail`
-- [ ] **P1-6 对象存储**：MinIO 恢复启用（换可达镜像源），接入面单/报关单 PDF 存储
+- [x] **P1-3 追踪链路** ✅ **2026-09-17 完成** — Micrometer Tracing + Brave + Zipkin（`aslp_zipkin:9411`）；6 服务均上报 span；业务 span `aslp.order.pull` / `aslp.vrp.solve` 同时产 span 与指标；traceId 进日志 MDC
+  - 验收：`container-verify.sh` EXIT=0（13/13 容器、51/51 断言）；**跨服务同一 traceId 实测 23 条**（同一 trace 含 gateway 与 order-service）；日志含 `[traceId-spanId]`；无指标重复计时
+  - 踩坑：下划线主机名第三次作乱（`Host is not specified`，见 readme §9 #35）
+- [x] **P1-4 Amazon/eBay 真实契约测试** ✅ **2026-09-17 完成** — WireMock 模拟 SP-API（LWA 换令牌 / 分页 / 429 限流 / 超时 / 5xx / 4xx / 空结果），覆盖 `OrderPullStrategy` 的两条失败分支；顺带把 `AmazonSpApiStrategy` 从骨架升级为**真实 HTTP 实现**（`spapi/` 协议层：LWA 令牌缓存 + `NextToken` 分页 + 商品明细 + 显式超时）
+  - 验收：`mvn clean package -T 1C` 147 单测全绿（order-service 32 → 60，含 26 个契约/边界测试）；`container-verify.sh` EXIT=0（**16/16 容器**含 `aslp_wiremock`、**74/74 断言**）；容器内实测分页 2 页 / 3 条、**平台调用计数 = 2**、429 `retryAfter=7`、读超时 `elapsedMs=1005`（未等满 3s 桩延迟）
+  - 关键设计：**重试语义由异常继承线承载**（429 子类命中 `retry-exceptions`；其他 4xx 落在体系外不重试），并用真实 `RetryConfig` 断言锁定一致性；诊断探针 `POST /api/orders/spapi/probe` 无副作用（不落库/不经熔断器）
+  - 未完成部分：**eBay 无实现**（仅 Mock）；未用生产卖家账号实战验证（详见 readme §10 限制）
+- [x] **P1-5 邮件真实化** ✅ **2026-09-17 完成** — compose 增 MailHog（真实 SMTP `:1025` + Web 收件箱 `:8025`）；补货邮件改为 Thymeleaf 模板渲染（HTML + 纯文本 multipart/alternative）；**恢复 `management.health.mail`**；新增邮件节流（扫 60s / 发信 30m）与手动触发端点
+  - 验收：`container-verify.sh` EXIT=0（18/18 容器、96/96 断言）；容器内实测 `mailSent=true`，MailHog 解码后主题=`[库存补货建议] AMZ-9999@Mönchengladbach 剩余 5（阈值 10）`，HTML 含表格且建议补货量正确；`force=false` → `mailSkipped=true`
+  - 关键选择：**渲染在 try 之外**（模板写错是代码缺陷，不该被当成 SMTP 故障吞掉）；收件人/阈值/节流全部进配置（运营可改）
+  - 未完成部分：MailHog 仅为演示收件箱（不转发/无 TLS/镜像仅 amd64）；收件人是全局单值；节流窗口存在进程内（多实例会各自发信）—— 详见 readme §10
+- [x] **P1-6 对象存储** ✅ **2026-09-17 完成** — MinIO 启用（镜像改 **quay.io**：Docker Hub 的 `minio/minio` 已下线）；OpenPDF 生成**面单与报关单** PDF，对象键按订单分组 + 版本留痕 + sha256 元数据；预签名 URL（对外端点签发）可用；新增 `minio` 健康组件
+  - 验收：容器内实测生成/下载/列举/预签名全部通过（下载得到 3771 字节合法 PDF，落盘留证）；非法类型 400、存储不可用 503
+  - 关键选择：通知（邮件）与凭证（单据）**失败等级不同** —— 邮件降级为 WARN，单据必须 503 + 健康 DOWN
+  - 未完成部分：单据无中文/无真条码；MinIO 为单节点无 TLS/无保留策略；面单缺收货地址（订单表未存）—— 详见 readme §10
 
 ### 🟡 P2 — M6 服务治理（预计 2-3 周）
 

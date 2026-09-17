@@ -65,7 +65,32 @@
             <artifactId>spring-boot-starter-test</artifactId>
             <scope>test</scope>
         </dependency>
-    </dependencies>
+        <!--
+          P1-4 契约测试：用 WireMock 模拟 Amazon SP-API（LWA 换令牌 / 订单列表分页 /
+          429 限流 / 503 / 超时 / 4xx），锁住「我们理解的平台契约」。
+          选 standalone（shaded）版而不是普通版：普通版会带一套自己的 Jetty，
+          与 spring-boot-starter-web 的 Tomcat/Jetty 版本容易相冲；
+          standalone 把依赖全部 relocates 到 wiremock.* 包下，零冲突。
+        -->
+        <dependency>
+            <groupId>org.wiremock</groupId>
+            <artifactId>wiremock-standalone</artifactId>
+            <version>${wiremock.version}</version>
+            <scope>test</scope>
+        </dependency>        <!-- P1-6：对象存储（面单/报关单 PDF）。用官方 MinIO Java SDK 而不是手写 S3 签名 ——
+             签名/分页/预签名 URL 的细节太多，手写迟早踩坑。 -->
+        <dependency>
+            <groupId>io.minio</groupId>
+            <artifactId>minio</artifactId>
+            <version>${minio.version}</version>
+        </dependency>
+        <!-- P1-6：PDF 生成。选 OpenPDF（LGPL）而不是 iText 7（AGPL）：
+             随货单据会被货代/海关接触，AGPL 会给公司带来不必要的许可证义务。 -->
+        <dependency>
+            <groupId>com.github.librepdf</groupId>
+            <artifactId>openpdf</artifactId>
+            <version>${openpdf.version}</version>
+        </dependency>    </dependencies>
 
     <build>
         <plugins>

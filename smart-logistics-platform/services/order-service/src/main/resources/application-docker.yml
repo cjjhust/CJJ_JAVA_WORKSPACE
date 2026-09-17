@@ -21,12 +21,25 @@ server:
   port: 8081
 
 management:
+  # P1-3：链路追踪（容器内指向 aslp_zipkin）
+  tracing:
+    sampling:
+      probability: 1.0
+  zipkin:
+    tracing:
+      # 连字符别名：与网关保持一致，避免以后换 HTTP 客户端时再踩下划线的坑（§9 #35）
+      endpoint: http://aslp-zipkin:9411/api/v2/spans
   endpoints:
     web:
       exposure:
         # P1-2：暴露熔断器状态/事件端点，便于端到端断言「熔断已打开」
         # P1-1：docker profile 必须同步加上 prometheus（否则 include 会覆盖基础 profile）
         include: health,info,circuitbreakers,circuitbreakerevents,prometheus,metrics
+  endpoint:
+    health:
+      # P1-6：演示环境暴露组件详情（minio/db 等），否则看不到「对象存储桶是否可达」；
+      # **生产应改回 never**（避免泄露端点/桶名等内部信息）
+      show-details: always
 
 # P1-2：平台调用容错（与本地 profile 保持一致，仅注释差异）
 resilience4j:
@@ -59,10 +72,57 @@ resilience4j:
 aslp:
   order:
     mock-enabled: true
+    # P1-4：容器内把 SP-API 指向本地 WireMock 契约桩（aslp_wiremock，见 docker-compose.yml）
+    # 于是「真实 HTTP + LWA 换令牌 + 分页 + 429/超时」整条路径都能在容器里端到端验证，
+    # 不需要真实卖家账号；凭据是桩用的假值（不是密钥）
+    amazon:
+      endpoint: http://aslp-wiremock:8080
+      token-url: http://aslp-wiremock:8080/auth/o2/token
+      marketplace-id: A1PA6795UKMFR9      # 正常场景（两步分页）
+      client-id: aslp-wiremock-client
+      client-secret: aslp-wiremock-secret
+      refresh-token: aslp-wiremock-refresh-token
+      connect-timeout: 1s
+      # 故意短于「超时场景」桩的 3s 延迟：用来在容器里验证「读超时 -> 抛可重试异常」
+      read-timeout: 1s
+      max-pages: 5
+      created-after-days: 3
+      fetch-item-titles: true
+      default-warehouse: Bruchsal
+      warehouse-by-city:
+        bruchsal: Bruchsal
+        moenchengladbach: Mönchengladbach
+        monchengladbach: Mönchengladbach
     sync:
       # 容器环境开启定时自动导入（M1 流水线式导入）
       enabled: true
       cron: "0 */5 * * * *"
+  # P1-6：单据对象存储（MinIO，compose 里的 aslp_minio）
+  minio:
+    # 服务端端点：容器内走服务别名（下划线主机名陷阱见 §9 #21/#30/#35）
+    endpoint: http://aslp-minio:9000
+    # 对外端点：**预签名 URL 必须用它能签** —— 签名覆盖 Host 头，用容器内端点签出来的
+    # URL 宿主浏览器既解析不了主机名，也不能靠改字符串修好（改了就签名不匹配）
+    public-endpoint: http://localhost:9000
+    # ⚠️ Spring 占位符是 ${VAR:default}（单个冒号）：写成 shell 风格 ${VAR:-default}
+    # 会把默认值解析成「-aslp-minio-admin」（带前导减号），MinIO 直接回 InvalidAccessKeyId。
+    # 详见 readme §9 #45。
+    access-key: ${MINIO_ROOT_USER:aslp-minio-admin}
+    secret-key: ${MINIO_ROOT_PASSWORD:aslp-minio-secret}
+    # 显式区域：否则 SDK 会为签名去问服务端桶区域，而预签名客户端用的是对外端点（容器内不可达）
+    region: us-east-1
+    bucket: aslp-documents
+    presign-expiry: 15m
+    auto-create-bucket: true
+  # P1-6：单据抬头与申报参数（演示值；换抬头/调申报价值不应重新构建镜像）
+  document:
+    shipper-name: ASLP Fulfillment GmbH (DEMO)
+    shipper-address: Industriestrasse 12, 76646 Bruchsal, Germany
+    shipper-tax-id: DE000000000
+    destination-country: DE
+    declared-value-eur: "29.90"
+    hs-code: "9503.00.99"
+    currency: EUR
   # M4 数据库定时备份（容器内指向 aslp_postgres 服务名）
   backup:
     host: aslp_postgres

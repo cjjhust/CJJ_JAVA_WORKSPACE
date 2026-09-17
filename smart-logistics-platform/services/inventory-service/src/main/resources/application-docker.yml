@@ -32,7 +32,10 @@ spring:
     open-in-view: false
     show-sql: false
   mail:
-    host: localhost
+    # P1-5：容器内指向 MailHog（compose 服务名别名）；SMTP 端口 1025、Web UI/API 8025
+    # 旧配置写的是 localhost —— 容器内的 localhost 是它自己，邮件必然发不出去，
+    # 而当时发送失败被静默吞掉，所以这个问题一直没被暴露。
+    host: aslp-mailhog
     port: 1025
     properties:
       mail:
@@ -40,14 +43,46 @@ spring:
           auth: false
           starttls:
             enable: false
+          # 连接/超时设置：MailHog 不在时不要让发信线程长时间阻塞（预警任务在同步链路里）
+          connectiontimeout: 3000
+          timeout: 3000
+          writetimeout: 3000
 
 management:
+  # P1-3：链路追踪（容器内指向 aslp_zipkin）
+  tracing:
+    sampling:
+      probability: 1.0
+  zipkin:
+    tracing:
+      # 连字符别名（同 §9 #35）
+      endpoint: http://aslp-zipkin:9411/api/v2/spans
   endpoints:
     web:
       exposure:
         # P1-1：docker profile 必须同步加上 prometheus（否则 include 会覆盖基础 profile）
         include: health,info,prometheus,metrics
+  endpoint:
+    health:
+      # P1-5：演示环境暴露组件详情（mail/db 等），否则 /actuator/health 只有聚合状态、
+      # 看不到「到底是哪个依赖不健康」；**生产应改回 never**（避免泄露连接信息）
+      show-details: always
   health:
-    # 容器环境同样未部署 SMTP，关闭邮件健康探测（补货邮件为尽力而为）
+    # P1-5：容器里真的有 SMTP（aslp_mailhog），所以**恢复**邮件健康探测：
+    # 邮件发不出去这件事必须能被 /actuator/health 看见，而不是只躲在日志里。
+    # （本地 profile 仍关着：开发机没起 MailHog 时不该把自己判成 DOWN）
     mail:
-      enabled: false
+      enabled: true
+
+# P1-5：库存预警与补货邮件参数（阈值 / 收件人 / 发信节流都在这里，运营可改）
+aslp:
+  inventory:
+    warning:
+      threshold: 10
+      target-multiplier: 2
+      recipient: warehouse-manager@aslp.internal
+      subject-prefix: "[库存补货建议]"
+      # 巡检周期：**必须写毫秒数**（@Scheduled 的 String 只认毫秒或 ISO-8601，不认 60s 简写）
+      check-interval-ms: 60000
+      # 邮件节流：扫描 60s 一次，但最多 30 分钟发一封（避免邮件轰炸）
+      mail-interval: 30m

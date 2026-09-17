@@ -14,4 +14,9 @@ public class PlatformUnavailableException extends RuntimeException {
     public PlatformUnavailableException(String message) {
         super(message);
     }
+
+    /** P1-4：保留底层原因（如 SocketTimeoutException），便于定位是建连还是读取超时。 */
+    public PlatformUnavailableException(String message, Throwable cause) {
+        super(message, cause);
+    }
 }

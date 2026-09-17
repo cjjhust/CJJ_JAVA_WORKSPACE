@@ -60,6 +60,13 @@ spring:
                 key-resolver: "#{@ipKeyResolver}"
 
 management:
+  # P1-3：链路追踪。演示环境全量采样（生产按流量下调，如 0.1）
+  tracing:
+    sampling:
+      probability: 1.0
+  zipkin:
+    tracing:
+      endpoint: http://localhost:9411/api/v2/spans
   endpoints:
     web:
       exposure:

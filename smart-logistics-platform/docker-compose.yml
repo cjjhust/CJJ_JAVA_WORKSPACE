@@ -97,21 +97,53 @@ services:
     networks:
       - aslp_net
 
-  # 对象存储：镜像源在部分网络环境无法拉取，默认注释。
-  # aslp_minio:
-  #   image: minio/minio:latest
-  #   container_name: aslp_minio
-  #   command: server /data --console-address ":9001"
-  #   environment:
-  #     MINIO_ROOT_USER: minioadmin
-  #     MINIO_ROOT_PASSWORD: minioadmin
-  #   ports:
-  #     - "9000:9000"
-  #     - "9001:9001"
-  #   volumes:
-  #     - aslp_minio_data:/data
-  #   networks:
-  #     - aslp_net
+  # P1-5：MailHog —— 真实 SMTP + Web 收件箱（开发/演示用）
+  # 补货邮件不再"发到空气里"：:1025 收信，:8025 直接看 HTML 正文（含 traceId 关联的告警）。
+  # 注：官方镜像只有 amd64（Apple Silicon 上走 Rosetta/qemu 模拟，实测可用）；
+  #     若要原生 arm64 可换 axllent/mailpit（MailHog API 兼容的活跃替代品）。
+  aslp_mailhog:
+    image: mailhog/mailhog:v1.0.1
+    container_name: aslp_mailhog
+    networks:
+      aslp_net:
+        aliases:
+          - aslp-mailhog
+    ports:
+      # 1025 = SMTP（服务发信），8025 = Web UI + REST API（冒烟脚本断言邮件内容）
+      - "1025:1025"
+      - "8025:8025"
+    healthcheck:
+      # 镜像内自带 wget（已实测；没有 curl）
+      test: ["CMD", "wget", "-q", "-O-", "http://localhost:8025/api/v2/messages"]
+      interval: 5s
+      timeout: 3s
+      retries: 12
+
+  # P1-6：MinIO —— 面单/报关单 PDF 对象存储（S3 兼容）
+  # 注：Docker Hub 上的 minio/minio 已下线（pull 会报 repository does not exist），
+  #     官方镜像现在在 quay.io（已实测可拉）。版本按 release tag 钉死，保证可重复构建。
+  aslp_minio:
+    image: quay.io/minio/minio:RELEASE.2025-09-07T16-13-09Z
+    container_name: aslp_minio
+    command: server /data --console-address ":9001"
+    environment:
+      MINIO_ROOT_USER: ${MINIO_ROOT_USER:-aslp-minio-admin}
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD:-aslp-minio-secret}
+    networks:
+      aslp_net:
+        aliases:
+          - aslp-minio
+    ports:
+      # 9000 = S3 API（服务端 + 预签名 URL），9001 = 控制台（浏览器看桶/对象）
+      - "9000:9000"
+      - "9001:9001"
+    volumes:
+      - aslp_minio_data:/data
+    healthcheck:
+      test: ["CMD", "mc", "ready", "local"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
 
   # ---------------------------- Java 微服务 ----------------------------
   # 入口网关 + BFF（WebFlux）。统一使用根 Dockerfile，按 MODULE 构建。
@@ -159,6 +191,10 @@ services:
     depends_on:
       aslp_postgres:
         condition: service_healthy
+      # P1-6：单据存储是硬依赖（面单/报关单都要写它），启动前等 MinIO 就绪，
+      # 否则 /actuator/health 里的 minio 组件一出场就是 DOWN
+      aslp_minio:
+        condition: service_healthy
 
   aslp_inventory_service:
     <<: *java-service
@@ -183,6 +219,9 @@ services:
       aslp_postgres:
         condition: service_healthy
       aslp_redis:
+        condition: service_healthy
+      # P1-5：邮件健康探测已开启（mail.enabled=true），SMTP 没就绪会把自己判 DOWN
+      aslp_mailhog:
         condition: service_healthy
 
   aslp_route_service:
@@ -253,6 +292,11 @@ services:
   aslp_prometheus:
     image: prom/prometheus:v2.54.1
     container_name: aslp_prometheus
+    # 与 Loki/Zipkin 一致：对外连接的地址一律用连字符别名（见 §9 #35 的教训）
+    networks:
+      aslp_net:
+        aliases:
+          - aslp-prometheus
     command:
       - --config.file=/etc/prometheus/prometheus.yml
       - --storage.tsdb.path=/prometheus
@@ -270,8 +314,6 @@ services:
       interval: 10s
       timeout: 5s
       retries: 10
-    networks:
-      - aslp_net
 
   aslp_grafana:
     image: grafana/grafana:11.3.0
@@ -298,6 +340,106 @@ services:
     networks:
       - aslp_net
 
+  # ---------------------------- 链路追踪（P1-3） ----------------------------
+  # 接收各服务上报的 span（各服务 management.zipkin.tracing.endpoint 指向它）。
+  aslp_zipkin:
+    image: openzipkin/zipkin:latest
+    container_name: aslp_zipkin
+    # RFC 2396 合法主机名（同理见文件头「URI 安全命名」）：
+    # 网关是 WebFlux，上报 span 走 WebClient -> java.net.URI，
+    # 写成 aslp_zipkin 会得到 “Host is not specified”（实测）——
+    # 而 Servlet 服务用 URLConnection/HttpURLConnection 解析较宽松，所以只有网关上不出来。
+    networks:
+      aslp_net:
+        aliases:
+          - aslp-zipkin
+    environment:
+      # 演示用内存存储（重启即清空）；生产应换成 Elasticsearch/Cassandra
+      STORAGE_TYPE: mem
+      # 限住堆，避免本地演示吃满资源
+      JAVA_OPTS: -Xms64m -Xmx256m
+    ports:
+      - "9411:9411"
+    healthcheck:
+      # 镜像自带 wget（已实测 /usr/bin/wget），/health 返回 {"status":"UP"}
+      test: ["CMD", "wget", "-q", "-O-", "http://localhost:9411/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+    # networks 已在服务开头声明（需带别名）
+
+  # ---------------------------- 日志聚合（P1-1b）----------------------------
+  # 各服务直接输出到 stdout（不落文件）→ Promtail 经 Docker API 流式采集 → Loki 存储 → Grafana 查看。
+  # 注意：Promtail 必须用 **Docker API** 而不是 tail 容器日志文件：
+  # Docker Desktop for macOS 的 /var/lib/docker 在虚拟机里，挂进容器只会得到空目录（已实测）。
+  aslp_loki:
+    image: grafana/loki:3.2.0
+    container_name: aslp_loki
+    # RFC 2396 合法主机名：Promtail 与 Grafana 都按这个别名寻址（同理见文件头「URI 安全命名」）
+    networks:
+      aslp_net:
+        aliases:
+          - aslp-loki
+    command: -config.file=/etc/loki/loki.yml
+    volumes:
+      - ./monitoring/loki/loki.yml:/etc/loki/loki.yml:ro
+      - aslp_loki_data:/loki
+    ports:
+      - "3100:3100"
+    healthcheck:
+      # 镜像自带 wget（已实测）；/ready 就绪时返回 200
+      test: ["CMD", "wget", "-q", "-O-", "http://localhost:3100/ready"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+
+  aslp_promtail:
+    image: grafana/promtail:3.2.0
+    container_name: aslp_promtail
+    command: -config.file=/etc/promtail/promtail.yml
+    volumes:
+      - ./monitoring/promtail/promtail.yml:/etc/promtail/promtail.yml:ro
+      # 只读挂载 Docker socket：Promtail 靠它发现容器并流式读日志（已实测可挂载）
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+    ports:
+      - "9080:9080"
+    depends_on:
+      aslp_loki:
+        condition: service_started
+    healthcheck:
+      test: ["CMD", "wget", "-q", "-O-", "http://localhost:9080/ready"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+    networks:
+      - aslp_net
+
+  # P1-4：Amazon SP-API 契约桩（WireMock）。
+  # order-service 的诊断探针（POST /api/orders/spapi/probe）把它当作真实平台来打，
+  # 于是「真实 HTTP 请求 + LWA 换令牌 + 分页 + 429 限流 + 超时」整条链路
+  # 在容器环境里可以端到端断言，而不需要真实卖家账号。
+  # 桩定义是仓库里的文件（./wiremock/mappings/*.json），不是 compose 内联 YAML ——
+  # 与 P1-1/P1-1b 的 monitoring/ 同一思路：契约是要进代码评审的资产。
+  aslp_wiremock:
+    image: wiremock/wiremock:3.9.1
+    container_name: aslp_wiremock
+    command: ["--root-dir", "/home/wiremock"]
+    volumes:
+      - ./wiremock:/home/wiremock:ro
+    ports:
+      # 宿主 8099：冒烟脚本直接查 /__admin/* 来验证「桩确实被调用过几次」
+      - "8099:8080"
+    networks:
+      aslp_net:
+        aliases:
+          - aslp-wiremock
+    healthcheck:
+      # 镜像自带 curl（已实测）
+      test: ["CMD-SHELL", "curl -fsS http://localhost:8080/__admin/health || exit 1"]
+      interval: 5s
+      timeout: 3s
+      retries: 12
+
 volumes:
   aslp_pg_data:
     name: aslp_pg_data
@@ -307,6 +449,10 @@ volumes:
     name: aslp_prometheus_data
   aslp_grafana_data:
     name: aslp_grafana_data
+  aslp_loki_data:
+    name: aslp_loki_data
+  aslp_minio_data:
+    name: aslp_minio_data
 
 networks:
   aslp_net:

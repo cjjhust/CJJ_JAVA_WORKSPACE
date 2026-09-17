@@ -1,0 +1,25 @@
+{
+  "request": {
+    "method": "GET",
+    "urlPath": "/orders/v0/orders",
+    "queryParameters": {
+      "MarketplaceIds": {
+        "equalTo": "AMZN-BAD-REQUEST"
+      }
+    }
+  },
+  "response": {
+    "status": 400,
+    "headers": {
+      "Content-Type": "application/json"
+    },
+    "jsonBody": {
+      "errors": [
+        {
+          "code": "InvalidInput",
+          "message": "用于验证「4xx 不可重试 -> 转业务失败」"
+        }
+      ]
+    }
+  }
+}

@@ -1,0 +1,48 @@
+# =============================================================================
+# ASLP — Loki 3 单机配置（P1-1b 日志聚合）
+#
+# 单进程模式（target=all），文件系统存储，适合本地演示：
+#   - chunks / index 都落在 /loki（对应 compose 的 aslp_loki_data 卷）
+#   - schema v13 + tsdb 是 Loki 3 的推荐组合（旧 boltdb-shipper 已弃用）
+#   - 生产应换成对象存储（S3/MinIO）+ 多副本，并开启鉴权（auth_enabled: true）
+# =============================================================================
+
+auth_enabled: false
+
+server:
+  http_listen_port: 3100
+  log_level: warn
+
+common:
+  instance_addr: 127.0.0.1
+  path_prefix: /loki
+  storage:
+    filesystem:
+      chunks_directory: /loki/chunks
+      rules_directory: /loki/rules
+  replication_factor: 1
+  ring:
+    kvstore:
+      store: inmemory
+
+schema_config:
+  configs:
+    - from: 2024-01-01
+      store: tsdb
+      object_store: filesystem
+      schema: v13
+      index:
+        prefix: index_
+        period: 24h
+
+limits_config:
+  # 演示环境放宽写入限制，避免演示时被限流丢日志
+  ingestion_rate_mb: 16
+  ingestion_burst_size_mb: 32
+  # 允许结构化元数据（traceId 这类高基数字段应放这里，而不是做成标签建索引）
+  allow_structured_metadata: true
+  # 打开日志量统计：Grafana 的日志量直方图依赖它
+  volume_enabled: true
+
+analytics:
+  reporting_enabled: false

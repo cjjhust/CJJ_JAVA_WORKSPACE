@@ -39,6 +39,11 @@
         -->
         <spring-cloud.version>2023.0.3</spring-cloud.version>
         <maven.compiler.plugin.version>3.11.0</maven.compiler.plugin.version>
+        <!-- P1-4：契约测试用 WireMock（standalone 版，见 order-service 依赖注释） -->
+        <wiremock.version>3.9.1</wiremock.version>
+        <!-- P1-6：对象存储 SDK 与 PDF 生成（OpenPDF = LGPL，见 order-service 依赖注释） -->
+        <minio.version>8.5.12</minio.version>
+        <openpdf.version>2.0.3</openpdf.version>
     </properties>
 
     <dependencyManagement>
@@ -63,6 +68,19 @@
         <dependency>
             <groupId>io.micrometer</groupId>
             <artifactId>micrometer-registry-prometheus</artifactId>
+        </dependency>
+        <!--
+          P1-3 链路追踪：Brave 桥接（Micrometer Tracing 的 Brave 实现）+ Zipkin 上报器。
+          同样是平台级关注点（每个服务都要能产出/传播 traceId），故在此统一继承。
+          W3C traceparent 为 Boot 3 默认传播格式，网关与下游服务需一致（否则跨服务串不起来）。
+        -->
+        <dependency>
+            <groupId>io.micrometer</groupId>
+            <artifactId>micrometer-tracing-bridge-brave</artifactId>
+        </dependency>
+        <dependency>
+            <groupId>io.zipkin.reporter2</groupId>
+            <artifactId>zipkin-reporter-brave</artifactId>
         </dependency>
     </dependencies>
 

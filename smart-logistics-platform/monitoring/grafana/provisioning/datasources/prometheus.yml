@@ -13,6 +13,7 @@ datasources:
     type: prometheus
     access: proxy
     # 走容器网络内的服务名，端口是容器内端口（不是宿主机映射端口）
-    url: http://aslp_prometheus:9090
+    # 用连字符别名而不是容器名：凡拼接 URL 的地方一律避免下划线主机名（见 readme §9 #35）
+    url: http://aslp-prometheus:9090
     isDefault: true
     editable: true

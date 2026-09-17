@@ -7,7 +7,7 @@
 #   2) docker compose up -d          —— 基础设施 + 全部 Java 服务
 #   3) 等待全部容器 healthy
 #   4) docker compose ps             —— 状态总览（供人工核对）
-#   5) bash smoke-test.sh --external —— 打容器暴露的 8080 跑 46 项端到端断言
+#   5) bash smoke-test.sh --external —— 打容器暴露的 8080 跑 96 项端到端断言
 #
 # 用法：
 #   bash scripts/container-verify.sh            # 全流程
@@ -37,7 +37,12 @@ EXPECTED_SERVICES=(
     aslp_postgres aslp_redis aslp_zookeeper aslp_kafka
     aslp_gateway aslp_order_service aslp_inventory_service
     aslp_route_service aslp_auth_service aslp_report_service
-    aslp_prometheus aslp_grafana
+    aslp_prometheus aslp_grafana aslp_zipkin
+    aslp_loki aslp_promtail
+    # P1-4：Amazon SP-API 契约桩（order-service 的探针把它当真实平台来打）
+    aslp_wiremock
+    # P1-5：真实 SMTP + Web 收件箱（补货邮件）｜ P1-6：单据对象存储（面单/报关单 PDF）
+    aslp_mailhog aslp_minio
 )
 
 echo "=== 1/5 构建镜像 ==="

@@ -1,0 +1,23 @@
+{
+  "request": {
+    "method": "GET",
+    "urlPath": "/orders/v0/orders/AMZ-DE-1001/orderItems"
+  },
+  "response": {
+    "status": 200,
+    "headers": {
+      "Content-Type": "application/json"
+    },
+    "jsonBody": {
+      "payload": {
+        "OrderItems": [
+          {
+            "ASIN": "B08TEST1001",
+            "Title": "AeroSleep 婴儿床 6 件套（Amazon.de）",
+            "QuantityOrdered": 1
+          }
+        ]
+      }
+    }
+  }
+}

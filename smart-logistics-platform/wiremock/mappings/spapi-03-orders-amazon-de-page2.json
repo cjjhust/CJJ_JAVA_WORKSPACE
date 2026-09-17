@@ -1,0 +1,31 @@
+{
+  "request": {
+    "method": "GET",
+    "urlPath": "/orders/v0/orders",
+    "queryParameters": {
+      "MarketplaceIds": {
+        "equalTo": "A1PA6795UKMFR9"
+      },
+      "NextToken": {
+        "equalTo": "PAGE-2"
+      }
+    }
+  },
+  "response": {
+    "status": 200,
+    "headers": {
+      "Content-Type": "application/json"
+    },
+    "jsonBody": {
+      "payload": {
+        "Orders": [
+          {
+            "AmazonOrderId": "AMZ-DE-1003",
+            "OrderStatus": "Unshipped",
+            "PurchaseDate": "2026-09-16T10:05:00Z"
+          }
+        ]
+      }
+    }
+  }
+}

@@ -14,9 +14,10 @@ import com.graphhopper.jsprit.core.problem.solution.route.VehicleRoute;
 import com.graphhopper.jsprit.core.problem.solution.route.activity.TourActivity;
 import com.graphhopper.jsprit.core.util.Solutions;
 import io.micrometer.core.instrument.MeterRegistry;
+import io.micrometer.observation.Observation;
+import io.micrometer.observation.ObservationRegistry;
 import org.springframework.stereotype.Service;
 
-import java.time.Duration;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Random;
@@ -51,19 +52,24 @@ import java.util.Random;
  * 固定随机种子 {@link #RANDOM_SEED}：同一问题与同一迭代数必须产出同一结果，
  * 否则冒烟脚本的端到端断言与单测会间歇性失败。
  *
- * <h3>P1-1 可观测性</h3>
+ * <h3>P1-1 / P1-3 可观测性</h3>
  * 求解是 M3 最重的计算路径（演示问题 ~200ms，复杂问题秒级），因此单独打点：
  * <ul>
- *   <li>{@code aslp_vrp_solve_seconds{feasible}} —— 求解耗时（Timer，可算 P95）；</li>
- *   <li>{@code aslp_vrp_distance_km} —— 每次求解出的总里程分布（DistributionSummary）。</li>
+ *   <li>{@link #OBSERVATION_SOLVE} —— 用 Observation 同时产出 <b>Zipkin span</b>
+ *       与 <b>Timer 指标</b>（Boot 会把 MeterObservationHandler 注册进 ObservationRegistry，
+ *       所以一份埋点两条链路都有；<b>不要再手写同名 Timer</b>，否则计数会翻倍）；</li>
+ *   <li>{@link #METRIC_DISTANCE} —— 每次求解出的总里程分布（Observation 不产出 Summary，故单独记录）。</li>
  * </ul>
- * 有了这两个指标，「M3 变慢了」与「解变差了（里程变长）」能被区分开。
+ * 有了这些，「M3 变慢了」与「解变差了（里程变长）」能被区分开。
  */
 @Service
 public class VrpRouteService {
 
-    /** P1-1：求解耗时 Timer（Prometheus: aslp_vrp_solve_seconds）。 */
-    public static final String METRIC_SOLVE = "aslp.vrp.solve";
+    /**
+     * 求解的观测名：既产生 span 名，也（经 MeterObservationHandler）产生指标名。
+     * Prometheus 侧表现为 {@code aslp_vrp_solve_seconds_*}。
+     */
+    public static final String OBSERVATION_SOLVE = "aslp.vrp.solve";
 
     /** P1-1：求解里程分布 Summary（Prometheus: aslp_vrp_distance_km）。 */
     public static final String METRIC_DISTANCE = "aslp.vrp.distance";
@@ -72,9 +78,11 @@ public class VrpRouteService {
     public static final long RANDOM_SEED = 20260916L;
 
     private final MeterRegistry meterRegistry;
+    private final ObservationRegistry observationRegistry;
 
-    public VrpRouteService(MeterRegistry meterRegistry) {
+    public VrpRouteService(MeterRegistry meterRegistry, ObservationRegistry observationRegistry) {
         this.meterRegistry = meterRegistry;
+        this.observationRegistry = observationRegistry;
     }
 
     /** 用默认迭代上限求解。 */
@@ -89,21 +97,43 @@ public class VrpRouteService {
      * @param maxIterations 迭代上限（至少 1；取值范围由工厂校验）
      */
     public VrpPlan solve(VehicleRoutingProblem problem, int maxIterations) {
+        Observation observation = Observation.createNotStarted(OBSERVATION_SOLVE, observationRegistry).start();
+        // openScope 会把 traceId/spanId 放进 MDC —— 这样日志里也能看到同一条链路
+        try (Observation.Scope ignored = observation.openScope()) {
+            VrpPlan plan = doSolve(problem, maxIterations);
+
+            // 低基数标签：既进 span，也进指标（能按有解/无解聚合）
+            observation.lowCardinalityKeyValue("feasible", String.valueOf(plan.feasible()));
+            // 高基数标签：只进 span（指标上带这些会炸掉时间序列）
+            observation.highCardinalityKeyValue("routeCount", String.valueOf(plan.routeCount()));
+            observation.highCardinalityKeyValue("stopCount", String.valueOf(plan.stopCount()));
+            observation.highCardinalityKeyValue("totalDistanceKm", String.valueOf(plan.totalDistanceKm()));
+            if (!plan.unassignedJobIds().isEmpty()) {
+                observation.highCardinalityKeyValue("unassignedJobIds", String.join(",", plan.unassignedJobIds()));
+            }
+
+            // 无解次数突增往往是需求/运力数据出了问题，所以无解也要留里程样本之外的可观测痕迹
+            if (plan.feasible()) {
+                meterRegistry.summary(METRIC_DISTANCE).record(plan.totalDistanceKm());
+            }
+            return plan;
+        } catch (RuntimeException e) {
+            observation.error(e);
+            throw e;
+        } finally {
+            observation.stop();
+        }
+    }
+
+    /** 实际求解（把算法与结果翻译拆出去，让上面只负责埋点与作用域管理）。 */
+    private VrpPlan doSolve(VehicleRoutingProblem problem, int maxIterations) {
         long startedAt = System.currentTimeMillis();
         VehicleRoutingAlgorithm algorithm = Jsprit.Builder.newInstance(problem)
                 .setRandom(new Random(RANDOM_SEED))
                 .setProperty(Jsprit.Parameter.ITERATIONS, String.valueOf(Math.max(1, maxIterations)))
                 .buildAlgorithm();
         VehicleRoutingProblemSolution best = Solutions.bestOf(algorithm.searchSolutions());
-        VrpPlan plan = toPlan(problem, best, System.currentTimeMillis() - startedAt);
-
-        // P1-1：无论有解无解都要打点（无解次数突增往往是需求/运力数据出了问题）
-        meterRegistry.timer(METRIC_SOLVE, "feasible", String.valueOf(plan.feasible()))
-                .record(Duration.ofMillis(plan.elapsedMs()));
-        if (plan.feasible()) {
-            meterRegistry.summary(METRIC_DISTANCE).record(plan.totalDistanceKm());
-        }
-        return plan;
+        return toPlan(problem, best, System.currentTimeMillis() - startedAt);
     }
 
     /**

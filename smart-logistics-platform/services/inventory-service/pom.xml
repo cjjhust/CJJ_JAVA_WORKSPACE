@@ -29,6 +29,14 @@
             <groupId>org.springframework.boot</groupId>
             <artifactId>spring-boot-starter-mail</artifactId>
         </dependency>
+        <!-- P1-5：邮件正文用 Thymeleaf 模板渲染。
+             只引 thymeleaf-spring6（而不是 spring-boot-starter-thymeleaf）：
+             后者会顺带注册 Web 视图解析器，把「本服务只返回 JSON」这件事变得不再显然。
+             理由详见 MailTemplateConfig 的类注释。 -->
+        <dependency>
+            <groupId>org.thymeleaf</groupId>
+            <artifactId>thymeleaf-spring6</artifactId>
+        </dependency>
         <dependency>
             <groupId>org.springframework.boot</groupId>
             <artifactId>spring-boot-starter-actuator</artifactId>

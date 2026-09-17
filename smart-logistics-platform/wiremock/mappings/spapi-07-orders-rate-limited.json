@@ -1,0 +1,26 @@
+{
+  "request": {
+    "method": "GET",
+    "urlPath": "/orders/v0/orders",
+    "queryParameters": {
+      "MarketplaceIds": {
+        "equalTo": "AMZN-RATE-LIMITED"
+      }
+    }
+  },
+  "response": {
+    "status": 429,
+    "headers": {
+      "Content-Type": "application/json",
+      "Retry-After": "7"
+    },
+    "jsonBody": {
+      "errors": [
+        {
+          "code": "QuotaExceeded",
+          "message": "Request rate exceeded"
+        }
+      ]
+    }
+  }
+}

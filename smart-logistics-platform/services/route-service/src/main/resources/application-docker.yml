@@ -6,6 +6,14 @@ spring:
     name: route-service
 
 management:
+  # P1-3：链路追踪（容器内指向 aslp_zipkin）
+  tracing:
+    sampling:
+      probability: 1.0
+  zipkin:
+    tracing:
+      # 连字符别名（同 §9 #35）
+      endpoint: http://aslp-zipkin:9411/api/v2/spans
   endpoints:
     web:
       exposure:

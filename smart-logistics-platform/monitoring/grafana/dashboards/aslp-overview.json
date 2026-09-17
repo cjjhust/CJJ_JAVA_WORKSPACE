@@ -238,6 +238,56 @@
           "legendFormat": "{{operation}} / {{result}}"
         }
       ]
+    },
+    {
+      "id": 10,
+      "type": "logs",
+      "title": "服务日志（Loki；行内的 traceId 可点开跳 Zipkin）",
+      "description": "P1-1b：日志由 Promtail 经 Docker API 采集入 Loki。每行形如 [traceId-spanId]，Grafana 数据源的 derivedFields 已把它变成可点击链接 → Zipkin 整条链路。",
+      "gridPos": { "h": 10, "w": 24, "x": 0, "y": 30 },
+      "datasource": { "type": "loki", "uid": "aslp-loki" },
+      "options": {
+        "showTime": true,
+        "wrapLogMessage": true,
+        "enableLogDetails": true,
+        "sortOrder": "Descending",
+        "dedupStrategy": "none"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": { "type": "loki", "uid": "aslp-loki" },
+          "expr": "{service=~\"aslp_.+\"}",
+          "queryType": "range"
+        }
+      ]
+    },
+    {
+      "id": 11,
+      "type": "timeseries",
+      "title": "日志量（按服务；含 ERROR 单独计量）",
+      "description": "Loki 指标查询：rate 走总日志量，| level=\"ERROR\" 过滤出错误行。level 标签由 Promtail 的 pipeline stage 从日志行首抽取。",
+      "gridPos": { "h": 8, "w": 24, "x": 0, "y": 40 },
+      "datasource": { "type": "loki", "uid": "aslp-loki" },
+      "options": {
+        "legend": { "displayMode": "table", "placement": "bottom", "calcs": ["sum"] },
+        "tooltip": { "mode": "multi", "sort": "desc" }
+      },
+      "fieldConfig": { "defaults": { "unit": "short", "custom": { "fillOpacity": 10, "lineWidth": 1 } }, "overrides": [] },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": { "type": "loki", "uid": "aslp-loki" },
+          "expr": "sum by (service) (rate({service=~\"aslp_.+\"}[1m]))",
+          "legendFormat": "{{service}}"
+        },
+        {
+          "refId": "B",
+          "datasource": { "type": "loki", "uid": "aslp-loki" },
+          "expr": "sum by (service) (rate({service=~\"aslp_.+\"} | level=\"ERROR\" [5m]))",
+          "legendFormat": "{{service}} ERROR"
+        }
+      ]
     }
   ]
 }

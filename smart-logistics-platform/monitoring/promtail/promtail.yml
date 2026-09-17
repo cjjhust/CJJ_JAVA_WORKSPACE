@@ -1,0 +1,51 @@
+# =============================================================================
+# ASLP — Promtail 采集配置（P1-1b）
+#
+# 【为什么用 docker_sd_configs 而不是 tail 日志文件】
+# Docker Desktop for macOS 的容器文件系统在虚拟机里，宿主并不存在
+# /var/lib/docker/containers（已实测），把那个路径挂进容器只会得到空目录。
+# Promtail 的 docker 目标是通过 **Docker API** 流式读取容器日志的，
+# 只需要挂 /var/run/docker.sock（已实测可挂载），因此这是跨平台可行的做法。
+#
+# 标签设计（只保留低基数）：container / service / project / level
+# **高基数的 traceId 不做成标签** —— 那会把索引打爆；交给 Grafana 数据源的
+# derivedFields 在查询时正则抽取，点一下即可跳到 Zipkin 看整条链路（P1-3）。
+# =============================================================================
+
+server:
+  http_listen_port: 9080
+  grpc_listen_port: 0
+  log_level: warn
+
+positions:
+  filename: /tmp/positions.yaml
+
+clients:
+  - url: http://aslp-loki:3100/loki/api/v1/push
+    batchwait: 1s
+    batchsize: 102400
+
+scrape_configs:
+  - job_name: aslp-containers
+    docker_sd_configs:
+      - host: unix:///var/run/docker.sock
+        refresh_interval: 5s
+    relabel_configs:
+      # 只采集本项目容器（aslp_ 前缀），避免把机器上其他项目的日志也吸进来
+      - source_labels: ['__meta_docker_container_name']
+        regex: '/aslp_.+'
+        action: keep
+      - source_labels: ['__meta_docker_container_name']
+        regex: '/(.*)'
+        target_label: container
+      - source_labels: ['__meta_docker_container_label_com_docker_compose_service']
+        target_label: service
+      - source_labels: ['__meta_docker_container_label_com_docker_compose_project']
+        target_label: project
+    pipeline_stages:
+      # 从 Spring Boot 日志行首抽日志级别，作为低基数标签（便于在 Grafana 里筛 ERROR/WARN）
+      # 形如：2026-09-16T22:45:13.011Z  INFO 1 --- [order-service] [traceId-spanId] ...
+      - regex:
+          expression: '^\S+\s+(?P<level>TRACE|DEBUG|INFO|WARN|ERROR)\s'
+      - labels:
+          level:

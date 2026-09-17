@@ -24,12 +24,25 @@ server:
   port: 8081
 
 management:
+  # P1-3：链路追踪（traceId 自动进日志 MDC，见 readme §6）
+  tracing:
+    sampling:
+      probability: 1.0
+  zipkin:
+    tracing:
+      endpoint: http://localhost:9411/api/v2/spans
   endpoints:
     web:
       exposure:
         # P1-2：暴露熔断器状态/事件端点，便于端到端断言「熔断已打开」
         # P1-1：加上 Prometheus 抓取端点与指标清单
+        # P1-6：show-details 让 /actuator/health 带上 minio 桶名等排查信息
         include: health,info,circuitbreakers,circuitbreakerevents,prometheus,metrics
+  endpoint:
+    health:
+      # 本地默认指向 compose 映射出来的 MinIO；没起 MinIO 时会 DOWN —— 需要看单据功能时
+      # 请先 `docker compose up -d aslp_minio`（容器 profile 下 compose 已经串好依赖）
+      show-details: when-authorized
   metrics:
     tags:
       application: ${spring.application.name}
@@ -72,6 +85,25 @@ aslp:
   order:
     # true = MockAmazonStrategy；false = AmazonSpApiStrategy（需真实凭据）
     mock-enabled: true
+    # P1-4：真实 SP-API 参数。凭据从环境变量注入，不写进仓库（密钥外置）
+    amazon:
+      endpoint: https://sellingpartnerapi-eu.amazon.com
+      token-url: https://api.amazon.com/auth/o2/token
+      marketplace-id: A1PA6795UKMFR9      # Amazon.de
+      client-id: ${AMAZON_LWA_CLIENT_ID:}
+      client-secret: ${AMAZON_LWA_CLIENT_SECRET:}
+      refresh-token: ${AMAZON_LWA_REFRESH_TOKEN:}
+      connect-timeout: 2s
+      # 读超时必须显式设置：否则平台僵死时线程会被无限拖住（熔断器救不了被占住的线程）
+      read-timeout: 5s
+      max-pages: 5                        # 防御性上限：NextToken 不收敛时不会无限翻页
+      created-after-days: 3               # 只拉最近 3 天（SP-API 要求 CreatedAfter）
+      fetch-item-titles: true             # 逐个订单补商品名（订单列表接口不含商品名）
+      default-warehouse: Bruchsal
+      warehouse-by-city:
+        bruchsal: Bruchsal
+        moenchengladbach: Mönchengladbach
+        monchengladbach: Mönchengladbach
     sync:
       # 本地默认关闭定时同步，避免开发时反复写入
       enabled: false
@@ -84,3 +116,24 @@ aslp:
     username: aslp
     output-dir: /tmp
     enabled: false
+  # P1-6：单据对象存储（本地默认指向 compose 映射出来的 9000 端口）
+  minio:
+    endpoint: http://localhost:9000
+    # 本地开发对外/对内是同一个端点，因此不配 public-endpoint（预签名复用同一客户端）
+    # ⚠️ Spring 占位符用单冒号 ${VAR:default}；shell 风格的 ${VAR:-default}
+    # 会让默认值变成「-aslp-minio-admin」（带前导减号），见 readme §9 #45
+    access-key: ${MINIO_ROOT_USER:aslp-minio-admin}
+    secret-key: ${MINIO_ROOT_PASSWORD:aslp-minio-secret}
+    region: us-east-1
+    bucket: aslp-documents
+    presign-expiry: 15m
+    auto-create-bucket: true
+  # P1-6：单据抬头与申报参数（与 docker profile 保持一致，仅注释差异）
+  document:
+    shipper-name: ASLP Fulfillment GmbH (DEMO)
+    shipper-address: Industriestrasse 12, 76646 Bruchsal, Germany
+    shipper-tax-id: DE000000000
+    destination-country: DE
+    declared-value-eur: "29.90"
+    hs-code: "9503.00.99"
+    currency: EUR

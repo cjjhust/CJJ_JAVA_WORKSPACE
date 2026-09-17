@@ -1,0 +1,31 @@
+# =============================================================================
+# ASLP — Grafana Loki 数据源（P1-1b）
+#
+# uid 固定为 aslp-loki：看板与文档里都按 uid 引用。
+#
+# 【derivedFields：把日志与链路连起来的低成本做法】
+# P1-3 已把 traceId 写进每行日志的 MDC，形如 [<32hex>-<16hex>]。
+# 这里配置一个派生字段，在**查询时**正则抽出 traceId 并生成可点击链接，
+# 直接跳到 Zipkin 看整条调用链 —— 不需要部署 Tempo，也不用把 traceId 做成 Loki 标签
+# （做成标签会让索引基数爆炸，这正是 Loki 明确不推荐的做法）。
+#
+# 注意 url 用的是 localhost：它由**浏览器**打开，不是 Grafana 服务端访问。
+# =============================================================================
+
+apiVersion: 1
+
+datasources:
+  - name: Loki
+    uid: aslp-loki
+    type: loki
+    access: proxy
+    url: http://aslp-loki:3100
+    isDefault: false
+    editable: true
+    jsonData:
+      maxLines: 500
+      derivedFields:
+        - name: traceId
+          matcherRegex: '\[([0-9a-f]{32})-'
+          url: 'http://localhost:9411/zipkin/traces/${__value.raw}'
+          urlDisplayLabel: '在 Zipkin 中查看这条链路'

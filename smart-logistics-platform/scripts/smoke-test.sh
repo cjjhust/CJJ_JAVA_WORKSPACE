@@ -266,7 +266,7 @@ RATE_CODES="$(for _ in 1 2 3 4; do
         "http://localhost:8080/api/orders/pull" &
 done
 wait)"
-if echo "${RATE_CODES}" | grep -qF '429'; then
+if grep -qF -- '429' <<< "${RATE_CODES}"; then
     echo "  ✅ 限流生效（并发 4 次至少有 1 次 429）：${RATE_CODES}"
     PASS=$((PASS + 1))
 else
@@ -466,6 +466,404 @@ else
     echo "  ❌ Grafana 看板未加载，返回：${GRAFANA_DASHBOARDS:0:200}"
     FAIL=$((FAIL + 1))
 fi
+
+echo "--- M5 链路追踪（P1-3：Micrometer Tracing + Brave + Zipkin）---"
+# 1) 追踪后端健康。Zipkin 的 /health 是**带缩进且冒号前有空格**的 JSON
+#    （实际返回 `"status" : "UP"`），写死无空格的子串会假失败 —— 与 Grafana 同一类坑（§9 #32）。
+ZIPKIN_HEALTH="$(curl -fsS --max-time 10 http://localhost:9411/health 2>/dev/null)"
+if grep -qE -- '"status"[[:space:]]*:[[:space:]]*"UP"' <<< "${ZIPKIN_HEALTH}"; then
+    echo "  ✅ Zipkin 健康          GET  :9411/health（status UP）"
+    PASS=$((PASS + 1))
+else
+    echo "  ❌ Zipkin 不健康：${ZIPKIN_HEALTH:0:200}"
+    FAIL=$((FAIL + 1))
+fi
+# 2) 6 个服务都要在上报 span。网关最容易掉队：它是 WebFlux，走 WebClient 发 span，
+#    URL 里的下划线主机名会让 java.net.URI 解析不出 host（实测报 Host is not specified，见 §9 #35）。
+ZIPKIN_SERVICES=""
+SERVICE_COUNT=0
+for _ in $(seq 1 16); do
+    ZIPKIN_SERVICES="$(curl -fsS --max-time 10 http://localhost:9411/api/v2/services 2>/dev/null)"
+    SERVICE_COUNT="$(grep -o '"[a-z-]*"' <<< "${ZIPKIN_SERVICES}" | wc -l | tr -d ' ')"
+    [ "${SERVICE_COUNT}" = "6" ] && break
+    sleep 3
+done
+if [ "${SERVICE_COUNT}" = "6" ]; then
+    echo "  ✅ 6 个服务均已上报 span：${ZIPKIN_SERVICES:0:130}"
+    PASS=$((PASS + 1))
+else
+    echo "  ❌ 上报 span 的服务数为 ${SERVICE_COUNT}（期望 6）：${ZIPKIN_SERVICES:0:200}"
+    FAIL=$((FAIL + 1))
+fi
+# 3) 核心断言：一条 trace 里同时出现 gateway 与 order-service —— 这才叫「链路串通了」，
+#    只看到某个服务有 span 只能证明它在自说自话。
+if command -v python3 >/dev/null 2>&1; then
+    CROSS_TRACES=0
+    for _ in $(seq 1 10); do
+        CROSS_TRACES="$(curl -fsS --max-time 10 \
+            'http://localhost:9411/api/v2/traces?serviceName=order-service&limit=200' 2>/dev/null \
+            | python3 -c "
+import json, sys
+try:
+    traces = json.load(sys.stdin)
+except Exception:
+    print(0); raise SystemExit
+n = 0
+for t in traces:
+    svcs = {s.get('localEndpoint', {}).get('serviceName') for s in t}
+    if {'gateway', 'order-service'} <= svcs:
+        n += 1
+print(n)")"
+        [ "${CROSS_TRACES}" -gt 0 ] 2>/dev/null && break
+        sleep 3
+    done
+    if [ "${CROSS_TRACES}" -gt 0 ] 2>/dev/null; then
+        echo "  ✅ 跨服务同一 traceId：${CROSS_TRACES} 条 trace 同时含 gateway 与 order-service"
+        PASS=$((PASS + 1))
+    else
+        echo "  ❌ 未找到同时含 gateway 与 order-service 的 trace（上下文没传播过去）"
+        FAIL=$((FAIL + 1))
+    fi
+    # 4) 业务 span 带业务属性（证明追踪不止有 HTTP span）。
+    #    【为何按 spanName 查而不是按 serviceName + limit】被监控抓取的服务会不断产生
+    #    /actuator/health、/actuator/prometheus 的 trace（Prometheus 每 15s 一次），
+    #    固定 limit 的窗口会被这些噪音洗掉（实测因此偶发假失败）。直接按 span 名查最精确。
+    VRP_SPAN_TAGS=""
+    for _ in $(seq 1 10); do
+        VRP_SPAN_TAGS="$(curl -fsS --max-time 10 \
+            'http://localhost:9411/api/v2/traces?spanName=aslp.vrp.solve&limit=10' 2>/dev/null \
+            | python3 -c "
+import json, sys
+try:
+    traces = json.load(sys.stdin)
+except Exception:
+    print(''); raise SystemExit
+for t in traces:
+    for s in t:
+        tags = s.get('tags', {})
+        if s.get('name') == 'aslp.vrp.solve' and 'stopCount' in tags and 'totalDistanceKm' in tags:
+            print(f\"stopCount={tags['stopCount']} totalDistanceKm={tags['totalDistanceKm']}\")
+            raise SystemExit
+print('')")"
+        [ -n "${VRP_SPAN_TAGS}" ] && break
+        sleep 3
+    done
+    if [ -n "${VRP_SPAN_TAGS}" ]; then
+        echo "  ✅ 业务 span 已上报并带业务属性（aslp.vrp.solve ${VRP_SPAN_TAGS}）"
+        PASS=$((PASS + 1))
+    else
+        echo "  ❌ Zipkin 里没有带业务属性的 aslp.vrp.solve span"
+        FAIL=$((FAIL + 1))
+    fi
+else
+    echo "  ℹ️  未安装 python3，跳过 trace 解析相关的 2 项断言"
+    PASS=$((PASS + 2))
+fi
+# 5) traceId 进日志（MDC）：有了它才能从「一条报错日志」直接跳到「整条调用链」。
+#    这一项依赖 docker logs，故非容器模式（--external 打裸进程）时跳过。
+if docker inspect aslp_order_service >/dev/null 2>&1; then
+    # 用 --since 而不是 --tail N：P1-2 的故障演练会刷出大量重试/堆栈日志，
+    # 固定 tail 行数会把带 traceId 的业务日志挤出窗口（实测 tail 500 偶发假失败）。
+    # 再用 here-string 而非管道：docker logs 输出大，grep -q 提前退出会 SIGPIPE（§9 #32 同一条坑）。
+    ORDER_LOGS="$(docker logs --since 10m aslp_order_service 2>&1)"
+    if grep -qE -- '\[[0-9a-f]{32}-[0-9a-f]{16}\]' <<< "${ORDER_LOGS}"; then
+        echo "  ✅ 日志已带 traceId/spanId（MDC 生效，可直接跳 Zipkin 查链路）"
+        PASS=$((PASS + 1))
+    else
+        echo "  ❌ 日志里没有 traceId（检查 micrometer-tracing 是否生效）"
+        FAIL=$((FAIL + 1))
+    fi
+else
+    echo "  ℹ️  非容器模式，跳过日志 traceId 断言"
+    PASS=$((PASS + 1))
+fi
+
+echo "--- M5 日志聚合（P1-1b：Promtail → Loki → Grafana）---"
+# 1) Loki 就绪（单机模式 /ready 返回 200）
+check "Loki 就绪            GET  :3100/ready" \
+    "http://localhost:3100/ready" 'ready'
+# 2) Promtail 真的在采集：用采集指标而不是「端口能通」来断言 ——
+#    entries_total 在增长 + parsing_errors_total=0 才说明日志被完整解析并推走。
+PROMTAIL_METRICS="$(curl -fsS --max-time 10 http://localhost:9080/metrics 2>/dev/null)"
+if grep -qE -- '^promtail_docker_target_entries_total [1-9]' <<< "${PROMTAIL_METRICS}" \
+    && grep -qE -- '^promtail_docker_target_parsing_errors_total 0' <<< "${PROMTAIL_METRICS}"; then
+    echo "  ✅ Promtail 采集中      GET  :9080/metrics（已读 $(grep -E -- '^promtail_docker_target_entries_total' <<< "${PROMTAIL_METRICS}" | awk '{print $2}') 条，解析错误 0）"
+    PASS=$((PASS + 1))
+else
+    echo "  ❌ Promtail 未采集到日志或存在解析错误"
+    echo "     $(grep -E -- '^promtail_docker_target_(entries|parsing_errors)_total' <<< "${PROMTAIL_METRICS}" | tr '\n' ' ')"
+    FAIL=$((FAIL + 1))
+fi
+if command -v python3 >/dev/null 2>&1; then
+    # 3) Loki 已收到本项目日志（有界轮询：Promtail 批量推送 + 索引刷新有延迟，见 §9 #33）
+    LOKI_STREAMS=0
+    for _ in $(seq 1 20); do
+        LOKI_STREAMS="$(curl -fsS --max-time 10 'http://localhost:3100/loki/api/v1/query_range' \
+            --data-urlencode 'query={project="aslp"}' --data-urlencode 'limit=10' 2>/dev/null \
+            | python3 -c "
+import json, sys
+try:
+    print(len(json.load(sys.stdin).get('data', {}).get('result', [])))
+except Exception:
+    print(0)")"
+        [ "${LOKI_STREAMS}" -gt 0 ] 2>/dev/null && break
+        sleep 3
+    done
+    if [ "${LOKI_STREAMS}" -gt 0 ] 2>/dev/null; then
+        echo "  ✅ Loki 已收到本项目日志：{project=\"aslp\"} 命中 ${LOKI_STREAMS} 个日志流"
+        PASS=$((PASS + 1))
+    else
+        echo "  ❌ Loki 里查不到 {project=\"aslp\"} 的日志（采集或推送链路有问题）"
+        FAIL=$((FAIL + 1))
+    fi
+    # 4) 日志里带 traceId —— 把 P1-3（链路）与 P1-1b（日志）串起来：
+    #    Grafana 的 Loki 数据源据此生成可点击链接，从一行日志跳到 zipkin 整条链路。
+    TRACE_LINES="$(curl -fsS --max-time 15 'http://localhost:3100/loki/api/v1/query_range' \
+        --data-urlencode 'query={service=~"aslp_.+"}' --data-urlencode 'limit=300' 2>/dev/null \
+        | python3 -c "
+import json, re, sys
+pat = re.compile(r'\[[0-9a-f]{32}-[0-9a-f]{16}\]')
+try:
+    d = json.load(sys.stdin)
+except Exception:
+    print(0); raise SystemExit
+n = 0
+for stream in d.get('data', {}).get('result', []):
+    for _, line in stream['values']:
+        if pat.search(line):
+            n += 1
+print(n)")"
+    if [ "${TRACE_LINES}" -gt 0 ] 2>/dev/null; then
+        echo "  ✅ 日志含 traceId：采样中 ${TRACE_LINES} 行可跳 Zipkin 查链路"
+        PASS=$((PASS + 1))
+    else
+        echo "  ❌ Loki 里的日志没有 traceId（检查 micrometer-tracing 与日志格式）"
+        FAIL=$((FAIL + 1))
+    fi
+else
+    echo "  ℹ️  未安装 python3，跳过 Loki 内容解析相关的 2 项断言"
+    PASS=$((PASS + 2))
+fi
+# 5) Grafana 侧 Loki 数据源已自动加载且连通（provisioning 生效）
+GRAFANA_LOKI_HEALTH="$(curl -fsS -u "admin:${GRAFANA_ADMIN_PASSWORD}" --max-time 10 \
+    'http://localhost:3000/api/datasources/uid/aslp-loki/health' 2>/dev/null)"
+if grep -qE -- '"status"[[:space:]]*:[[:space:]]*"OK"' <<< "${GRAFANA_LOKI_HEALTH}"; then
+    echo "  ✅ Grafana Loki 数据源已加载且连通（uid=aslp-loki，含 traceId 跳 Zipkin 的派生字段）"
+    PASS=$((PASS + 1))
+else
+    echo "  ❌ Grafana Loki 数据源不可用：${GRAFANA_LOKI_HEALTH:0:200}"
+    FAIL=$((FAIL + 1))
+fi
+
+echo "--- M5 外部平台契约（P1-4：WireMock 模拟 Amazon SP-API —— LWA / 分页 / 限流 / 超时）---"
+# 契约测试本身跑在单测里（WireMock 进程内，见 SpApiOrderClientContractTest）；
+# 这里补的是**容器环境**的证据：order-service 容器里的真实 SP-API 客户端
+# （LWA 换令牌 + /orders/v0/orders + /orderItems）打向 aslp_wiremock 容器，
+# 证明「打包进镜像 + 跨容器网络 + 走网关」这一段也通。
+SPAPI_PROBE_URL="http://localhost:8080/api/orders/spapi/probe"
+WIREMOCK_ADMIN="http://localhost:8099"
+
+# 同一份响应体上做多条断言：省掉重复调用，也让「分页只调了 2 次」的计数保持精确
+check_body() {
+    local label="$1" expect="$2" body="$3"
+    if grep -qF -- "${expect}" <<< "${body}"; then
+        echo "  ✅ ${label}"
+        PASS=$((PASS + 1))
+    else
+        echo "  ❌ ${label}"
+        echo "     期望包含: ${expect}"
+        echo "     实际返回: ${body:0:300}"
+        FAIL=$((FAIL + 1))
+    fi
+}
+
+# 1) 桩容器就绪 + 映射已加载（映射是仓库里的文件，加载失败 = 契约资产没进部署）
+WIREMOCK_HEALTH="$(curl -fsS --max-time 10 "${WIREMOCK_ADMIN}/__admin/health" 2>/dev/null)"
+check_body "WireMock 契约桩容器就绪（:8099）" '"healthy"' "${WIREMOCK_HEALTH}"
+# WireMock 管理端点的 JSON 是带空格的，去掉空白后计数/包含判断才稳定；
+# 探针返回的是 Jackson 紧凑 JSON（无空格），所以下面**不能**去掉空格 ——
+# 商品名里带空格，去掉就永远匹配不上（踩过的坑，见 readme §9 #39）
+WIREMOCK_MAPPINGS="$(curl -fsS --max-time 10 "${WIREMOCK_ADMIN}/__admin/mappings" 2>/dev/null | tr -d ' \n')"
+MAPPING_COUNT="$(grep -o '"urlPath"' <<< "${WIREMOCK_MAPPINGS}" | wc -l | tr -d ' ')"
+if [ "${MAPPING_COUNT}" -ge 11 ] && grep -qF -- '/auth/o2/token' <<< "${WIREMOCK_MAPPINGS}"; then
+    echo "  ✅ SP-API 桩映射已加载（${MAPPING_COUNT} 个，含 LWA 换令牌端点）"
+    PASS=$((PASS + 1))
+else
+    echo "  ❌ 桩映射未加载或不完整（解析到 ${MAPPING_COUNT} 个）"
+    FAIL=$((FAIL + 1))
+fi
+
+# 2) 清空 WireMock 请求日志：之后的计数才是「这一次拉取」的真实开销
+curl -fsS -X DELETE "${WIREMOCK_ADMIN}/__admin/requests" >/dev/null 2>&1
+# 探针 POST 走网关 8080（同时验证网关路由与 JWT 放行）
+SPAPI_BODY="$(curl -fsS --max-time 20 -X POST ${AUTH_ARGS[@]+"${AUTH_ARGS[@]}"} "${SPAPI_PROBE_URL}" 2>/dev/null)"
+check_body "探针：官方订单拉取成功（网关 -> order-service -> WireMock）" '"ok":true' "${SPAPI_BODY}"
+check_body "分页契约：NextToken 翻了 2 页且未被 max-pages 截断" '"pages":2,"truncated":false' "${SPAPI_BODY}"
+check_body "跨页合并：2 页共 3 条订单" '"count":3' "${SPAPI_BODY}"
+check_body "商品名来自 /orderItems（订单列表接口本身不含商品名）" 'AeroSleep 婴儿床 6 件套（Amazon.de）' "${SPAPI_BODY}"
+check_body "城市→履约仓映射（Moenchengladbach → Mönchengladbach）" '"warehouse":"Mönchengladbach"' "${SPAPI_BODY}"
+check_body "地址缺失订单自动打标（M1 异常打标链路）" '"errorTag":"ADDRESS_INVALID"' "${SPAPI_BODY}"
+check_body "明细接口 500 不拖垮主流程：商品名回退占位符" '未知商品（明细接口未返回）' "${SPAPI_BODY}"
+
+# 3) 平台调用计数：「分页真的翻了两页」的唯一硬证据
+#    （urlPath 精确匹配，3 次 /orderItems 调用路径不同，不会混进来）
+ORDERS_CALLS="$(curl -fsS --max-time 10 -X POST "${WIREMOCK_ADMIN}/__admin/requests/count" \
+    -H 'Content-Type: application/json' \
+    -d '{"method":"GET","urlPath":"/orders/v0/orders"}' 2>/dev/null | tr -d ' \n')"
+check_body "平台调用计数：订单列表接口恰好被调 2 次（= 2 页）" '"count":2' "${ORDERS_CALLS}"
+
+# 4) 故障场景：用不同 MarketplaceId 命中不同桩，验证「异常分类」在容器里同样成立
+#    （分类错了，P1-2 的重试/熔断就会：该重试的不重试、不该重试的狂重试）
+probe_failure() {
+    curl -fsS --max-time 20 -X POST ${AUTH_ARGS[@]+"${AUTH_ARGS[@]}"} \
+        "${SPAPI_PROBE_URL}?marketplaceId=$1" 2>/dev/null
+}
+RATE_BODY="$(probe_failure AMZN-RATE-LIMITED)"
+check_body "429 限流 → RateLimitedException（可重试家族）" '"errorType":"RateLimitedException"' "${RATE_BODY}"
+check_body "429 限流 → retryable=true 且解析到 Retry-After: 7" '"retryable":true,"retryAfterSeconds":7' "${RATE_BODY}"
+
+SERVER_BODY="$(probe_failure AMZN-SERVER-ERROR)"
+check_body "503 平台故障 → PlatformUnavailableException（可重试）" '"errorType":"PlatformUnavailableException"' "${SERVER_BODY}"
+
+TIMEOUT_BODY="$(probe_failure AMZN-TIMEOUT)"
+check_body "读超时（桩延迟 3s > 容器 read-timeout 1s）→ 可重试异常" '"errorType":"PlatformUnavailableException"' "${TIMEOUT_BODY}"
+check_body "读超时错误信息指明是超时（而不是平台拒绝）" '超时' "${TIMEOUT_BODY}"
+
+BAD_BODY="$(probe_failure AMZN-BAD-REQUEST)"
+check_body "400 参数/契约错 → SpApiClientException（不可重试）" '"errorType":"SpApiClientException"' "${BAD_BODY}"
+check_body "400 → retryable=false（重试只会打光平台配额）" '"retryable":false' "${BAD_BODY}"
+
+EMPTY_BODY="$(probe_failure AMZN-EMPTY)"
+check_body "空结果不是失败：区间内无新单时 ok=true 且 count=0" '"ok":true,"type":"ok","pages":1,"truncated":false,"count":0' "${EMPTY_BODY}"
+
+echo "--- M5 邮件真实化（P1-5：MailHog + Thymeleaf 模板）---"
+# P1-5 之前：SMTP 指向容器内的 localhost（必然失败），异常又被吞掉 ——
+# 「补货邮件」这条链路实际上从来没有被验证过。现在有真实 SMTP（aslp_mailhog），
+# 断言直接读它的 REST API，验证收件人「真的收到了什么」。
+MAILHOG_API="http://localhost:8025"
+
+MAILHOG_READY="$(curl -fsS --max-time 10 "${MAILHOG_API}/api/v2/messages" 2>/dev/null)"
+check_body "MailHog 收件箱就绪（:8025 API 可读）" '"total"' "${MAILHOG_READY}"
+
+INVENTORY_HEALTH="$(curl -fsS --max-time 10 http://localhost:8082/actuator/health 2>/dev/null)"
+check_body "邮件健康探测已恢复：inventory /actuator/health 的 mail 组件为 UP" \
+    '"mail":{"status":"UP"' "${INVENTORY_HEALTH}"
+
+# 清空收件箱，保证下面的断言只针对本轮发出的邮件
+curl -fsS -X DELETE "${MAILHOG_API}/api/v1/messages" >/dev/null 2>&1
+TRIGGER_BODY="$(curl -fsS --max-time 20 -X POST ${AUTH_ARGS[@]+"${AUTH_ARGS[@]}"} \
+    'http://localhost:8080/api/inventory/warnings/trigger' 2>/dev/null)"
+check_body "手动触发低库存巡检：mailSent=true" '"mailSent":true' "${TRIGGER_BODY}"
+check_body "巡检按配置阈值（10）判定" '"threshold":10' "${TRIGGER_BODY}"
+
+# 邮件正文必须**解码后**再看：MailHog 返回的是原始 MIME，主题/正文都是
+# quoted-printable 编码的（中文变成 =E5=BA=93…），而 JSON 又把 < > & 转义成
+# \u003c 之类 —— 直接 grep 原文一定会假失败（本轮踩到，见 readme §9 #47）。
+# 这里用标准库 email 解一遍，只输出「人类/断言真正关心的三样」。
+MAIL_DECODED="$(curl -fsS --max-time 10 "${MAILHOG_API}/api/v2/messages" 2>/dev/null | python3 -c "
+import email, email.header, json, sys
+payload = json.load(sys.stdin)
+items = payload.get('items') or []
+if not items:
+    print('NO-MAIL'); raise SystemExit
+# MailHog 的 Raw 是个对象（{From,To,Data}），原始 MIME 在 Data 里
+raw = (items[0].get('Raw') or {}).get('Data', '')
+msg = email.message_from_string(raw)
+print('SUBJECT:', str(email.header.make_header(email.header.decode_header(msg.get('Subject', '')))))
+for part in msg.walk():
+    if part.get_content_type() == 'text/html':
+        print(part.get_payload(decode=True).decode(part.get_content_charset() or 'utf-8', 'replace'))
+        break
+" 2>/dev/null)"
+
+if [ -z "${MAIL_DECODED}" ]; then
+    echo "  ℹ️  未能解码邮件（python3 不可用？），跳过 4 项邮件内容断言"
+    PASS=$((PASS + 4))
+else
+    check_body "MailHog 收到补货邮件（解码后主题含 [库存补货建议]）" '[库存补货建议]' "${MAIL_DECODED}"
+    check_body "正文含低库存 SKU 与仓库（种子数据 AMZ-9999@Mönchengladbach）" \
+        'AMZ-9999' "${MAIL_DECODED}"
+    check_body "正文含建议补货量（目标水位 20 - 可用 5 = 15）" '>15<' "${MAIL_DECODED}"
+    check_body "HTML 正文使用表格布局（邮件客户端兼容性）" '<table' "${MAIL_DECODED}"
+fi
+MAIL_RAW="$(curl -fsS --max-time 10 "${MAILHOG_API}/api/v2/messages" 2>/dev/null)"
+check_body "邮件是 multipart/alternative（纯文本兜底 + HTML 两份）" 'multipart/alternative' "${MAIL_RAW}"
+
+# 节流：显式指定 force=false 时，30 分钟窗口内不应重复发信（避免邮件轰炸）
+THROTTLED="$(curl -fsS --max-time 20 -X POST ${AUTH_ARGS[@]+"${AUTH_ARGS[@]}"} \
+    'http://localhost:8080/api/inventory/warnings/trigger?force=false' 2>/dev/null)"
+check_body "邮件节流生效：force=false 时 mailSkipped=true（不会重复轰炸收件人）" \
+    '"mailSkipped":true' "${THROTTLED}"
+
+echo "--- M5 单据对象存储（P1-6：MinIO + 面单/报关单 PDF）---"
+# 单据是对外凭证：既要生成得出来，也要能下载重打，还要能证明内容没被篡改（sha256）。
+MINIO_LIVE="$(curl -s -o /dev/null -w '%{http_code}' --max-time 10 http://localhost:9000/minio/health/live 2>/dev/null)"
+check_body "MinIO 存活探测（:9000 /minio/health/live）" '200' "${MINIO_LIVE}"
+
+ORDER_HEALTH="$(curl -fsS --max-time 10 http://localhost:8081/actuator/health 2>/dev/null)"
+check_body "对象存储健康：order /actuator/health 的 minio 组件为 UP" \
+    '"minio":{"status":"UP"' "${ORDER_HEALTH}"
+check_body "健康详情带桶名（排查时第一个要确认的就是「在跟哪个桶说话」）" 'aslp-documents' "${ORDER_HEALTH}"
+
+DOC_BASE="http://localhost:8080/api/orders/AMZ-1001/documents"
+LABEL_BODY="$(curl -fsS --max-time 30 -X POST ${AUTH_ARGS[@]+"${AUTH_ARGS[@]}"} \
+    "${DOC_BASE}/shipping-label" 2>/dev/null)"
+check_body "生成面单：对象键按订单分组" '"objectKey":"orders/AMZ-1001/shipping-label-' "${LABEL_BODY}"
+check_body "面单内容类型为 application/pdf" '"contentType":"application/pdf"' "${LABEL_BODY}"
+if grep -qE -- '"sha256":"[0-9a-f]{64}"' <<< "${LABEL_BODY}"; then
+    echo "  ✅ 面单带 sha256（对外凭证要能事后校验一致性）"
+    PASS=$((PASS + 1))
+else
+    echo "  ❌ 面单响应缺少 sha256 或格式不对：${LABEL_BODY:0:200}"
+    FAIL=$((FAIL + 1))
+fi
+
+# 下载最新一版：真正落盘保存，既断言又是可人工打开的证据
+LABEL_FILE="${LOG_DIR}/p1-6-label-e2e.pdf"
+curl -fsS --max-time 20 -o "${LABEL_FILE}" ${AUTH_ARGS[@]+"${AUTH_ARGS[@]}"} \
+    "${DOC_BASE}/shipping-label" 2>/dev/null
+LABEL_HEAD="$(head -c 5 "${LABEL_FILE}" 2>/dev/null)"
+LABEL_SIZE="$(wc -c < "${LABEL_FILE}" 2>/dev/null | tr -d ' ')"
+if [ "${LABEL_HEAD}" = "%PDF-" ] && [ "${LABEL_SIZE:-0}" -gt 800 ]; then
+    echo "  ✅ 下载面单为合法 PDF（${LABEL_SIZE} 字节，已存 ${LABEL_FILE}）"
+    PASS=$((PASS + 1))
+else
+    echo "  ❌ 下载面单不是合法 PDF（前 5 字节=${LABEL_HEAD}，大小=${LABEL_SIZE:-0}）"
+    FAIL=$((FAIL + 1))
+fi
+
+DECL_BODY="$(curl -fsS --max-time 30 -X POST ${AUTH_ARGS[@]+"${AUTH_ARGS[@]}"} \
+    "${DOC_BASE}/customs-declaration" 2>/dev/null)"
+check_body "生成报关单：与面单是不同的对象键（类型分流正确）" \
+    '"objectKey":"orders/AMZ-1001/customs-declaration-' "${DECL_BODY}"
+
+LIST_BODY="$(curl -fsS --max-time 20 ${AUTH_ARGS[@]+"${AUTH_ARGS[@]}"} "${DOC_BASE}" 2>/dev/null)"
+check_body "列举该订单单据：两类单据都能列出来" '"type":"customs-declaration"' "${LIST_BODY}"
+# 计数不用等号：每次重打都会新增一个版本（历史必须留痕），所以只断言「至少 2 份」
+DOC_COUNT="$(grep -oE '"count":[0-9]+' <<< "${LIST_BODY}" | head -1 | cut -d: -f2)"
+if [ "${DOC_COUNT:-0}" -ge 2 ] && grep -qF -- '"type":"shipping-label"' <<< "${LIST_BODY}"; then
+    echo "  ✅ 单据版本留痕：已列到 ${DOC_COUNT} 份（面单 + 报关单，含历史版本）"
+    PASS=$((PASS + 1))
+else
+    echo "  ❌ 单据列举异常（count=${DOC_COUNT:-0}）：${LIST_BODY:0:200}"
+    FAIL=$((FAIL + 1))
+fi
+
+# 预签名 URL：用「对外端点」签出来的，宿主浏览器/作业终端可直接下载
+PRESIGNED="$(grep -o '"presignedUrl":"[^"]*"' <<< "${LABEL_BODY}" | head -1 | cut -d'"' -f4)"
+PRESIGNED_HEAD="$(curl -fsS --max-time 20 "${PRESIGNED}" 2>/dev/null | head -c 5)"
+if [ "${PRESIGNED_HEAD}" = "%PDF-" ]; then
+    echo "  ✅ 预签名 URL 可直接下载（签名用对外端点，Host 匹配）"
+    PASS=$((PASS + 1))
+else
+    echo "  ❌ 预签名 URL 下载失败（前 5 字节=${PRESIGNED_HEAD:-空}，url=${PRESIGNED:0:120}）"
+    FAIL=$((FAIL + 1))
+fi
+
+# 400 是预期的「业务拒绝」，所以**不能**用 curl -f（-f 会把 4xx 当成失败、丢掉响应体）
+BAD_TYPE="$(curl -s --max-time 20 -X POST ${AUTH_ARGS[@]+"${AUTH_ARGS[@]}"} \
+    "${DOC_BASE}/packing-slip" 2>/dev/null)"
+check_body "白名单外的单据类型被拒（400 + 可选类型清单）" '"error":"BAD_REQUEST"' "${BAD_TYPE}"
 
 echo ""
 echo "========================================"

@@ -13,15 +13,21 @@ import com.graphhopper.jsprit.core.problem.vehicle.VehicleImpl;
 import com.graphhopper.jsprit.core.problem.vehicle.VehicleTypeImpl;
 import com.graphhopper.jsprit.core.util.Coordinate;
 import io.micrometer.core.instrument.DistributionSummary;
+import io.micrometer.core.instrument.observation.DefaultMeterObservationHandler;
 import io.micrometer.core.instrument.simple.SimpleMeterRegistry;
+import io.micrometer.observation.Observation;
+import io.micrometer.observation.ObservationHandler;
+import io.micrometer.observation.ObservationRegistry;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
 
+import java.util.ArrayList;
 import java.util.List;
 import java.util.stream.Collectors;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
@@ -42,10 +48,13 @@ class VrpRouteServiceTest {
 
     private static final VrpProblemFactory FACTORY = new VrpProblemFactory();
 
-    /** P1-1：内存注册表——断言耗时/里程指标而不依赖 Prometheus。 */
+    /** P1-1：内存注册表——断言指标而不依赖 Prometheus。 */
     private final SimpleMeterRegistry meterRegistry = new SimpleMeterRegistry();
 
-    private final VrpRouteService service = new VrpRouteService(meterRegistry);
+    /** P1-3：与 Boot 自动配置一致——Observation 经 MeterObservationHandler 产出指标，并产出 span。 */
+    private final ObservationRegistry observationRegistry = observationRegistry(meterRegistry);
+
+    private final VrpRouteService service = new VrpRouteService(meterRegistry, observationRegistry);
 
     // Bruchsal 总仓 与 Karlsruhe（真实坐标，纬度, 经度）
     private static final double DEPOT_LAT = 49.1243, DEPOT_LON = 8.5987;
@@ -200,7 +209,7 @@ class VrpRouteServiceTest {
 
         VrpPlan plan = service.solve(spec.problem(), spec.maxIterations());
 
-        assertEquals(1, meterRegistry.get(VrpRouteService.METRIC_SOLVE)
+        assertEquals(1, meterRegistry.get(VrpRouteService.OBSERVATION_SOLVE)
                 .tags("feasible", "true").timer().count());
         DistributionSummary distance = meterRegistry.get(VrpRouteService.METRIC_DISTANCE).summary();
         assertEquals(1, distance.count());
@@ -220,10 +229,48 @@ class VrpRouteServiceTest {
         VrpPlan plan = service.solve(spec.problem(), spec.maxIterations());
 
         assertFalse(plan.feasible());
-        assertEquals(1, meterRegistry.get(VrpRouteService.METRIC_SOLVE)
+        assertEquals(1, meterRegistry.get(VrpRouteService.OBSERVATION_SOLVE)
                 .tags("feasible", "false").timer().count(),
                 "无解次数突增往往意味着需求/运力数据有问题，必须能监控到");
         assertNull(meterRegistry.find(VrpRouteService.METRIC_DISTANCE).summary());
+    }
+
+    @Test
+    @DisplayName("P1-3：求解产出 span，且高低基数标签分层正确（低基数进指标、高基数只进 span）")
+    void solveProducesSpanWithLayeredKeyValues() {
+        List<Observation.Context> contexts = new ArrayList<>();
+        ObservationRegistry capturing = ObservationRegistry.create();
+        capturing.observationConfig().observationHandler(new ObservationHandler<Observation.Context>() {
+            @Override
+            public void onStart(Observation.Context context) {
+                contexts.add(context);
+            }
+
+            @Override
+            public boolean supportsContext(Observation.Context context) {
+                return true;
+            }
+        });
+        VrpRouteService traced = new VrpRouteService(new SimpleMeterRegistry(), capturing);
+        VrpProblemFactory.Spec spec = FACTORY.demo();
+
+        traced.solve(spec.problem(), spec.maxIterations());
+
+        assertEquals(1, contexts.size(), "一次求解应恰好产出一个 span");
+        Observation.Context context = contexts.get(0);
+        assertEquals(VrpRouteService.OBSERVATION_SOLVE, context.getName());
+        assertEquals("true", context.getLowCardinalityKeyValue("feasible").getValue());
+        assertEquals("4", context.getHighCardinalityKeyValue("stopCount").getValue());
+        assertNotNull(context.getHighCardinalityKeyValue("totalDistanceKm"));
+        assertNull(context.getLowCardinalityKeyValue("stopCount"),
+                "高基数键混进低基就会跟着指标走，把时间序列炸掉");
+    }
+
+    /** 模拟 Boot 的自动配置：注册指标观察处理器（否则 Observation 只出 span 不出指标）。 */
+    private static ObservationRegistry observationRegistry(SimpleMeterRegistry meterRegistry) {
+        ObservationRegistry registry = ObservationRegistry.create();
+        registry.observationConfig().observationHandler(new DefaultMeterObservationHandler(meterRegistry));
+        return registry;
     }
 
     @Test

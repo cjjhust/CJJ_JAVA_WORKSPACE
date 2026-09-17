@@ -1,0 +1,25 @@
+{
+  "request": {
+    "method": "GET",
+    "urlPath": "/orders/v0/orders",
+    "queryParameters": {
+      "MarketplaceIds": {
+        "equalTo": "AMZN-SERVER-ERROR"
+      }
+    }
+  },
+  "response": {
+    "status": 503,
+    "headers": {
+      "Content-Type": "application/json"
+    },
+    "jsonBody": {
+      "errors": [
+        {
+          "code": "ServiceUnavailable",
+          "message": "平台侧故障：用于验证「5xx 属于可重试」"
+        }
+      ]
+    }
+  }
+}

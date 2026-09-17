@@ -1,0 +1,23 @@
+{
+  "request": {
+    "method": "GET",
+    "urlPath": "/orders/v0/orders/AMZ-DE-1002/orderItems"
+  },
+  "response": {
+    "status": 200,
+    "headers": {
+      "Content-Type": "application/json"
+    },
+    "jsonBody": {
+      "payload": {
+        "OrderItems": [
+          {
+            "ASIN": "B08TEST1002",
+            "Title": "Kinderwagen 折叠婴儿推车（Amazon.de）",
+            "QuantityOrdered": 1
+          }
+        ]
+      }
+    }
+  }
+}

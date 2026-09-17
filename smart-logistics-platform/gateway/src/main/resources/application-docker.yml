@@ -76,6 +76,15 @@ aslp:
       secret: ${ASLP_JWT_SECRET:aslp-dev-secret-key-change-me-in-production-0123456789}
 
 management:
+  # P1-3：链路追踪（容器内指向 aslp_zipkin；全量采样仅适合演示）
+  tracing:
+    sampling:
+      probability: 1.0
+  zipkin:
+    tracing:
+      # 必须用连字符别名：下划线主机名会让 java.net.URI 解析不出 host，
+      # 网关（WebFlux/WebClient）上报时报 “Host is not specified”（见 readme §9 #35）
+      endpoint: http://aslp-zipkin:9411/api/v2/spans
   endpoints:
     web:
       exposure:

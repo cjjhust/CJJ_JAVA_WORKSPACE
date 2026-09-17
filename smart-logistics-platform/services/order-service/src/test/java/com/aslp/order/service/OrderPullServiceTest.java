@@ -5,7 +5,11 @@ import com.aslp.order.repository.OrderRepository;
 import com.aslp.order.strategy.OrderDto;
 import com.aslp.order.strategy.OrderPullResult;
 import com.aslp.order.strategy.OrderPullStrategy;
+import io.micrometer.core.instrument.observation.DefaultMeterObservationHandler;
 import io.micrometer.core.instrument.simple.SimpleMeterRegistry;
+import io.micrometer.observation.Observation;
+import io.micrometer.observation.ObservationHandler;
+import io.micrometer.observation.ObservationRegistry;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
@@ -13,6 +17,7 @@ import org.junit.jupiter.api.extension.ExtendWith;
 import org.mockito.Mock;
 import org.mockito.junit.jupiter.MockitoExtension;
 
+import java.util.ArrayList;
 import java.util.List;
 import java.util.Optional;
 
@@ -46,6 +51,9 @@ class OrderPullServiceTest {
 
     /** P1-1：内存注册表——断言指标而不依赖 Prometheus。 */
     private final SimpleMeterRegistry meterRegistry = new SimpleMeterRegistry();
+
+    /** P1-3：与 Boot 自动配置一致（Observation 同时产出 span 与指标）。 */
+    private final ObservationRegistry observationRegistry = observationRegistry(meterRegistry);
 
     private OrderPullService service;
 
@@ -83,7 +91,8 @@ class OrderPullServiceTest {
         // P1-2：平台调用统一经容错网关（注解在纯单元测试中不生效，等价于直接调策略）
         // P1-1：传入内存注册表，便于断言指标真实递增
         service = new OrderPullService(
-                new PlatformPullGateway(new StubStrategy(MOCK_RESULT)), repository, meterRegistry);
+                new PlatformPullGateway(new StubStrategy(MOCK_RESULT)), repository, meterRegistry,
+                observationRegistry);
     }
 
     @Test
@@ -134,7 +143,7 @@ class OrderPullServiceTest {
         OrderPullService failing = new OrderPullService(
                 new PlatformPullGateway(new StubStrategy(
                         new OrderPullResult("Amazon", List.of(), false, "401 Unauthorized"))),
-                repository, meterRegistry);
+                repository, meterRegistry, observationRegistry);
 
         OrderPullService.PullSummary summary = failing.pullAndPersist();
 
@@ -156,7 +165,7 @@ class OrderPullServiceTest {
         OrderPullService degradedService = new OrderPullService(
                 new PlatformPullGateway(new StubStrategy(OrderPullResult.degraded(
                         "Amazon-Mock", "平台调用失败已降级（CallNotPermittedException）"))),
-                repository, meterRegistry);
+                repository, meterRegistry, observationRegistry);
 
         OrderPullService.PullSummary summary = degradedService.pullAndPersist();
 
@@ -222,11 +231,11 @@ class OrderPullServiceTest {
     void degradedAndFailedOutcomesAreTaggedDifferently() {
         OrderPullService degradedService = new OrderPullService(
                 new PlatformPullGateway(new StubStrategy(OrderPullResult.degraded("Amazon", "熔断已打开"))),
-                repository, meterRegistry);
+                repository, meterRegistry, observationRegistry);
         OrderPullService failingService = new OrderPullService(
                 new PlatformPullGateway(new StubStrategy(
                         new OrderPullResult("Amazon", List.of(), false, "401 Unauthorized"))),
-                repository, meterRegistry);
+                repository, meterRegistry, observationRegistry);
 
         degradedService.pullAndPersist();
         failingService.pullAndPersist();
@@ -247,5 +256,46 @@ class OrderPullServiceTest {
     private double orderCounter(String platform, String result) {
         return meterRegistry.get(OrderPullService.METRIC_PULL_ORDERS)
                 .tags("platform", platform, "result", result).counter().count();
+    }
+
+    @Test
+    @DisplayName("P1-3：拉取产出 span，平台/结局进低基数（也会进指标），条目数只进高基数")
+    void pullProducesSpanWithLayeredKeyValues() {
+        List<Observation.Context> contexts = new ArrayList<>();
+        ObservationRegistry capturing = ObservationRegistry.create();
+        capturing.observationConfig().observationHandler(new ObservationHandler<Observation.Context>() {
+            @Override
+            public void onStart(Observation.Context context) {
+                contexts.add(context);
+            }
+
+            @Override
+            public boolean supportsContext(Observation.Context context) {
+                return true;
+            }
+        });
+        OrderPullService traced = new OrderPullService(
+                new PlatformPullGateway(new StubStrategy(MOCK_RESULT)), repository,
+                new SimpleMeterRegistry(), capturing);
+        lenient().when(repository.findByOrderId(anyString())).thenReturn(Optional.empty());
+        lenient().when(repository.save(any(OrderRecord.class))).thenAnswer(inv -> inv.getArgument(0));
+
+        traced.pullAndPersist();
+
+        assertEquals(1, contexts.size(), "一次拉取应恰好产出一个 span");
+        Observation.Context context = contexts.get(0);
+        assertEquals(OrderPullService.OBSERVATION_PULL, context.getName());
+        assertEquals("Amazon-Mock", context.getLowCardinalityKeyValue("platform").getValue());
+        assertEquals("success", context.getLowCardinalityKeyValue("outcome").getValue());
+        assertEquals("3", context.getHighCardinalityKeyValue("created").getValue());
+        assertNull(context.getLowCardinalityKeyValue("created"),
+                "条目数是高基数，不能进低基数（否则指标维度爆炸）");
+    }
+
+    /** 模拟 Boot 的自动配置：注册指标观察处理器。 */
+    private static ObservationRegistry observationRegistry(SimpleMeterRegistry meterRegistry) {
+        ObservationRegistry registry = ObservationRegistry.create();
+        registry.observationConfig().observationHandler(new DefaultMeterObservationHandler(meterRegistry));
+        return registry;
     }
 }
