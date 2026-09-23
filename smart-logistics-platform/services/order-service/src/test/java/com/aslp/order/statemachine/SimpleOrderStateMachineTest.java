@@ -50,4 +50,25 @@ class SimpleOrderStateMachineTest {
         machine.reset();
         assertEquals(OrderStates.CREATED, machine.getCurrentState());
     }
+
+    @Test
+    void canBeRestoredAtAPersistedState() {
+        // P1-8：从数据库恢复状态时用这个构造 —— 恢复后必须能从"中间状态"继续推进，
+        // 而不是回到 CREATED（否则持久化就白做了）
+        SimpleOrderStateMachine machine = new SimpleOrderStateMachine(OrderStates.FBA_RETURN_LABEL);
+
+        assertEquals(OrderStates.FBA_RETURN_LABEL, machine.getCurrentState());
+        assertTrue(machine.sendEvent(OrderEvents.RELABEL));
+        assertEquals(OrderStates.FBA_RELABELED, machine.getCurrentState());
+
+        // 恢复后仍然遵守转换规则：FBA_RELABELED 不能直接 COMPLETE
+        assertFalse(machine.sendEvent(OrderEvents.COMPLETE));
+        assertEquals(OrderStates.FBA_RELABELED, machine.getCurrentState());
+    }
+
+    @Test
+    void nullInitialStateFallsBackToCreated() {
+        // 兜底：调用方传 null 不应抛 NPE（恢复路径上"没有历史状态"是正常情况）
+        assertEquals(OrderStates.CREATED, new SimpleOrderStateMachine(null).getCurrentState());
+    }
 }

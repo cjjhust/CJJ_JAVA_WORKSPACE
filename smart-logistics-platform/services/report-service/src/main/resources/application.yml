@@ -4,7 +4,19 @@ spring:
   application:
     name: report-service
 
-# P1-1：可观测性——暴露 Prometheus 抓取端点并给指标打上服务名标签
+# P1-7（M5 报表真实化）：看板数据源。本地开发直连 localhost；
+# 容器内必须换成连字符别名（下划线主机名在 URI 层非法，见 readme §9 #21/#30/#35）。
+aslp:
+  report:
+    order-base-url: http://localhost:8081
+    inventory-base-url: http://localhost:8082
+    # 超时必须显式给上限：看板是"随时会被点开"的接口，默认无限读超时会被一个卡住的上游
+    # 占满线程池 —— 那比"降级显示部分数据"糟糕得多。
+    connect-timeout: 2s
+    read-timeout: 3s
+    # 低库存明细最多展示条数（看板只需最紧急的前 N 条，避免响应体随 SKU 数增长）
+    low-stock-limit: 20
+
 management:
   # P1-3：链路追踪
   tracing:

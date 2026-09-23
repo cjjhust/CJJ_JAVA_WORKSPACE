@@ -31,6 +31,18 @@
             <artifactId>spring-boot-starter-test</artifactId>
             <scope>test</scope>
         </dependency>
+        <!--
+          P1-9 契约测试：用 WireMock 模拟 DHL / DPD 追踪接口（成功 / 查无此单 / 429 / 5xx / 超时）。
+          与 order-service 的 P1-4 用同一套做法与同一个版本属性：契约测试的前提是
+          "客户端是真的、平台是假的"，Mockito 打桩只能验证到"我以为的答案"。
+          选 standalone（shaded）版：普通版自带一套 Jetty，与 spring-boot-starter-web 容易相冲。
+        -->
+        <dependency>
+            <groupId>org.wiremock</groupId>
+            <artifactId>wiremock-standalone</artifactId>
+            <version>${wiremock.version}</version>
+            <scope>test</scope>
+        </dependency>
     </dependencies>
 
     <build>

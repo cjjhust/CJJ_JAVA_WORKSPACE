@@ -1,0 +1,66 @@
+{
+  "name": "tracking-dhl-delivered",
+  "priority": 10,
+  "request": {
+    "method": "GET",
+    "urlPath": "/track/shipments",
+    "queryParameters": {
+      "trackingNumber": {"equalTo": "00340434161094000000"}
+    },
+    "headers": {
+      "DHL-API-Key": {"matches": ".+"}
+    }
+  },
+  "response": {
+    "status": 200,
+    "headers": {"Content-Type": "application/json"},
+    "jsonBody": {
+      "shipments": [
+        {
+          "id": "00340434161094000000",
+          "service": "parcel-de",
+          "origin": {"address": {"addressLocality": "Bruchsal", "countryCode": "DE"}},
+          "destination": {"address": {"addressLocality": "Mönchengladbach", "countryCode": "DE"}},
+          "status": {
+            "timestamp": "2026-09-22T14:20:00",
+            "location": {"address": {"addressLocality": "Mönchengladbach", "countryCode": "DE"}},
+            "statusCode": "delivered",
+            "status": "Delivered",
+            "description": "The shipment has been successfully delivered"
+          },
+          "estimatedTimeOfDelivery": "2026-09-22T18:00:00",
+          "events": [
+            {
+              "timestamp": "2026-09-21T08:05:00",
+              "location": {"address": {"addressLocality": "Bruchsal", "countryCode": "DE"}},
+              "statusCode": "pre-transit",
+              "status": "Shipment information received",
+              "description": "The shipment has been posted by the sender at the retail outlet"
+            },
+            {
+              "timestamp": "2026-09-21T13:40:00",
+              "location": {"address": {"addressLocality": "Bruchsal", "countryCode": "DE"}},
+              "statusCode": "transit",
+              "status": "In transit",
+              "description": "The shipment has been picked up"
+            },
+            {
+              "timestamp": "2026-09-22T06:15:00",
+              "location": {"address": {"addressLocality": "Mönchengladbach", "countryCode": "DE"}},
+              "statusCode": "transit",
+              "status": "In transit",
+              "description": "The shipment is out for delivery"
+            },
+            {
+              "timestamp": "2026-09-22T14:20:00",
+              "location": {"address": {"addressLocality": "Mönchengladbach", "countryCode": "DE"}},
+              "statusCode": "delivered",
+              "status": "Delivered",
+              "description": "The shipment has been successfully delivered"
+            }
+          ]
+        }
+      ]
+    }
+  }
+}

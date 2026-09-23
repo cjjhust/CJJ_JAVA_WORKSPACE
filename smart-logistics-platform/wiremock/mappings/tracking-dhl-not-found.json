@@ -1,0 +1,20 @@
+{
+  "name": "tracking-dhl-not-found",
+  "priority": 10,
+  "request": {
+    "method": "GET",
+    "urlPath": "/track/shipments",
+    "queryParameters": {
+      "trackingNumber": {"equalTo": "00340434161094000002"}
+    }
+  },
+  "response": {
+    "status": 404,
+    "headers": {"Content-Type": "application/json"},
+    "jsonBody": {
+      "status": 404,
+      "title": "No shipment with given tracking number found.",
+      "detail": "No shipment with given tracking number found."
+    }
+  }
+}

@@ -1,0 +1,16 @@
+{
+  "name": "tracking-dpd-not-found",
+  "priority": 10,
+  "request": {
+    "method": "GET",
+    "urlPath": "/tracking/v1/parcels/01234567890999"
+  },
+  "response": {
+    "status": 404,
+    "headers": {"Content-Type": "application/json"},
+    "jsonBody": {
+      "error": "NOT_FOUND",
+      "message": "No parcel found for the given parcel number."
+    }
+  }
+}

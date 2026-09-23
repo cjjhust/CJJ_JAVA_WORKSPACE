@@ -3,6 +3,8 @@ package com.aslp.inventory.task;
 import com.aslp.inventory.config.WarningProperties;
 import com.aslp.inventory.entity.InventoryItem;
 import com.aslp.inventory.repository.InventoryRepository;
+import com.aslp.inventory.service.InMemoryMailThrottle;
+import com.aslp.inventory.service.MailThrottle;
 import com.aslp.inventory.service.ReplenishmentMailService;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.DisplayName;
@@ -49,12 +51,16 @@ class InventoryWarningTaskTest {
     private WarningProperties properties;
     private InventoryWarningTask task;
 
+    /** 真实的进程内节流实现（不是 mock）：节流语义本身就是要被测的对象。 */
+    private MailThrottle throttle;
+
     @BeforeEach
     void setUp() {
         properties = new WarningProperties();
         properties.setThreshold(THRESHOLD);
         properties.setMailInterval(Duration.ofMinutes(30));
-        task = new InventoryWarningTask(repository, mailService, properties);
+        throttle = new InMemoryMailThrottle(properties.getMailInterval());
+        task = new InventoryWarningTask(repository, mailService, properties, throttle);
     }
 
     private static InventoryItem lowStock(String sku, String warehouse, int availableQty) {
@@ -172,5 +178,38 @@ class InventoryWarningTaskTest {
         verify(repository).findByAvailableQtyLessThan(25);
         assertEquals(25, task.threshold());
         verify(mailService, never()).sendReplenishmentDigest(anyList());
+    }
+
+    @Test
+    @DisplayName("P1-10：节流窗口在共享存储里 —— 「重启后的新实例」也必须被拦住")
+    void throttleWindowSurvivesANewInstance() {
+        List<InventoryItem> lowStock = twoLowStockSkus();
+        when(repository.findByAvailableQtyLessThan(THRESHOLD)).thenReturn(lowStock);
+        when(mailService.sendReplenishmentDigest(lowStock)).thenReturn(true);
+
+        task.scan(false);
+
+        // 模拟重启/多副本：新的任务实例 + 同一个节流实现（生产里是同一个 Redis 键）
+        InventoryWarningTask restarted =
+                new InventoryWarningTask(repository, mailService, properties, throttle);
+        InventoryWarningTask.WarningScanResult afterRestart = restarted.scan(false);
+
+        verify(mailService, times(1)).sendReplenishmentDigest(anyList());
+        assertTrue(afterRestart.mailSkipped(),
+                "新实例仍必须处于节流窗口内；若在此处就发信，说明窗口还在进程内（多副本会成倍发信）");
+    }
+
+    @Test
+    @DisplayName("P1-10：发信失败要归还资格（不是把窗口留着让下一轮白等）")
+    void failedSendReleasesTheAcquiredSlot() {
+        List<InventoryItem> lowStock = twoLowStockSkus();
+        when(repository.findByAvailableQtyLessThan(THRESHOLD)).thenReturn(lowStock);
+        when(mailService.sendReplenishmentDigest(lowStock)).thenReturn(false);
+
+        task.scan(false);
+
+        // 归还后窗口应当立刻打开（上一版语义：失败不计入节流窗口）
+        assertEquals(0, task.secondsUntilMailAllowed(),
+                "失败必须释放资格，否则一次 SMTP 抖动会让告警白停 30 分钟");
     }
 }

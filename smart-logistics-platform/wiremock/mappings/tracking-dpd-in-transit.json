@@ -1,0 +1,42 @@
+{
+  "name": "tracking-dpd-in-transit",
+  "priority": 10,
+  "request": {
+    "method": "GET",
+    "urlPath": "/tracking/v1/parcels/01234567890123",
+    "headers": {
+      "API_KEY": {"matches": ".+"}
+    }
+  },
+  "response": {
+    "status": 200,
+    "headers": {"Content-Type": "application/json"},
+    "jsonBody": {
+      "parcelNumber": "01234567890123",
+      "status": "IN_TRANSIT",
+      "statusDescription": "In transit to destination depot",
+      "lastUpdate": "2026-09-22T11:05:00",
+      "estimatedDelivery": "2026-09-23T12:00:00",
+      "parcelLifeCycle": [
+        {
+          "status": "PICKUP",
+          "label": "Parcel picked up from sender",
+          "dateTime": "2026-09-21T09:30:00",
+          "location": "Bruchsal"
+        },
+        {
+          "status": "IN_TRANSIT",
+          "label": "Parcel processed at depot",
+          "dateTime": "2026-09-21T20:10:00",
+          "location": "Neuwied"
+        },
+        {
+          "status": "IN_TRANSIT",
+          "label": "In transit to destination depot",
+          "dateTime": "2026-09-22T11:05:00",
+          "location": "Mönchengladbach"
+        }
+      ]
+    }
+  }
+}

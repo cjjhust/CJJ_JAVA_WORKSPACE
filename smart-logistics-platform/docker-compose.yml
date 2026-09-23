@@ -283,6 +283,14 @@ services:
     environment:
       SPRING_PROFILES_ACTIVE: docker
       SERVER_PORT: 8085
+    # P1-7：报表看板真实聚合 order-service / inventory-service（HTTP，走连字符别名）。
+    # 报表自身能降级（上游不可用时返回 200 + degraded），所以 depends_on 不是"可用性依赖"，
+    # 而是让端到端断言可复现：否则冷启动瞬间抓到的看板会是 degraded 状态，断言随机失败。
+    depends_on:
+      aslp_order_service:
+        condition: service_healthy
+      aslp_inventory_service:
+        condition: service_healthy
     ports:
       - "8085:8085"
 

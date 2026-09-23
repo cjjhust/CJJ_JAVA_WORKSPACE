@@ -66,6 +66,17 @@
             <scope>test</scope>
         </dependency>
         <!--
+          P1-8：状态机持久化需要"真的写库"的测试（否则只能验证到"我调用了 save"）。
+          H2 只用于测试内存库：@DataJpaTest 会用 H2 建表（由实体生成，不跑 Flyway 的 PG 方言脚本），
+          从而能在单测里断言「新建一个 service 实例后状态仍是推进后的值」= 重启后状态不丢。
+          inventory-service 早已采用同一做法（见其 pom）。
+        -->
+        <dependency>
+            <groupId>com.h2database</groupId>
+            <artifactId>h2</artifactId>
+            <scope>test</scope>
+        </dependency>
+        <!--
           P1-4 契约测试：用 WireMock 模拟 Amazon SP-API（LWA 换令牌 / 订单列表分页 /
           429 限流 / 503 / 超时 / 4xx），锁住「我们理解的平台契约」。
           选 standalone（shaded）版而不是普通版：普通版会带一套自己的 Jetty，

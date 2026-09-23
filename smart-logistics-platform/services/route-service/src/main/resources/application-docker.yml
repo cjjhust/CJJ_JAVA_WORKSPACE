@@ -5,6 +5,23 @@ spring:
   application:
     name: route-service
 
+# P1-9：容器内走 WireMock 契约桩（fake 凭据，非密钥），以便端到端断言
+# 「429 / 5xx / 查无此单 / 契约归一化」这些**没有生产凭据也验证不了**的行为。
+# 连字符别名 aslp-wiremock（下划线主机名对 java.net.URI 非法，见 §9 #21/#30/#35）。
+aslp:
+  tracking:
+    mock-enabled: false
+    dhl-base-url: http://aslp-wiremock:8080
+    dhl-api-key: aslp-wiremock-dhl-key
+    dpd-base-url: http://aslp-wiremock:8080
+    dpd-api-key: aslp-wiremock-dpd-key
+    connect-timeout: 2s
+    # 故意短于"超时桩"的延迟（3s）：用来证明读超时真的生效，而不是等对方返回
+    read-timeout: 1s
+    cache-ttl: 60s
+    max-cache-entries: 1000
+    max-events: 30
+
 management:
   # P1-3：链路追踪（容器内指向 aslp_zipkin）
   tracing:

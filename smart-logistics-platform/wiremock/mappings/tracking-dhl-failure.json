@@ -1,0 +1,39 @@
+{
+  "name": "tracking-dhl-failure-exception",
+  "priority": 10,
+  "request": {
+    "method": "GET",
+    "urlPath": "/track/shipments",
+    "queryParameters": {
+      "trackingNumber": {"equalTo": "00340434161094000001"}
+    }
+  },
+  "response": {
+    "status": 200,
+    "headers": {"Content-Type": "application/json"},
+    "jsonBody": {
+      "shipments": [
+        {
+          "id": "00340434161094000001",
+          "service": "parcel-de",
+          "status": {
+            "timestamp": "2026-09-22T09:00:00",
+            "location": {"address": {"addressLocality": "Bruchsal", "countryCode": "DE"}},
+            "statusCode": "failure",
+            "status": "Delivery attempt failed",
+            "description": "The shipment could not be delivered (address issue), returning to sender"
+          },
+          "events": [
+            {
+              "timestamp": "2026-09-22T09:00:00",
+              "location": {"address": {"addressLocality": "Bruchsal", "countryCode": "DE"}},
+              "statusCode": "failure",
+              "status": "Delivery attempt failed",
+              "description": "The shipment could not be delivered (address issue), returning to sender"
+            }
+          ]
+        }
+      ]
+    }
+  }
+}

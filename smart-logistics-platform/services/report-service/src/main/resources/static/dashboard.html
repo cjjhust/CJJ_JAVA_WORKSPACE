@@ -1,0 +1,200 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8"/>
+    <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+    <title>ASLP 运营看板 — 海外仓智能物流系统</title>
+    <!--
+      ECharts 走 CDN（离线环境下滑到下方的兜底提示，页面本身仍能显示数字表格）。
+      为什么把看板放在 report-service 自己的 static/ 下：
+        同源 → 不需要给看板单独配 CORS；且它天然与"数据来自谁"绑定在一起，
+        换数据源不会漏改另一个前端工程。
+    -->
+    <script src="https://cdn.jsdelivr.net/npm/echarts@5.5.0/dist/echarts.min.js"></script>
+    <style>
+        :root { --bg:#0f1420; --card:#1a2233; --line:#2a3550; --fg:#e6ecf7; --muted:#93a1bd; --ok:#3ddc97; --warn:#ffb020; --err:#ff5c7a; }
+        * { box-sizing: border-box; }
+        body { margin:0; background:var(--bg); color:var(--fg); font-family:-apple-system,"PingFang SC","Helvetica Neue",Arial,sans-serif; }
+        header { padding:20px 28px; border-bottom:1px solid var(--line); display:flex; align-items:center; gap:16px; flex-wrap:wrap; }
+        h1 { font-size:18px; margin:0; font-weight:600; }
+        .badge { font-size:12px; padding:3px 10px; border-radius:99px; border:1px solid var(--line); color:var(--muted); }
+        .badge.ok { color:var(--ok); border-color:#1f5c44; background:#10281f; }
+        .badge.warn { color:var(--warn); border-color:#5c4620; background:#2a2110; }
+        button { margin-left:auto; background:#243049; color:var(--fg); border:1px solid var(--line); border-radius:8px; padding:8px 14px; cursor:pointer; font-size:13px; }
+        button:hover { background:#2c3a58; }
+        .kpis { display:grid; grid-template-columns:repeat(auto-fit,minmax(150px,1fr)); gap:14px; padding:20px 28px 0; }
+        .kpi { background:var(--card); border:1px solid var(--line); border-radius:12px; padding:14px 16px; }
+        .kpi .label { color:var(--muted); font-size:12px; }
+        .kpi .value { font-size:26px; font-weight:600; margin-top:6px; font-variant-numeric:tabular-nums; }
+        .grid { display:grid; grid-template-columns:repeat(auto-fit,minmax(360px,1fr)); gap:14px; padding:20px 28px 40px; }
+        .card { background:var(--card); border:1px solid var(--line); border-radius:12px; padding:12px; min-height:320px; }
+        .card h2 { font-size:14px; margin:4px 6px 8px; font-weight:600; color:var(--muted); }
+        .chart { width:100%; height:270px; }
+        .unavailable { color:var(--err); font-size:13px; padding:10px 6px; }
+        table { width:100%; border-collapse:collapse; font-size:13px; }
+        th,td { text-align:left; padding:7px 8px; border-bottom:1px solid var(--line); }
+        th { color:var(--muted); font-weight:500; }
+        .danger { color:var(--err); font-weight:600; }
+        footer { padding:0 28px 28px; color:var(--muted); font-size:12px; }
+        code { background:#0b1018; padding:1px 5px; border-radius:4px; }
+    </style>
+</head>
+<body>
+<header>
+    <h1>ASLP 运营看板</h1>
+    <span class="badge" id="badge-source">数据源：order-service + inventory-service</span>
+    <span class="badge" id="badge-degraded">加载中…</span>
+    <button onclick="load()">立即刷新</button>
+</header>
+
+<div class="kpis" id="kpis"></div>
+
+<div class="grid">
+    <div class="card">
+        <h2>订单状态分布</h2>
+        <div class="chart" id="chart-status"></div>
+        <div class="unavailable" id="msg-status"></div>
+    </div>
+    <div class="card">
+        <h2>各履约仓订单量（Bruchsal / Mönchengladbach）</h2>
+        <div class="chart" id="chart-warehouse"></div>
+        <div class="unavailable" id="msg-warehouse"></div>
+    </div>
+    <div class="card">
+        <h2>低库存 SKU（可用库存，低于阈值即告急）</h2>
+        <div class="chart" id="chart-lowstock"></div>
+        <div class="unavailable" id="msg-lowstock"></div>
+    </div>
+    <div class="card">
+        <h2>异常订单打标分布（客服待处理）</h2>
+        <table id="table-errortag">
+            <thead><tr><th>异常标签</th><th>订单数</th></tr></thead>
+            <tbody></tbody>
+        </table>
+        <div class="unavailable" id="msg-errortag"></div>
+    </div>
+</div>
+
+<footer>
+    数据来源：<code>GET /api/orders/stats</code> · <code>GET /api/inventory/warnings/status</code>
+    —— 报表服务只做搬运与整形，低库存口径由 inventory-service 单一维护（与补货邮件同源）。
+    上游不可用时本页仍可用，并在顶部标注为「部分降级」。
+</footer>
+
+<script>
+    const charts = {};
+
+    function chart(id) {
+        if (!window.echarts) return null;
+        if (!charts[id]) charts[id] = echarts.init(document.getElementById(id), 'dark');
+        return charts[id];
+    }
+
+    const baseText = { color: '#93a1bd', fontSize: 12 };
+
+    function renderStatus(chartData) {
+        const c = chart('chart-status');
+        if (!c) return;
+        c.setOption({
+            tooltip: { trigger: 'item' },
+            legend: { bottom: 0, textStyle: baseText },
+            series: [{
+                type: 'pie', radius: ['40%', '68%'], center: ['50%', '44%'],
+                itemStyle: { borderColor: '#1a2233', borderWidth: 2 },
+                label: { color: '#e6ecf7' },
+                data: chartData.labels.map((name, i) => ({ name, value: chartData.values[i] }))
+            }]
+        }, true);
+    }
+
+    function renderWarehouse(chartData) {
+        const c = chart('chart-warehouse');
+        if (!c) return;
+        c.setOption({
+            grid: { left: 50, right: 24, top: 24, bottom: 40 },
+            tooltip: { trigger: 'axis' },
+            xAxis: { type: 'category', data: chartData.labels, axisLabel: baseText },
+            yAxis: { type: 'value', axisLabel: baseText, splitLine: { lineStyle: { color: '#2a3550' } } },
+            series: [{ type: 'bar', barMaxWidth: 48, itemStyle: { color: '#4d8dff', borderRadius: [4, 4, 0, 0] },
+                       data: chartData.values, label: { show: true, position: 'top', color: '#e6ecf7' } }]
+        }, true);
+    }
+
+    function renderLowStock(chartData, threshold) {
+        const c = chart('chart-lowstock');
+        if (!c) return;
+        c.setOption({
+            grid: { left: 50, right: 24, top: 24, bottom: 60 },
+            tooltip: { trigger: 'axis' },
+            xAxis: { type: 'category', data: chartData.labels, axisLabel: { ...baseText, rotate: 30 } },
+            yAxis: { type: 'value', axisLabel: baseText, splitLine: { lineStyle: { color: '#2a3550' } } },
+            series: [{
+                type: 'bar', barMaxWidth: 40, itemStyle: { color: '#ffb020', borderRadius: [4, 4, 0, 0] },
+                data: chartData.values,
+                label: { show: true, position: 'top', color: '#e6ecf7' },
+                // 阈值线直接画在图上：让"离安全线还有多远"一眼可见（阈值来自上游配置，报表不硬编码）
+                markLine: threshold > 0 ? {
+                    symbol: 'none', lineStyle: { color: '#ff5c7a', type: 'dashed' },
+                    data: [{ yAxis: threshold, label: { formatter: '阈值 ' + threshold, color: '#ff5c7a' } }]
+                } : undefined
+            }]
+        }, true);
+    }
+
+    function kpi(label, value) {
+        return '<div class="kpi"><div class="label">' + label + '</div><div class="value">' + value + '</div></div>';
+    }
+
+    function renderErrorTags(byErrorTag, available) {
+        const tbody = document.querySelector('#table-errortag tbody');
+        document.getElementById('msg-errortag').textContent = available ? '' : '订单数据源不可用，无法读取异常打标分布。';
+        const entries = Object.entries(byErrorTag || {});
+        tbody.innerHTML = entries.length
+            ? entries.map(([k, v]) => '<tr><td>' + k + '</td><td class="danger">' + v + '</td></tr>').join('')
+            : '<tr><td colspan="2" style="color:#93a1bd">暂无异常订单</td></tr>';
+    }
+
+    function setMessage(id, text) { document.getElementById(id).textContent = text || ''; }
+
+    async function load() {
+        const badge = document.getElementById('badge-degraded');
+        try {
+            const resp = await fetch('/api/reports/dashboard', { cache: 'no-store' });
+            const data = await resp.json();
+            const orders = data.orders, inventory = data.inventory;
+
+            badge.textContent = data.degraded ? ('部分降级：' + data.unavailable.join(', ') + ' 不可用') : '全部数据源正常';
+            badge.className = 'badge ' + (data.degraded ? 'warn' : 'ok');
+
+            document.getElementById('kpis').innerHTML =
+                kpi('订单总数', orders.total) +
+                kpi('待发货（PAID）', orders.paid) +
+                kpi('已发货（SHIPPED）', orders.shipped) +
+                kpi('已完成', orders.completed) +
+                kpi('异常待处理', orders.withErrorTag) +
+                kpi('低库存 SKU', inventory.lowStockCount) +
+                kpi('库存阈值', inventory.threshold);
+
+            setMessage('msg-status', orders.available ? '' : '订单数据源不可用。');
+            setMessage('msg-warehouse', orders.available ? '' : '订单数据源不可用。');
+            setMessage('msg-lowstock', inventory.available ? '' : '库存数据源不可用。');
+
+            if (orders.available) { renderStatus(orders.statusChart); renderWarehouse(orders.warehouseChart); }
+            if (inventory.available) { renderLowStock(inventory.lowStockChart, inventory.threshold); }
+            renderErrorTags(orders.byErrorTag, orders.available);
+        } catch (e) {
+            badge.textContent = '无法连接报表服务：' + e;
+            badge.className = 'badge warn';
+        }
+    }
+
+    window.addEventListener('resize', () => Object.values(charts).forEach(c => c.resize()));
+    if (!window.echarts) {
+        document.querySelectorAll('.chart').forEach(el => el.innerHTML =
+            '<div class="unavailable">ECharts CDN 不可达（离线环境）。数字仍可通过 /api/reports/dashboard 查看。</div>');
+    }
+    load();
+    setInterval(load, 15000);   // 15s 自刷新：与 Prometheus 抓取周期同量级，够"看着它动"
+</script>
+</body>
+</html>

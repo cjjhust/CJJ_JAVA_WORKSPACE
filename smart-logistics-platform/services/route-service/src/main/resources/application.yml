@@ -5,7 +5,24 @@ spring:
   application:
     name: route-service
 
-# P1-1：可观测性——暴露 Prometheus 抓取端点并给指标打上服务名标签
+# P1-9：尾程追踪（DHL / DPD 一单到底）。
+# 本地默认 mock-enabled=true：没有生产凭据也能完整演示"承运商报文 → 归一化状态 → 视图"的全过程。
+# 接真实接口时置 false 并注入 DHL_API_KEY / DPD_API_KEY（凭据不写进仓库）。
+aslp:
+  tracking:
+    mock-enabled: true
+    dhl-base-url: https://api-eu.dhl.com
+    dhl-api-key: ${DHL_API_KEY:}
+    dpd-base-url: https://api.dpd.com
+    dpd-api-key: ${DPD_API_KEY:}
+    # 超时必须显式：JDK 默认读超时是"无限等待"，承运商僵死会拖住 route-service 的线程池
+    connect-timeout: 2s
+    read-timeout: 5s
+    # 承运商有配额、包裹状态变化慢（分钟级）→ 短时复用；?refresh=true 可强制穿透
+    cache-ttl: 60s
+    max-cache-entries: 1000
+    max-events: 30
+
 management:
   # P1-3：链路追踪
   tracing:

@@ -1,4 +1,298 @@
 ---
+## P1-10 邮件节流外置（进程内 → Redis）+ 演示手册（2026-09-23 轮次 16）— 用户要求：把最后一项也做完，并教怎么演示
+
+> 结果：**`mvn clean package -T 1C` BUILD SUCCESS（256 个单测全通过，+9）｜ `container-verify.sh` EXIT=0（18/18 容器就绪，端到端断言 124/124，含 6a 状态机 + 6b 节流双重启验证）**
+
+### A. 交付内容
+
+**A1. 节流窗口从进程内搬到 Redis（`MailThrottle` 抽象）**
+
+- [x] 新增 `MailThrottle` 接口（占位 / 记窗口 / 归还 / 剩余时间）+ 两个实现：
+      `RedisMailThrottle`（主，`SET NX + TTL`）与 `InMemoryMailThrottle`（降级用，也是单测夹具）
+- [x] **用 `SET NX + TTL` 而不是「先查时间戳再写」**：后者是 check-then-act 竞态，
+      两个实例可能同时读到「没有窗口」然后都发信。`trySet` 由 Redis 单线程保证原子性，
+      于是**多副本并发只有一个能拿到资格**；窗口到期由 Redis 自动清理（不需要清理任务，
+      也不会出现「实例崩溃导致窗口永远打不开」）
+- [x] **三段式语义**（保留了原有的两条业务规则）：
+      ① **先占位再发信**（不是「发完再记时间」）；② **发信失败归还资格**（否则一次 SMTP 抖动让告警白停 30 分钟）；
+      ③ `force=true` 绕过并刷新窗口（人工动作立即生效，但不该让自动任务紧接着再发一封）
+- [x] **Redis 抖动的取舍**：fail-open 会轰炸、fail-closed 会失联 → 选择**降级为进程内节流**
+      （单实例仍严格 30 分钟一封，多实例放宽为每实例一封），并记 WARN 让降级**可见**
+- [x] `secondsUntilAllowed()` 取**两个窗口的较大值**：实际生效的节流是「更严的那个」，
+      只报 Redis TTL 会在降级期间骗人（Redis 说 0，进程内窗口其实还在拦）—— 这条是测试逼出来的（#55）
+
+**A2. 端到端证明「节流不在进程内」**
+
+- [x] `smoke-test.sh`：`docker exec aslp_redis redis-cli ttl inventory:warning:last-mail-at` → 断言 0 < TTL ≤ 1800
+- [x] `container-verify.sh` 的 6/6 阶段升级为**两段式外部化验证**：
+      **6a** 重启 order-service → 状态机仍 FBA_RELABELED（DB）；**6b** 重启 inventory-service →
+      `force=false` 仍 `mailSkipped=true` 且 Redis TTL > 0（**内存实现重启后必然立刻发信**）
+
+**A3. 演示手册 `DEMO.md`（用户直接要的「教我怎么展示」）**
+
+- [x] 8 站演示动线，每站配**可复制命令 + 台词 + 期望输出**：系统全景 → 网关鉴权(401/200) →
+      M1 订单流水线(幂等/异常打标/限流 429) → M2 防超卖(双状态/超量拒绝/邮件+节流) →
+      M3 VRP(38.6km 几何锁定/无解降级) → M3 追踪(识别/归一化/缓存硬证据/四类失败) →
+      M4 状态机+审计+**现场重启不丢** → M5 可观测性(Prometheus/Grafana/Zipkin/Loki/看板/单据PDF)
+- [x] **测试数据速查表**：订单号、库存种子（含低库存样板 `AMZ-9999`）、追踪单号↔桩场景映射、
+      SP-API 桩开关、状态机事件序列、账号与全部端口
+- [x] **被追问的 10 条对答**（含「为什么不做单体」「为什么不全局限流」「单测全绿就够了吗」）
+- [x] **现场排障速查**（磁盘满 / 容器反复重启 / 503 路由 / 401-403 误判 / 想全部重来）
+
+### B. 本轮修复的缺陷
+
+| # | 问题 | 根因 | 修复 |
+|---|---|---|---|
+| 55 | **降级期间的「还要等多久」会骗人**：Redis 抖动进入进程内降级后，`secondsUntilAllowed()` 仍返回 0（而实际上窗口还在拦） | 该方法只读 Redis 的 `remainTimeToLive()`；降级时 Redis 侧确实没有窗口，但**进程内窗口才是真正生效的那个** | 改为取两者较大值：**「实际生效的节流 = 两个窗口里更严的那个」**。诊断类接口在降级路径上尤其不能报一个乐观值 |
+| 56 | 自己新写的测试里 `@DisplayName` 内层用了半角引号，编译不过（`需要')'`） | Java 字符串里嵌套半角双引号未转义；中文全角引号「」才能安全嵌套 | 统一改用「」；教训：**给 DisplayName 写中文时，引号一律用全角** |
+
+### C. 经验记录
+
+1. **节流是「全局唯一」语义，不是「每个进程各算一份」**：原实现放在 `AtomicReference` 里，
+   单实例完全正常、多副本按副本数成倍发信 —— **这类缺陷在本地开发永远看不到**。
+   判断标准同 P1-8：**问一句「这个值在别的进程/重启后还成立吗？」**
+2. **占位式节流比「发完再记」更正确**：先占位（`SET NX`）才能保证并发下只有一个实例真的调用 SMTP；
+   「发完再记时间」在多实例下必然重复发送。代价是要多处理一个分支：**失败要归还资格**。
+3. **降级方案要同时避开两个极端**：Redis 挂了时 fail-open = 邮件轰炸、fail-closed = 告警失联；
+   「降级为进程内节流」是唯一兼顾两者的选择。**降级必须可观测**（记 WARN），否则它会悄悄变成常态。
+4. **演示手册也是交付物**：`DEMO.md` 把「怎么启动、贴哪条命令、看到什么、被问什么怎么答」写死，
+   演示时不再靠记忆 —— 而且它倒逼我把每条能力都变成**一条可复制的验证命令**，
+   凡是写不出命令的，基本上就是没真正验证过的。
+
+---
+## P1-9 尾程追踪真实化（DHL/DPD 一单到底）（2026-09-23 轮次 15）— 用户要求：把追踪也做实，能搭一个初步演示成果
+
+> 结果：**`mvn clean package -T 1C` BUILD SUCCESS（247 个单测全通过，+45）｜ `container-verify.sh` EXIT=0（18/18 容器就绪，端到端断言 123/123，含 6/6 重启持久化验证）**
+
+### A. 为什么是这一项
+
+盘点后剩下的唯一"写了但没做实"的功能：M3 任务 3.2「包裹一单到底追踪」。
+原 `TrackingService` 是 12 行骨架 —— `new RestTemplate()` + 两个硬编码 URL、
+返回原始 `String`、**没有任何调用方**（连 Controller 都没接）、零单测。
+面试被问到「追踪怎么做的」只能答「封装了 RestTemplate」。
+
+### B. 交付内容
+
+**B1. 真实客户端（`route-service/tracking/`）**
+
+- [x] `DhlTrackingClient`：`GET {base}/track/shipments?trackingNumber=X` + 鉴权头 `DHL-API-Key`
+      （DHL Unified Tracking 用 API Key，不是 Bearer），解析 `shipments[]`（状态 + 事件 + ETA + 地点）
+- [x] `DpdTrackingClient`：`GET {base}/tracking/v1/parcels/{n}` + 鉴权头 `API_KEY`，
+      解析 `parcelLifeCycle[]`，**顶层 status 缺失时回退到最新事件**（只认顶层会让响应变成"状态未知"）
+- [x] `TrackingStatusMapper`：两家承运商的异构状态码 → 统一 `ShipmentState`
+      （CREATED/PICKED_UP/IN_TRANSIT/OUT_FOR_DELIVERY/DELIVERED/EXCEPTION/**UNKNOWN**），
+      含德语文案（`zugestellt` / `abgeholt` / `Auftragsdaten`）
+- [x] `TrackingTimes`：三种时间戳形态（带 Z / 带偏移 / **不带时区的本地时间按 Europe/Berlin 解释**）。
+      这是隐藏坑：当成 UTC 会让每个事件偏移 1~2 小时，而"包裹几点到"正是客服最爱引用的字段；解析不了返回 null，**不猜**
+- [x] `TrackingHttp`：复用 Boot 自动装配的 `RestClient.Builder`（保住 Observation/traceId 透传）+ **显式超时**
+- [x] `MockTrackingClient`：`mock-enabled=true`（本地默认）时启用；按单号哈希给出**确定性**轨迹
+      （无凭据也能演示，且真的走完归一化全过程）—— 与 M1 的 `MockAmazonStrategy` 同一套思路
+
+**B2. 服务层语义（`TrackingService`）**
+
+- [x] 承运商识别：长度/前缀启发式（DHL 10/20 位或 JJD/JVGL/GM；DPD 14 位），
+      **判不出来就 400 要求显式指定，绝不猜**（猜错会让客服在错误的承运商上反复核对单号）
+- [x] 失败语义三类分开：查无此单 → **404**；不可用（5xx/429/超时）→ **503**（限流额外带 `retryAfterSeconds`）；上游拒绝 → **502**（不返回 400：可能是我们请求/凭据的问题，别引导用户去改正确单号）
+- [x] **有界 LRU 缓存**（60s + `max-cache-entries=1000`）：承运商有配额、状态变化慢；
+      **只缓存成功结果**（"查无此单"是会过期的事实）；命中标记 `stale=true`（不对调用方说谎）；`?refresh=true` 强制穿透
+- [x] `Observation` 埋点 `aslp.tracking.lookup`：span + 指标；`carrier`/`cacheHit`/`state` 低基数进指标，
+      **单号高基数只进 span**（否则时间序列被单号打爆）
+
+**B3. 接口与桩**
+
+- [x] `GET /api/routes/tracking/{trackingNumber}[?carrier=DHL|DPD][&refresh=true]`
+- [x] WireMock 契约桩 7 个（DHL 妥投 / DHL 异常态 / 查无此单 / 429+Retry-After / 503 / 超时 / DPD 在途 / DPD 查无此单），
+      以**文件**版本化进仓库（与 P1-4 同一口径：契约是要进代码评审的资产）
+
+**B4. 测试（route-service 49 → 94）**
+
+- [x] `TrackingClientContractTest`（15）：**客户端是真的、承运商是假的**（WireMock 随机端口）——
+      验路径/查询参数/**鉴权头有没有带**、报文反序列化、`200+空数组=查无此单`、
+      429→可重试+Retry-After、5xx、**读超时真的生效（未等满桩的 3s）**、4xx→不可重试、错配承运商快速失败、未知字段忽略
+- [x] `TrackingStatusMapperTest`（6）：异常>妥投 的顺序、大小写、德语文案、**没见过的码必须 UNKNOWN**
+- [x] `TrackingTimesTest`（4）：三种形态 + 夏令时/冬令时偏移 + 解析失败返回 null
+- [x] `TrackingServiceTest`（12）：识别表、显式 carrier 优先、**缓存命中不打上游**、refresh 穿透、
+      按发运商+单号分别缓存、过期失效、TTL=0 关缓存、**LRU 上限真的淘汰**、Mock 模式不碰真实客户端
+- [x] `TrackingControllerTest`（8）：404 / 503（限流与故障两种）/ 502 / 400 的**状态码映射**
+- [x] `smoke-test.sh` 新增 19 项断言（104 → 123）：两家承运商成功路径、异常态归一化、
+      缓存 `stale` 标记、**按单号精确统计上游调用次数（3 次查询只打 1 次；refresh 后变 2 次）**、
+      404/503/429+Retry-After/超时/400 全部失败语义
+
+### C. 本轮修复的缺陷
+
+| # | 问题 | 根因 | 修复 |
+|---|---|---|---|
+| 52 | **`pre-transit` 被归一化成 `IN_TRANSIT`**（"承运商还没收到包裹"显示成"运输途中"，客户以为包裹已在路上） | `fromDhl("pre-transit", ...)` 的匹配串含 "transit"（pre-**transit**），而 CREATED 的关键词判定排在 IN_TRANSIT **之后** | 把 CREATED 判定提到 IN_TRANSIT 之前，并把这个“包含关系陷阱”写进注释与测试（同类陷阱：`Delivery attempt failed` 含 `deliver`） |
+| 53 | 缓存过期测试随机失败 | 用 `cache-ttl=1ms`，而 `Instant.now()` 是微秒精度 —— 两次调用常落在同一毫秒内，过期判定“还没来得及”生效 | 改成 20ms TTL + sleep 50ms。**时间相关行为要让它真的过去一会儿**，1ms 这种“理论够用”的值在真实时钟面前就是随机数 |
+| 54 | 新增 `TrackingService` 后既有 `RouteControllerTest` 6 例全部 “APPLICATION FAILED TO START” | `@WebMvcTest` 切片只装配 Web 层，Controller 新增的依赖（`TrackingService`）必须在测试里 `@MockBean` 掉 | 补 `@MockBean TrackingService`。**切片测试的依赖变化会被编译期放过**，只有跑测试才发现 |
+
+### D. 经验记录
+
+1. **"状态归一化"的价值全在边界上，而边界要靠测试挖**：这一轮 3 个失败里有 2 个是自己写的断言把问题揪出来的
+   （`pre-transit` / `Delivery attempt failed`）—— 两者都是"关键词包含"造成的陷阱。
+   写映射类代码时，**必须先判异常、再判终态，且注意短词是长词的前缀**。
+2. **"缓存生效"要用上游调用计数证明，不能靠自述**：`stale=true` 只能说明我们标了标记，
+   真正要证明的是"没有打上游"。WireMock 的按单号精确计数（`requests/count` + `queryParameters`）
+   把这件事变成可断言的数字，而且顺手避免了"其它单号也算进来"的玄学断言。
+3. **承运商接入的三件套：显式超时 + 失败分类 + 不猜**：超时不设就是无限等待；
+   失败不分类调用方就只能写"操作失败"；状态码/承运商识别一旦靠猜，
+   错误会被伪装成"查无此单"丢给用户 —— 这三条在 SP-API（P1-4）与追踪（P1-9）上完全一致。
+4. **契约的不确定性要写进代码注释与文档**，不要装作确定：DPD 的正式接入需商户凭据 + OAuth，
+   本项目是按公开的 `parcelLifeCycle` 结构建模；写清楚"这是我们的理解"比事后解释便宜得多。
+
+---
+## P1-8 状态机持久化（内存 → DB 唯一真相源）（2026-09-23 轮次 14）— 用户要求：把没完成的全部完成
+
+> 结果：**`mvn clean package -T 1C` BUILD SUCCESS（202 个单测全通过，+8）｜ `container-verify.sh` EXIT=0（18/18 容器就绪，端到端断言 104/104，含 6/6 重启持久化验证）**
+
+### A. 为什么是这一项
+
+用户问「之前有个地方需要持久化，我忘记是哪了」。定位到唯一一处：
+`OrderStateMachineService` 把每个订单的状态机实例放在进程内的 `ConcurrentHashMap` 里
+（代码注释自己写着「仅在内存中演示」）。后果：
+- **order-service 一重启，`DEMO-001` 推进到 `FBA_RELABELED` 的状态就回到 `CREATED`**；
+- 多实例部署时各实例状态不一致（A 实例推进了 ShipPED，B 实例还看到 CREATED）。
+
+这是缺陷 #16「状态被跨订单污染」修复后遗留的另一半：**「隔离」不等于「持久化」**。
+
+### B. 交付内容
+
+- [x] **Flyway `V2__create_order_state_tables.sql`**：`order_state`（当前状态，`order_id` 主键 + `@Version` 乐观锁）
+      + `order_state_event`（事件轨迹，只追加）+ `(order_id, id)` 索引（同一毫秒内靠 id 定序）
+- [x] **DB 成为唯一真相源**：`triggerEvent` = 「读库 → 纯逻辑判定 → **同事务**写回状态 + 追加事件」，
+      **进程内不再保存任何状态**（因此也没有缓存不一致问题）。
+      状态与轨迹同事务：否则会留下「状态已变但轨迹未记」的永久无法解释的历史
+- [x] `SimpleOrderStateMachine` 增加**带初始状态的构造**（从持久化状态继续推进，而不是回到起点），
+      转换规则仍留在纯 Java 类里（可秒级跑完全部路径，不依赖 Spring/DB）
+- [x] `StateTransition` 返回值（`fromState`/`toState`/`accepted`）替代原 `boolean`：
+      「被拒绝」与「已在该状态」需要能区分，否则前端只能提示「操作失败」
+- [x] **非法转换也留痕**：`accepted=false` 同样落库 —— 客服场景「我点了按钮，为什么没生效」靠它回答。
+      `event` 存**字符串而非枚举**：审计是历史事实，枚举重命名不该让旧行读不出来
+- [x] **读接口不产生写入**：`getCurrentState` 对不存在的订单返回 CREATED，但**不落 CREATED 行**
+      （否则查询会把库写胖，也让「从未推进」与「重置过」无法区分）
+- [x] `reset` 语义 = 删状态行 + 记一条 `RESET` 审计（夹具复位且历史完整，不会凭空多出一条“迁移到 CREATED”）
+- [x] 新增 `GET /api/orders/state/{orderId}/history`（审计轨迹，含被拒绝的尝试）
+- [x] **测试（7 个新单测）**：`OrderStateMachineServiceTest` 改为 `@DataJpaTest` + H2 **真写库**，
+      核心用例 `stateSurvivesServiceRestart`：新建 service 实例（= 进程内状态归零）读同一个库，
+      断言仍是 `FBA_RELABELED` —— **旧的 ConcurrentHashMap 实现会在这里变红**（回归证据）。
+      另含「非法转换留痕」「读接口不产生写入」「轨迹顺序」「reset 后轨迹仍可读」
+- [x] **端到端硬证据**：`container-verify.sh` 新增 **6/6 阶段** ——
+      推进 `SMOKE-PERSIST-001` 到 `FBA_RELABELED` → `docker compose restart aslp_order_service` →
+      重新健康后状态仍是 `FBA_RELABELED`。单测里的"重启"只是换实例（同一 JVM/上下文），
+      **只有真重启容器才能证明"换进程 + 重跑一次 Flyway + 重走一次 Spring 启动"后状态仍在**
+- [x] `smoke-test.sh` 新增 2 项断言（102 → 104）：轨迹含 `FBA_RETURN`、轨迹含 `accepted:false`
+
+### C. 本轮修复的缺陷
+
+| # | 问题 | 根因 | 修复 |
+|---|---|---|---|
+| 50 | **状态机状态只在内存里**：重启即回到 CREATED，多实例各看到一套状态 | 缺陷 #16 只解决了"实例被跨订单共享"，隔离后的实例仍全在进程内的 `ConcurrentHashMap` 里 —— **"隔离"不等于"持久化"** | DB 成为唯一真相源（见上）；`order_state` + `@Version` 防并发覆盖；新增 6/6 容器重启验证 |
+| 51 | **重置一个「从未推进过」的订单会返回 500**（代码评审时自己发现，未进端到端即修掉） | 用 `stateRepository.deleteById(id)` 实现 reset，而 **Spring Data JPA 3.x 的 `deleteById` 在目标不存在时抛 `EmptyResultDataAccessException`**（早期版本是静默忽略 —— 按旧印象写就会错） | 改为 `findById(id).ifPresent(stateRepository::delete)`，并补 `resetOnUntouchedOrderIsIdempotent` 测试 |
+
+### D. 经验记录
+
+1. **「按 key 隔离」是个容易被当成终点的中间状态**：把单实例改成 `Map<key, 实例>` 之后，
+   多租户/多订单的"互相污染"问题消失了，但状态仍然只活在进程里 —— **换进程就回到起点**。
+   判断标准很简单：**问一句"这个进程重启后，这个值还在吗？"**
+2. **持久化的测试必须真写库**：如果用 Mockito 打桩仓储，只能验证到"我调用了 save"，
+   而出问题的地方恰恰是实体映射、事务边界与"状态到底存在哪"。H2 建表由实体生成（关掉 Flyway），
+   代价极小、验证力却完全不同。
+3. **模拟重启有两个层次**：单测里"换一个 service 实例"能拦住绝大多数回归（快、几毫秒）；
+   但它仍在同一个 JVM、同一份 Spring 上下文里 —— **真重启容器**才能覆盖
+   「Flyway 重跑 + Spring 重新装配 + 连接池重建」这些只在部署时出现的问题。两者都要有。
+4. **审计日志要按"事实"存，不按"当前代码"存**：事件名存字符串而不是枚举，
+   是为了让一年后的代码重命名枚举时，历史行依然读得出来。
+5. **运维/夹具类接口必须幂等**（#51）：「重置」重复调用是正常用法，不是错误。
+   顺带记住一个容易写错的 API 行为：**Spring Data JPA 3.x 的 `deleteById` 对不存在的行抛异常**
+   （早期版本静默忽略），凡「可能不存在的删除」都用 `findById(...).ifPresent(delete)`。
+
+---
+## P1-7 报表看板真实化（M1/M5 收尾）（2026-09-23 轮次 13）— 用户要求：把没完成的全部完成
+
+> 结果：**`mvn clean package -T 1C` BUILD SUCCESS（194 个单测全通过，+16）｜ `container-verify.sh` EXIT=0（18/18 容器就绪，端到端断言 102/102）**
+
+### A. 为什么是这一项
+
+盘点后发现 P0/P1 全部交付，**唯一还停留在"桩"状态**的就是 `report-service`：
+`/api/reports/dashboard` 直接返回 `List.of(120, 200, 150, ...)` 硬编码常量，
+既无数据源也无法反映系统状态；其单测 `healthEndpointReturnsUp` 里**一行断言都没有**。
+todo.md 的 M1/M5 里它也是被反复勾不掉的那一条。本轮把它做成真实能力。
+
+### B. 交付内容
+
+**B1. order-service：补"分布"能力（报表看板的数据源）**
+
+- [x] `OrderRepository` 新增三个数据库侧 `group by` 计数（`countGroupByStatus` / `countGroupByWarehouseCode` / `countGroupByErrorTag`）
+      —— **不把全表捞进内存再分组**：`/stats` 是前端可轮询的只读接口，不能随订单量增长把堆打满
+- [x] `GET /api/orders/stats` 在保留原有 5 个计数字段的前提下，新增 `byStatus` / `byWarehouse` / `byErrorTag` 三个分布
+      —— 旧字段一个不动（冒烟脚本断言 `"total":3` / `"withErrorTag":0`，改名即破坏兼容）
+- [x] 分布用 **`LinkedHashMap` 保序**（不是 `Collectors.toMap` 的 HashMap）：图表颜色/顺序依赖迭代顺序，
+      且「同一份数据两次请求顺序不同」会让端到端断言变得不可复现。此处正是 readme §9 #23（`Map.of` 遇 null 就炸）同一条教训的延续
+- [x] `warehouseCode` 为空时键归一为 `UNKNOWN`：JSON 里出现 null 键会让部分图表库直接报错
+
+**B2. report-service：从假数据升级为真实聚合**
+
+- [x] `config/ReportProperties`（`aslp.report.*`：两个下游 baseUrl + connect/read 超时 + 低库存展示上限），
+      并在 `ReportServiceApplication` 上显式 `@EnableConfigurationProperties` —— **注册与"写类"必须同一步完成**（§9 #43 的复发预防）
+- [x] `client/OrderStatsClient` / `client/InventoryWarningClient`：`RestClient` 强类型消费上游契约；
+      **复用 Boot 自动装配的 `RestClient.Builder`**（自己 `RestClient.builder()` 会丢掉 Observation 与 traceparent 透传，P1-3 的跨服务链路会在这里断掉）
+- [x] **显式超时**（connect 2s / read 3s）：看板是"随时会被点开"的接口，默认无限读超时会被一个卡住的上游占满线程 —— 那比"降级显示部分数据"糟糕得多
+- [x] **失败语义 = 部分降级**：任一上游不可用 → **HTTP 200** + 顶层 `degraded:true` + `unavailable:[...]`，
+      对应区块 `available:false`；其余区块照常显示真实数据。
+      **不返回 500、也不返回"看起来正常的全 0 看板"**（全 0 会被读成"今天真的没有订单"）
+- [x] **不直连别人的数据库、不重算业务口径**：低库存阈值直接复用 inventory-service 的 `/warnings/status`（P1-5 交付），
+      保证「看板」与「补货邮件」对"什么算低库存"永远一致
+- [x] `dto/DashboardReport` 额外提供 `ChartData{labels[],values[]}`：服务端把保序 map 摊平，前端不必再写取 key/value 的胶水代码
+- [x] 上游加字段不会打挂报表：`@JsonIgnoreProperties(ignoreUnknown = true)`（报表是只读消费方，应当前向兼容）
+- [x] **刻意不注册"下游探活"健康组件**：上游抖动应体现为响应里的 degraded，
+      而不是把本容器判成 DOWN 让编排反复重启一个其实正常的服务（与 P1-6「单据必须 503」的取舍正好相反，因为这里它是只读聚合方）
+- [x] `Observation` 埋点 `aslp.report.dashboard`：一个埋点同时产出 **span + 指标**；
+      `degraded` 作为**低基数标签**进指标（可对"看板降级率"告警），具体缺了哪个源只进 span 并记 WARN 日志
+
+**B3. 可视化页面**
+
+- [x] `static/dashboard.html`：ECharts 看板（订单状态饼图 / 各仓订单柱状图 / 低库存柱状图**带阈值 markLine** / 异常打标表格），15s 自刷新
+- [x] **同源托管**（放在 report-service 自己的 `static/` 下）：不需要为看板单独配 CORS，且"数据来自谁"与页面绑定在一起，换数据源不会漏改另一个前端工程
+- [x] 顶部一条状态徽标直接反映 `degraded`：看板自己必须先能显示"我现在是残缺的"
+- [x] ECharts CDN 不可达时优雅降级（提示 + 数字仍可经 API 获取）
+
+**B4. 验证与接线**
+
+- [x] compose：`aslp_report_service` 增加 `depends_on: {order, inventory}: service_healthy`
+      —— 报表能降级，所以这不是"可用性依赖"，而是让**端到端断言可复现**（否则冷启动瞬间抓到 degraded 状态会偶然失败）
+- [x] 单测 +16（report 1 → 14，order 78 → 81）：
+      - `ReportClientTest`（5）：用 **JDK 自带 `HttpServer` 起真服务**验证路径/反序列化/保序/未知字段忽略/503 与不可达的异常包装
+        —— 这些用 Mockito 全都验不到（mock 只是把我以为的答案再说一遍）
+      - `ReportAggregationServiceTest`（6）：重点钉"部分失败"语义（订单挂 → 库存仍真实可用；两边都挂 → 仍返回看板；明细截断但计数如实）
+      - `ReportControllerTest`（3，从 0 断言的空壳重写）：**真启动 Spring 上下文**并断言上游不可达时 `degraded=true` + 200；
+        同时断言静态页确实被打进 jar（"能起来"必须有测试覆盖，§9 #43 的教训）
+      - `OrderStatsControllerTest`（3）：分布键顺序稳定、null 键 → UNKNOWN、空分布是空 map 而不是缺键
+- [x] `scripts/smoke-test.sh` 新增 6 项断言（96 → 102）：看板未降级 / 订单数与订单库同源（`"total":3`）/
+      仓库分布含 Bruchsal / **低库存明细里出现 `AMZ-9999@Mönchengladbach`（与 P1-5 邮件里的 SKU 完全一致 → 证明口径没分叉）** /
+      单区块接口 `available:true` / 看板页已打包
+
+### C. 本轮修复的缺陷
+
+| # | 问题 | 根因 | 修复 |
+|---|---|---|---|
+| 48 | 单测编译失败：`thenReturn(List.of(new Object[]{...}))` 报类型不符 | `List.of(T...)` 的变参推断把 `Object[]{a,b}` 当成**变参展开**，推断出 `List<Object>` 而不是 `List<Object[]>` | 显式指定类型参数 `List.<Object[]>of(...)` —— 这类"看着像编译器的错、其实是自己没写清楚"的问题，加一个类型见证就够 |
+| 49 | 自己新写的断言第一次跑就假失败（expected 2 but was 1） | 断言与测试数据对不上：`byStatus` 里 `CREATED=1` / `PAID=2`，断言却写成 `get("CREATED")==2` | 测试数据与断言写在同一屏内仍需逐个核对；已把两个键都断言上（1 和 2），避免"只测了一个键就以为覆盖了分布" |
+
+### D. 经验记录
+
+1. **"桩数据"是最难被发现的技术债**：`report-service` 的假数组能通过所有既有断言（因为旧断言只查 `report-service up`），
+   端到端 96 项里没有一项能发现它没接数据源。**"接口有响应"与"接口有内容"必须分开断言** ——
+   本轮新断言特意挑了「与订单库同源的数字」和「与邮件 SKU 完全一致的明细」，而不是"返回 200"。
+2. **聚合服务的失败语义要按"它能做什么"来定，而不是统一抄**：
+   单据（P1-6）是随货凭证 → 依赖挂了必须 503 + 健康 DOWN；
+   看板（本轮）是只读聚合 → 依赖挂了应"部分降级 + 如实标注 + 健康保持 UP"。
+   同一条"依赖不可用"，在两种业务角色下正确答案相反。
+3. **能不引入歧义就不引入**：报表要两个下游客户端，没有做成"两个 `RestClient` bean + 限定符"，
+   而是各自内部 `build`（各带 baseUrl）。容器里出现两个同类型 bean 必须消歧，否则启动即失败（§9 #25 已踩过一次）。
+4. **图表数据在服务端摊平，而不是让每个前端各写一遍**：`ChartData{labels,values}` 让"顺序"这件事只在一处决定，
+   也顺手消掉了"前端遍历 map 时顺序随机导致颜色跳变"这类难查的问题。
+
+---
 ## P1-5 邮件真实化 + P1-6 对象存储（2026-09-17 轮次 12）— 用户要求：P1-5 与 P1-6 一起做
 
 > 结果：**`mvn clean package -T 1C` BUILD SUCCESS（178 个单测全通过）｜ `container-verify.sh` EXIT=0（18/18 容器就绪，端到端断言 96/96）**
@@ -697,28 +991,27 @@
 
 **M1 — 电商多平台对接与订单网关（第 4-6 月）**
 - [x] `auth-service`：Spring Security + JWT（RBAC 权限控制）✅ 已实现（AuthController、SecurityConfig、Dockerfile、docker-compose 8084、编译通过）
-- [ ] `report-service`：报表与数据可视化（ECharts 看板）
-- [ ] `inventory-service`：库存管理 + Redisson 分布式锁（防超卖）✅ 已完成（M2 基础）
-- [ ] `route-service`：VRP 路径优化引擎（欧洲 DHL/DPD 路线计算）✅ 已完成（M3 基础）
-- [ ] `report-service`：报表与数据可视化（ECharts 看板）
+- [x] `report-service`：报表与数据可视化（ECharts 看板）✅ **已完成（P1-7）** —— 从"硬编码假数据"升级为真实聚合（order-service 订单分布 + inventory-service 低库存），并提供 ECharts 看板页 `http://localhost:8085/dashboard.html`
+- [x] `inventory-service`：库存管理 + Redisson 分布式锁（防超卖）✅ 已完成（M2 基础）
+- [x] `route-service`：VRP 路径优化引擎（欧洲 DHL/DPD 路线计算）✅ 已完成（M3 基础）
 
 **M2 — 多仓联动库存管理（第 7-9 月）**
-- [ ] Bruchsal 总仓 + Mönchengladbach 分仓库存一致性（Redis 锁）
-- [ ] 安全库存预警（Spring Task 定时任务）
-- [ ] 补货建议邮件自动发送（Java Mail Service）
+- [x] Bruchsal 总仓 + Mönchengladbach 分仓库存一致性（Redis 锁）✅ 已完成（`InventoryLockService`：Redisson `RLock` + `@Version` 乐观锁，锁粒度 `sku + warehouse`）
+- [x] 安全库存预警（Spring Task 定时任务）✅ 已完成（`InventoryWarningTask`，扫描 60s / 发信节流 30m）
+- [x] 补货建议邮件自动发送（Java Mail Service）✅ 已完成（P1-5：MailHog + Thymeleaf multipart/alternative）
 
 **M3 — 配送路径优化（第 10-12 月）**
-- [ ] 运费规则引擎（Drools / 纯 Java OO 设计）
-- [ ] 包裹追踪服务（RestTemplate 封装 DHL/DPD API）
+- [x] 运费规则引擎（Drools / 纯 Java OO 设计）✅ 已完成（`FreightRule` → `EuropeDhlRule` + `FreightEngine`，纯 Java OO 而非 Drools）
+- [x] 包裹追踪服务（RestTemplate 封装 DHL/DPD API）✅ **已完成（P1-9）** —— `tracking/` 包：真实 DHL/DPD 客户端 + 状态归一化 + 有界缓存 + 7 个契约桩（45 个新单测）
 
 **M4 — 前端 BFF + 安全运维（第 13-15 月）**
-- [ ] BFF 层重构（多条件分页查询 + Spring Validation）
-- [ ] 数据库定时备份（`Runtime.exec()` 触发 `pg_dump`，PostgreSQL 16）
-- [ ] 居家办公 VPN 安全接入（Spring Security JWT 细粒度权限）
+- [x] BFF 层重构（多条件分页查询 + Spring Validation）✅ 已完成（`BffOrderController`，含可选参数 NPE 修复）
+- [x] 数据库定时备份（`Runtime.exec()` 触发 `pg_dump`，PostgreSQL 16）✅ 已完成（`DatabaseBackupTask`，每日 02:00）
+- [x] 居家办公 VPN 安全接入（Spring Security JWT 细粒度权限）✅ 已完成（WebFlux 安全链 + HS384 JWT + `roles` → `ROLE_*`；RS256/JWKS 见 P2-5）
 
 ### 技术亮点（面试准备）
-- [ ] **状态机代码**：FBA 退货换标 / 一件代发（Spring StateMachine）
-- [ ] **标准技术对答**：高并发下用 Redis 锁（Redisson）保证 Bruchsal + Mönchengladbach 两仓库存不冲突
+- [x] **状态机代码**：FBA 退货换标 / 一件代发 → 已实现为**纯 Java 状态机**（`SimpleOrderStateMachine`，8 状态 / 7 事件），**状态持久化在 DB**（`order_state` + `order_state_event`，P1-8：重启后状态仍在、事件轨迹可审计），未用 Spring StateMachine（`spring-statemachine-core:1.2.14` 在 Maven Central 不存在，见 §9 #5）
+- [x] **标准技术对答**：高并发下用 Redis 锁（Redisson）保证 Bruchsal + Mönchengladbach 两仓库存不冲突 → `InventoryLockService` 把锁粒度定为 `sku + warehouse`（两仓互不阻塞），并叠加 `@Version` 乐观锁
 
 ---
 

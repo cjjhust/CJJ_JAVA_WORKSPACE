@@ -8,6 +8,8 @@
 
 ## 1. 项目定位
 
+> **要现场演示？直接看 [`DEMO.md`](DEMO.md)** —— 15 分钟演示动线、每站的可复制命令与台词、测试数据速查表、被追问时的 10 条对答、现场排障速查。
+
 面向德国海外仓（Bruchsal 总仓 + Mönchengladbach 分仓）的 B2B 履约中台，解决四类核心问题：
 
 | 里程碑 | 业务命题 | 技术交付 |
@@ -83,7 +85,7 @@ bash scripts/smoke-test.sh
 ### 3.3 方式 B：容器全量启动（推荐验证集成）
 
 ```bash
-# 一键：构建 6 个服务镜像 → 启动基础设施 + 6 服务 + Prometheus + Grafana + Zipkin + Loki + Promtail + WireMock 契约桩 + MailHog + MinIO → 等就绪 → 跑 96 项断言
+# 一键：构建 6 个服务镜像 → 启动基础设施 + 6 服务 + Prometheus + Grafana + Zipkin + Loki + Promtail + WireMock 契约桩 + MailHog + MinIO → 等就绪 → 跑 124 项断言 → 重启 order/inventory 验证「状态与节流窗口都不在进程内」
 bash scripts/container-verify.sh
 
 # 镜像已存在时跳过构建
@@ -145,15 +147,21 @@ curl "http://localhost:8080/api/inventory/AMZ-1001?warehouseCode=Bruchsal"
 # P0-5 释放锁定库存（支付失败 / 订单取消 / 超时未支付）
 curl -X POST "http://localhost:8080/api/inventory/release?sku=AMZ-1001&warehouseCode=Bruchsal&qty=2"
 
-# ── M4 订单状态机（FBA 退货换标，状态按订单号隔离）─────
+# ── M4 订单状态机（FBA 退货换标，状态持久化在 DB）─────
 curl -X POST "http://localhost:8080/api/orders/state/DEMO-001/trigger?event=PAY"
 curl -X POST "http://localhost:8080/api/orders/state/DEMO-001/trigger?event=PICK"
 curl -X POST "http://localhost:8080/api/orders/state/DEMO-001/trigger?event=SHIP"
 curl -X POST "http://localhost:8080/api/orders/state/DEMO-001/trigger?event=FBA_RETURN"
 curl -X POST "http://localhost:8080/api/orders/state/DEMO-001/trigger?event=RELABEL"
 curl      "http://localhost:8080/api/orders/state/DEMO-001"
+# 事件轨迹（审计）：含被拒绝的迁移尝试 —— 回答“客户说点过按钮，为什么没生效”
+curl      "http://localhost:8080/api/orders/state/DEMO-001/history"
+# 重置（夹具复位，同时留一条 RESET 审计）：
+curl -X POST "http://localhost:8080/api/orders/state/DEMO-001/reset"
 # 无参便捷端点（默认订单 DEMO-001）
 curl -X POST "http://localhost:8080/api/orders/state/fba-return"
+# 重启后状态仍在（P1-8 持久化硬证据）：
+#   docker compose restart aslp_order_service && curl .../api/orders/state/DEMO-001
 
 # ── M4 BFF 聚合查询 ────────────────────────────────────
 curl "http://localhost:8080/bff/orders/search?status=SHIPPED&page=1&size=10&warehouseCode=Bruchsal"
@@ -167,7 +175,24 @@ curl -X POST "http://localhost:8080/api/routes/optimize" -H 'Content-Type: appli
   "vehicles":[{"id":"V-01","capacity":20},{"id":"V-02","capacity":20}],
   "deliveries":[{"id":"D-01","name":"Karlsruhe","lat":49.0069,"lon":8.4037,"demand":3}]
 }'
+
+# ── M3 尾程追踪（P1-9：DHL / DPD「一单到底」）────────────
+# 单号自动识别承运商（DHL: 10/20 位数字或 JJD/JVGL/GM 前缀；DPD: 14 位数字）
+curl "http://localhost:8080/api/routes/tracking/00340434161094000000"
+curl "http://localhost:8080/api/routes/tracking/01234567890123"
+# 显式指定承运商（识别不了或识别错时的兜底通道）+ 跳过本地缓存
+curl "http://localhost:8080/api/routes/tracking/00340434161094000000?carrier=DHL&refresh=true"
+# 失败语义：查无此单 404 / 承运商不可用 503（限流带 retryAfterSeconds）/ 上游拒绝 502 / 入参 400
+curl -i "http://localhost:8080/api/routes/tracking/00340434161094000002"
+
+# ── M1/M5 报表看板（P1-7：真实聚合，不再是假数据）────────
+# 看板数据（订单分布 + 低库存明细）。任一上游不可用 -> 200 + "degraded":true + unavailable 列表
 curl http://localhost:8080/api/reports/dashboard
+# 单区块查询（前端局部刷新，避免无谓调用另一半）
+curl http://localhost:8080/api/reports/orders
+curl http://localhost:8080/api/reports/inventory
+# 可视化页面（ECharts，15s 自刷新；由 report-service 同源托管，不走网关路由）
+open http://localhost:8085/dashboard.html
 
 # ── M5 可观测性（P1-1）───────────────
 # 单服务指标（Prometheus 文本格式；含 JVM / HTTP / 业务指标）
@@ -246,7 +271,7 @@ smart-logistics-platform/
 ├── docker-compose.yml             # PG16 / Redis7 / ZooKeeper+Kafka7.6 / 6 个 Java 服务
 ├── .vscode/settings.json          # 关闭 JDT 自动构建，避免与 Maven 抢占 target/classes
 ├── scripts/
-│   ├── smoke-test.sh              # 端到端冒烟测试 96 项断言（支持 --external 打外部服务）
+│   ├── smoke-test.sh              # 端到端冒烟测试 124 项断言（支持 --external 打外部服务）
 │   └── container-verify.sh        # P0-3 容器全量验证：构建 → 启动 → healthy → 断言
 ├── wiremock/mappings/*.json       # P1-4：Amazon SP-API 契约桩（11 个：LWA 换令牌 / 分页 / 限流 / 超时 / 5xx / 4xx / 空结果 / 商品明细）
 ├── monitoring/                    # P1-1 / P1-1b / P1-3（全部以文件版本化，容器启动即加载）
@@ -267,11 +292,12 @@ smart-logistics-platform/
     ├── inventory-service/         # M2 库存：entity/repository/service(锁)/dto(查询响应)/controller/task(预警+邮件)
     │   └── src/main/resources/db/migration/inventory/          # P0-4：V1 建表 + V2 种子数据
     ├── order-service/             # M1/M4：entity(OrderRecord) + repository + service(幂等落库)
-    │   │                          #        + statemachine(按订单隔离) + strategy(策略模式)
+    │   │                          #        + statemachine(纯转换规则 + DB 持久化状态与事件轨迹) + strategy(策略模式)
     │   │                          #        + spapi(SP-API 客户端/令牌/映射) + document(单据 PDF) + config + task
     │   └── src/main/resources/db/migration/order/              # P0-4：V1 建表
-    ├── report-service/            # M1 报表：ECharts 数据源
-    └── route-service/             # M3 路由：engine(运费规则 + VRP 成本模型/问题装配) + service(VRP 求解/追踪) + dto(求解入参/出参)
+    ├── report-service/            # M1/M5 报表：client(下游只读客户端) + service(真实聚合 + 降级) + dto(快照/看板)
+    │   └── src/main/resources/static/dashboard.html             # P1-7：ECharts 看板页（同源托管，15s 自刷新）
+    └── route-service/             # M3 路由：engine(运费规则 + VRP 成本模型/问题装配) + service(VRP 求解/追踪) + dto + tracking(DHL/DPD 客户端 + 状态归一化 + 契约桩)
 ```
 
 > **Java 包根统一为 `com.aslp.*`**，不含任何具体主体标识（详见 §12 命名与脱敏约定）。
@@ -291,11 +317,14 @@ smart-logistics-platform/
 | **仓库编码归一化** | `OrderPullService.WAREHOUSE_ALIASES` | 兼容 API 返回的 `Moenchengladbach` 无变音符写法，统一为 `Mönchengladbach` |
 | **异常打标** | `OrderRecord.errorTag` | `ADDRESS_INVALID` / `POSTCODE_MISSING` / `MATCH_FAILED`；客服修正接口清除标签后重新进入流水线 |
 | **状态机** | `SimpleOrderStateMachine`（纯 Java）+ `OrderStateMachineService` | CREATED→PAID→PICKED→SHIPPED→**FBA_RETURN_LABEL**→FBA_RELABELED→DELIVERED→COMPLETED；非法转换被拒绝；**状态按订单号隔离** |
+| **状态机持久化（P1-8）** | `OrderStateRecord` / `OrderStateEventRecord` + `db/migration/order/V2` | **DB 是唯一真相源**：每个请求「读库 → 纯逻辑判定 → 事务写回 + 追加事件」，进程内不保存任何状态（因此**重启后状态仍在**，多实例也不会各自为政）。纯转换规则仍在 `SimpleOrderStateMachine` 里（可用初始状态构造 → 从持久化状态继续推进）。**状态与事件同事务**：否则会留下「状态变了但轨迹没记」的不可解释历史。`@Version` 乐观锁防并发推进互相覆盖。事件表**只追加**，连 `accepted=false` 的非法尝试也落库（客服问题「我点了按钮为什么没生效」靠它回答）；`event` 存字符串而非枚举 —— 历史事实不该因枚举重命名而读不出来。读接口**不产生写入**（查询不会把库写胖，也不会让「从未推进」与「重置过」无法区分） |
 | **分布式锁** | `inventory-service` `InventoryLockService` | Redisson `RLock` key=`inventory:lock:{sku}:{warehouse}`，等待 2s / 持有 10s 防死锁；配合 `@Version` 乐观锁 |
 | **乐观锁** | `InventoryItem.version` | JPA `@Version`，防并发覆盖（种子数据必须写入 `version = 0`） |
 | **规则引擎** | `route-service` `FreightRule` → `EuropeDhlRule` | 基础费 + 距离×0.12 + 重量×0.35，DE 区基础费 5.0 / 其他 8.0 |
 | **VRP 优化** | `route-service` `VrpRouteService` + `VrpProblemFactory`（jsprit 1.8） | 用官方高层入口 `Jsprit.Builder` 装配算法（**不能裸 `new SearchStrategyManager()`**，那是空策略注册表，见 §9 #27）；问题侧绑定 `HaversineCostModel`（**真实 km**，不用 jsprit 默认的「坐标单位欧氏距离」）；固定随机种子保证结果可复现；出参 `VrpPlan` 给出逐车路线、停靠顺序、里程、载重、未指派作业；无解时返回 200 + `feasible:false` 而非 500 |
 | **BFF 聚合** | `BffOrderController` | 多条件分页 + `@NotBlank`/`@Min` 校验参数对象；筛选项按需回显（不传的键不出现） |
+| **报表聚合（P1-7）** | `report-service` `ReportAggregationService` + `OrderStatsClient` / `InventoryWarningClient` | 看板数据**真实聚合**：订单分布来自 `GET /api/orders/stats`（数据库侧 `group by`，不把全表捞进内存），低库存来自 `GET /api/inventory/warnings/status`。**不直连别人的数据库、不重算业务口径** —— 阈值只有一处真相源，看板与补货邮件不会打架。上游挂掉时返回 **200 + degraded=true + unavailable 列表**（分块标注 `available:false`），任一依赖抖动不会让整页白屏，也不会把"部分可用"丢掉 |
+| **报表图表结构** | `DashboardReport.ChartData` | 服务端把「保序 map」摊平成 `labels[] + values[]`，前端不必再写取 key/value 的胶水代码；顺序由 `LinkedHashMap` 固定，同一份数据每次渲染顺序一致 |
 | **网关限流（P1-2）** | `gateway` `RateLimitConfig` + `RequestRateLimiter` | Redis 令牌桶（`RedisRateLimiter`）。**按需挂路由，不用 default-filters 全局限流**：`POST /api/orders/pull` 用户维度 1 次/秒（对应 M1「平台 API 严格限流」）、`/api/auth/**` IP 维度 10 次/秒（登录前无用户身份）。key 带 `user:` / `ip:` 前缀—— **SCG 的令牌桶 key 不含 routeId**（`getKeys(String)` 只收解析器输出），不隔离就会与其它路由共用桶；匿名回落 IP，**绝不返回空 key**（空 key 会被框架 403）。超限返回 **429** |
 | **容错与降级（P1-2）** | `order-service` `PlatformPullGateway` | Resilience4j 注解叠加顺序 **Retry -> CircuitBreaker -> Bulkhead**；回退方法挂**最外层 Retry** 上（挂到 CB 上会被内层吞掉异常，导致重试永不触发）；任何失败合成 `degraded=true` 结果 → 接口返回 **200 降级响应而非 500**；熔断状态可经 `/actuator/circuitbreakers` 查证 |
 | **故障演练（P1-2）** | `PlatformFailureSwitch` + `POST /api/orders/mock/failure-mode` | 可控故障注入（仅 Mock 策略读取，网关 docker 链路限 ADMIN），用于端到端证明「连续失败 -> 熔断打开 -> 降级响应 -> 自动恢复」 |
@@ -307,15 +336,18 @@ smart-logistics-platform/
 | **链路追踪栈（P1-3）** | `micrometer-tracing-bridge-brave` + `zipkin-reporter-brave` + `aslp_zipkin` | Boot 3 默认 W3C `traceparent` 传播，网关（WebFlux）与 Servlet 下游可互通；采样率 `management.tracing.sampling.probability` 演示为 `1.0`（生产需下调）；上报地址用**连字符别名** `aslp-zipkin`（见 §9 #35） |
 | **日志聚合（P1-1b）** | `monitoring/promtail/promtail.yml` + `monitoring/loki/loki.yml` + `aslp_promtail` / `aslp_loki` | Promtail 用 **Docker API** 而不是 tail 日志文件（macOS 上 `/var/lib/docker` 在虚拟机里，挂了也是空目录）；只保留低基数标签 `container/service/project/level`，**traceId 不做成标签**（会让索引基数爆炸）而是交给 Grafana 的 `derivedFields` 在查询时抽取并生成跳 Zipkin 的链接 |
 | **邮件模板化（P1-5）** | `inventory-service` `ReplenishmentMailService` + `templates/email/replenishment.html` | Thymeleaf 渲染 HTML，并用 `MimeMessageHelper.setText(plain, html)` 同时挂 **multipart/alternative** 两份正文（部分网关只认 text/plain，没兑底会收到空邮件）。模板样式全部**行内化**、布局用 `<table>`：邮件客户端对 `<style>` 与现代 CSS 支持极差。**渲染在 try 之外**：模板写错是代码缺陷，不能当成 SMTP 故障被默默吞掉 |
-| **邮件节流（P1-5）** | `InventoryWarningTask` + `aslp.inventory.warning.mail-interval` | 扫描周期（60s）与发信周期（默认 30m）是两个概念。旧实现「扫一次发 N 封」，在 SMTP 不可用时被「发送失败」掩盖；邮件真通了就会变成**邮件轰炸**。手动触发端点默认 `force=true` 绕过节流（人工动作应当立即生效）；**发信失败不计入节流窗口**（下一轮立即重试） |
+| **邮件节流（P1-5 / P1-10）** | `InventoryWarningTask` + `MailThrottle`（`RedisMailThrottle`） | 扫描周期（60s）与发信周期（默认 30m）是两个概念。旧实现「扫一次发 N 封」，在 SMTP 不可用时被「发送失败」掩盖；邮件真通了就会变成**邮件轰炸**。**P1-10 把窗口从进程内 `AtomicReference` 换成 Redis**（`SET NX + TTL`，原子占位 + 自动过期）：多副本共用一个窗口、重启后仍在窗口内。语义细节：**先占位再发信**（并发下只有一个实例真发）、**发信失败归还资格**（否则一次 SMTP 抖动会让告警白停 30 分钟）、`force=true` 绕过并刷新窗口（人工动作立即生效，但不该让自动任务紧接着再发一封）。**Redis 抖动时降级为进程内节流**（fail-open 会轰炸、fail-closed 会失联，降级是唯一兼顾两者的选法）且记 WARN 让降级可见 |
 | **单据 PDF 生成（P1-6）** | `order-service` `document/PdfDocumentWriter`（OpenPDF） | 面单（仓内作业联）与报关单（CN22 摘要）两类。选 **OpenPDF（LGPL）而不是 iText 7（AGPL）**：随货单据会被货代/海关接触，AGPL 会带来不必要的许可证义务。**正文只用 ASCII（英文/德文）**：PDF 内置 Base14 字体没有中文字形，写中文会变空白方块（要中文需内嵌 CJK 字体子集，属后续项）。压缩级别设为 0：牺牲几十 KB 体积，换来「排障时能直接在文件里搜单号」 |
 | **对象存储（P1-6）** | `service/DocumentStorageService` + `config/MinioConfig` | 对象键 `orders/{orderId}/{kind}-{UTC时间戳}.pdf`：按订单分组（可整体归档/GDPR 删除）、带时间戳（重打留痕，「最新一版」= 键最大者，ISO-8601 的字典序即时间序）；sha256 随对象存元数据（单据是对外凭证，事后要能校验）；**两个客户端** —— 上传/下载走内网端点，预签名走对外端点（签名覆盖 Host，必须用同一个 Host 签） |
 | **失败语义（P1-6）** | `DocumentNotFoundException` / `DocumentStorageException` | 分开两类：订单不存在或还没生成过 → **404**（正常业务状态，前端可引导用户点「生成」）；对象存储不可用 → **503**（依赖故障，可重试）。一律 200 + success=false 会让前端无法区分这两种情況 |
 | **外部平台客户端（P1-4）** | `order-service` `spapi/SpApiOrderClient` + `LwaTokenClient` + `SpApiOrderMapper` | 三步真实契约：`POST {token-url}`（LWA 表单换 access_token，进程内缓存 + 提前 60s 失效）→ `GET /orders/v0/orders`（`NextToken` 分页 + `max-pages` 防不收敛）→ `GET /orders/v0/orders/{id}/orderItems`（补商品名，失败不影响主流程）。`CreatedAfter` 为 ISO-8601 UTC；鉴权头 `x-amz-access-token`。**显式 connect/read 超时**：默认的「无限等待」会让平台僵死时线程被拖住，熔断器救不了被占住的线程 |
 | **失败分类（P1-4 × P1-2）** | `PlatformUnavailableException` / `RateLimitedException` / `SpApiClientException` | **重试语义就写在这条继承线上**：429（子类，带 `Retry-After`）/ 5xx / 超时 → `PlatformUnavailableException` 家族，命中 `retry-exceptions` → 交给 P1-2 重试熔断降级；401 → 刷一次令牌再试；其他 4xx → `SpApiClientException`（**不在可重试家族里**，避免重试打光配额）。分错这一刀，要么该重试的不重试，要么不该重试的狂重试 |
 | **契约测试（P1-4）** | `SpApiOrderClientContractTest` + `SpApiProbeControllerTest` + `SpApiRetryClassificationTest` | 用 WireMock 起在**随机端口**上做真实 HTTP（不是 Mockito），断言路径/查询参数/鉴权头与「状态码 → 异常类」映射；再用真实 `RetryConfig.getExceptionPredicate()` 锁死「429 子类命中重试配置」——避免 spapi 包与 yml 两处各自漂移 |
-| **契约桩容器（P1-4）** | `wiremock/mappings/*.json` + compose 的 `aslp_wiremock` | 桩以**文件**版本化（跟 `monitoring/` 同一思路：契约是要进代码评审的资产）；靠 `MarketplaceIds` 查询参数分流，于是「正常/限流/超时/5xx/4xx/空结果」共用同一个端点，端到端断言无需为每种故障重启容器 |
+| 契约桩容器（P1-4） | `wiremock/mappings/*.json` + compose 的 `aslp_wiremock` | 桩以**文件**版本化（跟 `monitoring/` 同一思路：契约是要进代码评审的资产）；靠 `MarketplaceIds` 查询参数分流，于是「正常/限流/超时/5xx/4xx/空结果」共用同一个端点，端到端断言无需为每种故障重启容器。**P1-9 又加了 8 个追踪桩**（DHL 妥投/异常态/查无此单/429/503/超时 + DPD 在途/查无此单），共 19 个 |
 | **诊断探针（P1-4）** | `POST /api/orders/spapi/probe` | **无副作用**：只跑客户端 + 映射器，不落库、不写指标、不经熔断器 → 可随时体检「外部契约是否还通」，且不会因为探针自身失败把熔断器推向打开 |
+| **尾程追踪（P1-9）** | `route-service` `TrackingService` + `DhlTrackingClient` / `DpdTrackingClient` + `TrackingStatusMapper` | **第三处真实外部契约**（前两处：SP-API、MinIO）。单号长度/前缀做**启发式**识别承运商，**判不出来就要求显式指定、绝不猜**（猜错会让客服在错误的承运商上反复核对单号）。两个承运商报文 → **归一化状态**（`ShipmentState`：CREATED / PICKED_UP / IN_TRANSIT / OUT_FOR_DELIVERY / DELIVERED / EXCEPTION / **UNKNOWN**）—— 归一化只做一次、做在服务端，前端不必为每家承运商各写一套判断；**没见过的状态码落到 UNKNOWN 而不是猜**，原始状态码始终随响应返回。映射顺序有讲究：异常先于妥投判定（`"Delivery attempt failed"` 里含 `deliver`），`pre-transit` 先于 `IN_TRANSIT`（前者含 `transit`）—— 这两条都是被测试逼出来的 |
+| **追踪失败语义（P1-9）** | `TrackingNotFoundException` / `TrackingUnavailableException` / `TrackingClientException` | 三类失败**必须分开**，因为调用方的动作不同：查无此单 → **404**（前端说"核对单号"，缓存不记它，因为包裹随时可能被揽收）；承运商不可用（5xx/429/超时）→ **503**（稍后重试；限流额外带 `retryAfterSeconds`，前端才能退避）；承运商拒绝（其他 4xx）→ **502**（可能是我们请求/凭据的问题，返回 400 会误导用户去改一个正确单号）。含**读超时**：JDK 默认读超时是"无限等待"，承运商僵死会拖住线程池，因此显式配 2s/5s |
+| **追踪缓存（P1-9）** | `TrackingService` 内有界 LRU + `aslp.tracking.cache-ttl` | 承运商接口有配额、包裹状态变化慢（分钟级）→ 同单号 60s 内复用；**只缓存成功结果**（"查无此单"是会过期的事实，缓存它会让用户持续看到错的结论）；命中时标记 `stale=true`（不谎称"刚问来的"）；`?refresh=true` 强制穿透。**有界**（LRU + `max-cache-entries`）：无界缓存就是内存泄漏。端到端用 WireMock **请求计数**证明"3 次查询只打上游 1 次"——缓存最容易变成一句空话 |
 | **JWT 签发** | `auth-service` `JwtTokenService` | JJWT 0.12.5 HS384，含 `roles` / `scope` 声明，TTL 可配 || **定时任务** | `OrderSyncTask`（5 分钟，容器启用）、`InventoryWarningTask`（60s）、`DatabaseBackupTask`（每日 02:00） | 订单流水线式自动导入；安全库存预警 + 补货邮件；`pg_dump` 参数化并可开关 |
 
 ---
@@ -336,16 +368,19 @@ smart-logistics-platform/
 | 订单定时同步 | `aslp.order.sync.enabled=false`（本地关闭） | `enabled=true`，cron `0 */5 * * * *` |
 | 数据库备份 | `aslp.backup.enabled=false` | `enabled=true`，host=`aslp_postgres` |
 | 邮件（P1-5） | `spring.mail.host=localhost:1025`（需 `docker compose up -d aslp_mailhog`）；`management.health.mail.enabled=false`（开发机没起 SMTP 时不该把自己判 DOWN） | host=`aslp-mailhog:1025`；**健康探测开启**（容器里真有 SMTP，发不出去必须能被看见）；收件人/阈值/发信间隔由 `aslp.inventory.warning.*` 控制（邮件节流 `mail-interval=30m`） |
+| 邮件节流窗口（P1-10） | Redis（`spring.data.redis.host=localhost`）里的 `inventory:warning:last-mail-at`，TTL = `mail-interval` | Redis = `aslp_redis`。**这条键是「多实例/重启后仍然节流」的证据**：`docker exec aslp_redis redis-cli ttl inventory:warning:last-mail-at` 应返回 0 < TTL ≤ 1800 |
 | 对象存储（P1-6） | `aslp.minio.*`：endpoint=`http://localhost:9000`（compose 映射），`region=us-east-1`，桶 `aslp-documents`，预签名 15m | endpoint=`http://aslp-minio:9000`（服务别名）+ **`public-endpoint=http://localhost:9000`**：预签名 URL 必须用对外端点签（签名覆盖 Host，用内网端点签出来的浏览器打不开）；`spring.datasource` 之外的依赖均就绪后 `order-service` 才启动（compose `depends_on: service_healthy`） |
 | 单据抬头（P1-6） | `aslp.document.*`：发货方名称/地址/税号、目的国、申报价值、HS 编码、币种 | 同左（演示值，非真实主体）。**改抬头/调申报价值不需要重新构建镜像** |
 | 邮件健康探测 | 见上行「邮件（P1-5）」 | docker profile 已恢复开启（`aslp_mailhog` 存在） |
 | 指标暴露与抓取（P1-1） | `management.endpoints.web.exposure.include` 含 `prometheus,metrics`；`management.metrics.tags.application=${spring.application.name}` | **docker profile 必须同时写**：profile 里的 `include` 会整体覆盖基础 profile，漏写就抓不到（已踩过）。Prometheus 抓取目标用连字符别名（下划线主机名会让 Tomcat 返回 400，见 §9 #30） |
+| 追踪（P1-9） | `aslp.tracking.*`：`mock-enabled=true`（默认，无凭据可演示）、DHL/DPD 真实端点、凭据经 `DHL_API_KEY`/`DPD_API_KEY` 注入、`cache-ttl=60s` | `mock-enabled=false` + 端点指向 `http://aslp-wiremock:8080`（fake 凭据）+ **`read-timeout=1s`**（故意短于超时桩的 3s，用来证明超时真的生效）。本地没起 WireMock 时追踪不影响其他功能（默认走 Mock） |
 | 监控栈（P1-1） | `aslp_prometheus:9090`（保留 7 天）/ `aslp_grafana:3000`（匿名只读） | Grafana 管理密码经 `GF_SECURITY_ADMIN_PASSWORD` 注入（默认 `aslp-admin`，仅演示） |
 | 链路追踪（P1-3） | `management.tracing.sampling.probability=1.0`（全量采样）；`management.zipkin.tracing.endpoint=http://localhost:9411/api/v2/spans` | docker profile 必须把 endpoint 改指向 `http://aslp-zipkin:9411/api/v2/spans`：**下划线主机名会让 java.net.URI 解析不出 host**，WebFlux 网关上报时报 `Host is not specified`（见 §9 #35）。采样率 1.0 只适合演示，生产按流量调到 0.1 级别 |
 | 日志采集（P1-1b） | 无（业务代码不感知）；Promtail 侧 `-config.file` 与 `docker_sd_configs.host=unix:///var/run/docker.sock` | Loki 侧 `limits_config.ingestion_rate_mb` 演示环境放宽到 16MB/s（避免丢日志）。新增服务的日志会自动被采集（按容器名前缀 `aslp_` 过滤），无需改配置 |
 | 平台接入（P1-4） | `aslp.order.amazon.*`：真实端点 `sellingpartnerapi-eu.amazon.com` + `api.amazon.com/auth/o2/token`，凭据从环境变量注入（`AMAZON_LWA_CLIENT_ID` / `_CLIENT_SECRET` / `_REFRESH_TOKEN`，**不写进仓库**）；`read-timeout=5s`、`max-pages=5` | 同一套配置但 endpoint/token-url 指向 `http://aslp-wiremock:8080`（桩用的假凭据，非密钥）、`read-timeout=1s`（**故意短于超时桩的 3s 延迟**，用来证明读超时真的生效） |
 | 契约桩（P1-4） | 无（本地跑单测时用进程内 WireMock，不需要容器） | `aslp_wiremock`（`:8099` 映射到容器 8080）；桩映射只读挂载 `./wiremock:/home/wiremock:ro`；`order-service` 经连字符别名 `aslp-wiremock` 寻址（下划线陷阱见 §9 #21/#30/#35） |
 | 仓库映射（P1-4） | `aslp.order.amazon.default-warehouse=Bruchsal` + `warehouse-by-city`（城市→履约仓，大小写无关） | 同左。**口径放在配置里而不是代码里**：开新仓不用改代码；未命中城市落到默认仓（不留空仓库，否则拣货任务无从下手） |
+| 报表数据源（P1-7） | `aslp.report.order-base-url=http://localhost:8081` / `inventory-base-url=http://localhost:8082`；`connect-timeout=2s` / `read-timeout=3s`；`low-stock-limit=20` | 同左但换成**连字符别名**（`http://aslp-order-service:8081` / `http://aslp-inventory-service:8082`，下划线主机名非法见 §9 #21/#30/#35）。超时必须显式给上限：看板是"随时会被点开"的接口，默认无限读超时会被一个卡住的上游占满线程。**该服务刻意不注册任何"下游探活"健康组件** —— 上游抖动应体现为响应里的 degraded，而不是把本容器判成 DOWN 让编排系统反复重启一个其实正常的服务 |
 
 > 生产部署前必须通过 `ASLP_JWT_SECRET` 注入强随机密钥，并替换 compose 中的 `POSTGRES_PASSWORD`。
 
@@ -354,8 +389,8 @@ smart-logistics-platform/
 ## 8. 验证清单（2026-09-17 实测）
 
 - [x] `mvn clean package -T 1C` — **BUILD SUCCESS**，6 个模块全部产出可执行 fat jar
-- [x] 单元测试 **178 个全部通过（0 跳过、0 失败）**：gateway 9 / order 78 / inventory 36 / route 49 / auth 5 / report 1
-- [x] `bash scripts/container-verify.sh`（先 `docker compose down -v` 冷启动）— **EXIT=0**：构建 6 个服务镜像 → 启动 → **18/18 容器就绪**（含 Prometheus / Grafana / Zipkin / Loki / Promtail / WireMock 桩 / MailHog / MinIO）→ 端到端断言 **96/96 通过**
+- [x] 单元测试 **256 个全部通过（0 跳过、0 失败）**：gateway 9 / order 89 / inventory 45 / route 94 / auth 5 / report 14
+- [x] `bash scripts/container-verify.sh`（先 `docker compose down -v` 冷启动）— **EXIT=0**：构建 6 个服务镜像 → 启动 → **18/18 容器就绪**（含 Prometheus / Grafana / Zipkin / Loki / Promtail / WireMock 桩 / MailHog / MinIO）→ 端到端断言 **124/124 通过** → **6/6 外部化状态验证**：6a 重启 order-service 后状态机仍为 FBA_RELABELED（DB）；6b 重启 inventory-service 后 `force=false` 仍 `mailSkipped=true` 且 Redis 里 TTL>0（Redis）
 - [x] **VRP 引擎（P1-2b）**：求解演示问题得 1 条路线 / 4 个停靠点 / 615.1 km；单作业往返 Bruchsal→Karlsruhe 精确等于 **38.6 km**（几何锁定，同时证明单位是 km 而非「度」）；运力不足返回 200 + `feasible:false` + 未指派作业列表；缺 `deliveries` 返回 400
 - [x] **指标可观测性（P1-1）**：`/actuator/prometheus` 输出约 200KB 指标（含 `application` 标签与业务指标）；Prometheus **7/7 抓取目标 healthy**（6 业务服务 + 自身）；`aslp_vrp_distance_count` 等业务指标可从 TSDB 查到；Grafana `database ok` 且看板 `aslp-overview` 已自动加载；P95 经 `histogram_quantile` 实测可得（如 route-service 0.063s）
 - [x] **链路追踪（P1-3）**：6 个服务均上报 span（含 WebFlux 网关）；**跨服务同一 traceId 实测 23 条**（同一条 trace 里同时含 gateway 与 order-service 的 span）；业务 span `aslp.vrp.solve` 带 `stopCount` / `totalDistanceKm` 等业务标签；日志已带 `[traceId-spanId]`（MDC 生效）；且**未出现指标重复计时**（一次拉取 → `aslp_order_pull_seconds_count` = 1）
@@ -364,6 +399,7 @@ smart-logistics-platform/
 - [x] **邮件真实化（P1-5）**：`POST /api/inventory/warnings/trigger` 实测 `mailSent=true`（阈值 10）；MailHog 收件箱收到邮件，**解码后**主题=`[库存补货建议] AMZ-9999@Mönchengladbach 剩余 5（阈值 10）`，HTML 正文 5591 字符（含 `<table>` 行内样式表格）、建议补货量 15 与 SKU/仓库均正确；邮件为 `multipart/alternative`（纯文本兜底 + HTML）；`force=false` 再触发返回 `mailSkipped=true`（**邮件节流在容器里真的生效**）；`/actuator/health` 的 `mail` 组件为 UP
 - [x] **单据对象存储（P1-6）**：`POST .../documents/shipping-label` 返回对象键 `orders/AMZ-1001/shipping-label-<UTC>.pdf` + 64 位 sha256；**下载得到 3771 字节的合法 PDF**（落盘于 `target/smoke-logs/p1-6-label-e2e.pdf` 可人工打开）；报关单走不同对象键；列举可见多个版本（重打留痕）；**预签名 URL 用对外端点签，宿主直接下载成功**；白名单外的类型返回 400；`/actuator/health` 的 `minio` 组件 UP 且 details 带桶名与失败原因
 - [x] Flyway 迁移：`flyway_schema_history_order` / `flyway_schema_history_inventory` + `orders` / `inventory` 四表均由迁移脚本创建，`ddl-auto=validate` 校验通过
+- [x] **尾程追踪（P1-9）**：容器内 `GET /api/routes/tracking/00340434161094000000`（20 位 → 自动识别 DHL）实测 `state=DELIVERED` + 保留原始码 `carrierStatus=delivered`；14 位单号自动识别为 DPD 且 `state=IN_TRANSIT`；异常态桩正确归一化为 `EXCEPTION`（**异常优先于妥投判定**）；**同一单号 3 次查询只打上游 1 次**（WireMock 按单号精确计数），`refresh=true` 后计数变 2；查无此单 404、429 → 503 + `retryAfterSeconds=7`、5xx → 503、**读超时（桩 3s > 容器 1s）→ 503 且未等满**、无法识别单号 400、非法 carrier 400
 - [x] 订单幂等导入：重复 `POST /api/orders/pull` 只更新不新增
 - [x] 状态机按订单号隔离：A 订单推进不影响 B 订单
 - [x] 匿名访问 `/bff/orders/search` 返回 401、携带 JWT 返回 200（docker profile 鉴权生效）
@@ -371,7 +407,7 @@ smart-logistics-platform/
 
 ---
 
-## 9. 已修复的阻塞性问题（累计 47 项）
+## 9. 已修复的阻塞性问题（累计 56 项）
 
 | # | 问题 | 根因 | 修复 |
 |---|---|---|---|
@@ -422,29 +458,43 @@ smart-logistics-platform/
 | 45 | **MinIO 报 `InvalidAccessKeyId`**：`The Access Key Id you provided does not exist in our records.`（服务端凭据明明正确，用 `mc` 验证过） | **把 shell 风格的默认值写法当成了 Spring 的**：写的是 `${MINIO_ROOT_USER:-aslp-minio-admin}`，而 Spring 占位符的默认值分隔符是**单个冒号**（`${VAR:default}`）—— 于是默认值被解析成 **`-aslp-minio-admin`（带前导减号）**。`mc` 能用、SDK 不能用，就是这一个字符的差别 | 改为 `${MINIO_ROOT_USER:aslp-minio-admin}`，并在两个 profile 里加了注释；排查手法值得沉淀：**先判断「服务端凭据对不对」（`mc`/控制台）再看「客户端送了什么」** |
 | 46 | **上传成功却返回 503**：`预签名 URL 生成失败：Failed to connect to localhost/[0:0:0:0:0:0:0:1]:9000`（日志里明明已经打印「已生成 shipping-label」） | 预签名客户端用的是**对外端点**（`http://localhost:9000`，容器内不可达）；而 SDK 在签名前如果不知道区域，会先发 `GET /{bucket}?location=` 去问服务端 —— 这次查询打到了不可达的对外端点，于是「上传成功」也被预签名失败变成 503 | `MinioProperties.region`（默认 `us-east-1`）+ `MinioClient.builder().region(...)`：显式区域使 SDK 跳过这次查询；顺带把失败原因写进健康详情（`detail` 字段），下次一眼就能定位 |
 | 47 | **邮件断言全部假失败**（邮件明明收到了，`total:1`） | 两层编码叠加：①邮件主题/正文是 **quoted-printable** 编码的（中文变 `=E5=BA=93…`），连短 ASCII 也会被 QP 折行拆开（`AMZ-9999` → `AM…` + `Z-9999`）；②MailHog 是 Go 写的，`encoding/json` 默认把 `<` `>` `&` 转义成 `\u003c` 等，所以连 grep `<table` 都不中 | 断言改为**先解码再看**：用标准库 `email` 解析 `Raw.Data`，打印解码后的主题与 HTML 正文，再对其断言（python3 不可用时优雅跳过）；同时记住：`multipart/alternative` 这类 ASCII 且无特殊字符的串才能直接 grep |
-
+| 48 | **报表单测编译失败**：`thenReturn(List.of(new Object[]{...}))` 报「找不到合适的方法」（P1-7 新增） | `List.of(T...)` 的变参推断把 `Object[]{a,b}` 当成**变参展开**，于是推断出 `List<Object>` 而不是 `List<Object[]>`，与 mock 的返回类型 `List<Object[]>` 不符 | 显式写类型见证 `List.<Object[]>of(...)`。类型推断失败时的第一反应应该是"我有没有把意图写清楚"，而不是怀疑编译器 |
+| 49 | **自己新写的断言第一次跑就假失败**（P1-7）：`expected: <2> but was: <1>` | 测试数据与断言在同一屏内仍然对不上：`byStatus` 里 `CREATED=1` / `PAID=2`，断言却写了 `get("CREATED") == 2` | 两个键都断言上（1 和 2）。**"只断言一个键"很容易掩盖分布整体错误**，写分布类断言时应覆盖每个键 || 50 | **状态机状态只在内存里**（P1-8）：`DEMO-001` 推进到 `FBA_RELABELED` 后重启 order-service → 状态回到 `CREATED`；多实例部署时各实例看到的还不一样 | 缺陷 #16 只修了“实例被跨订单共享”，但隔离后的实例仍全在进程内的 `ConcurrentHashMap` 里 —— **“隔离”不等于“持久化”** | DB 成为唯一真相源：`order_state`（当前状态 + `@Version` 乐观锁）+ `order_state_event`（只追加事件轨迹），每个请求读库→判定→同事务写回+记事件；进程内不再保存状态。新增 `GET /{orderId}/history` 审计接口，并在 `container-verify.sh` 加 **6/6 重启验证**（重启后仍为 FBA_RELABELED，内存实现必失败） |
+| 51 | **重置一个“从未推进过”的订单会返回 500**（P1-8 代码评审时发现，尚未进入端到端即修掉） | 用 `stateRepository.deleteById(id)` 实现 reset，而 **Spring Data JPA 3.x 的 `deleteById` 在目标不存在时抛 `EmptyResultDataAccessException`**（早期版本是静默忽略 —— 这是个容易按旧印象写错的 API 行为） | 改为 `findById(id).ifPresent(stateRepository::delete)`，并补 `resetOnUntouchedOrderIsIdempotent` 测试。运维/夹具复位类接口**必须幂等**：重复调用是正常使用方式，不是错误 |
+| 52 | **`pre-transit` 被归一化成 `IN_TRANSIT`**（P1-9）："承运商还没收到包裹"显示成"运输途中"，客户会以为包裹已经在路上 | `fromDhl("pre-transit", ...)` 的匹配串含 "transit"（pre-**transit**），而 CREATED 关键词的判定排在 IN_TRANSIT **之后** | 把 CREATED 判定提到 IN_TRANSIT 之前；同类陷阱还有 `Delivery attempt failed` 含 `deliver`（异常必须先于妥投判定）。两条都写进注释与测试 |
+| 53 | **缓存过期测试随机失败**（P1-9） | 用 `cache-ttl=1ms` 验证过期，而 `Instant.now()` 是微秒精度 —— 两次调用常落在同一毫秒内，过期判定“还没来得及”生效 | 改为 20ms TTL + sleep 50ms。**时间相关行为要让它真的过去一会儿**：1ms 这种“理论上够用”的值在真实时钟面前就是随机数 |
+| 54 | **新增依赖后既有 `@WebMvcTest` 切片 6 例全部 `APPLICATION FAILED TO START`**（P1-9） | 切片只装配 Web 层，Controller 新增的 `TrackingService` 依赖必须在测试里 `@MockBean`，否则上下文起不来。**编译期完全看不出**，只有跑测试才发现 | 补 `@MockBean TrackingService`。经验：给 Controller **加构造参数**时，顺手搜一下它的切片测试 |
+| 55 | **降级期间的「还要等多久」会骗人**（P1-10，测试逼出来的）：Redis 抖动降级到进程内节流后，`secondsUntilAllowed()` 仍返回 0——而实际上窗口还在拦 | 该方法只读 Redis 的 `remainTimeToLive()`；降级时 Redis 侧确实没有窗口，但**进程内窗口才是真正生效的那个** | 改为取两者较大值：**「实际生效的节流 = 两个窗口里更严的那个」**。诊断类接口在降级路径上尤其不能报乐观值 |
+| 56 | 自己新写的测试 `@DisplayName` 里嵌套了半角双引号 → 编译报 `需要')'`（P1-10） | Java 字符串中的半角引号必须转义；中文全角引号「」才能安全嵌套 | 统一改用「」。教训：**给 `@DisplayName` 写中文时，引号一律用全角** |
 ---
 
 ## 10. 当前限制与后续路线
 
 ### 限制
 - **注册中心缺失**：网关使用直连 URI（`lb://` 已移除）。引入 Eureka/Nacos 后应改回服务发现 + `lb://`。
-- **MinIO 未启用**：镜像源在部分网络环境不可达，`docker-compose.yml` 中默认注释。
 - **无日志保留策略**：Loki 单机文件系统存储，未设保留期与容量上限；生产应配 `retention_period` + 对象存储，并按合规要求定保留时长。
 - **追踪采样为全量**：`management.tracing.sampling.probability=1.0` 仅适合演示；生产需下调（如 0.1）并换成 Elasticsearch 存储（当前 Zipkin 用内存存储，重启即清）。
 - **观测端点未鉴权**：`/actuator/prometheus` 在 docker profile 下放行（网关与 auth-service 均放行），仅靠网络隔离。生产建议改用独立 management 端口 + 来源限制/双向 TLS。
 - **Grafana 为匿名只读演示态**：`GF_AUTH_ANONYMOUS_ENABLED=true`，admin 密码为默认值；生产必须关掉匿名并接入统一认证。
-- **无邮件服务器**：补货邮件走 `localhost:1025`，失败仅告警不阻塞（已关闭健康探测）。
+- ~~无邮件服务器~~ ✅ **已解决（P1-5）**：容器内 `aslp_mailhog` 提供真实 SMTP（`:1025`）与 Web 收件箱（`:8025`），邮件为 Thymeleaf 模板渲染的 multipart/alternative。剩余限制见下文"邮件仅到收得下"。
+- **报表看板是只读聚合，不是数据仓库**：`report-service` 的每个指标都由上游实时计算（不落库、不缓存），因此看板口径 = 上游口径。数据量长大后需要预聚合/物化视图，否则每次打开看板都会打一轮全表 `group by`；当前订单量下（百级）尚可。
+- **报表看板只覆盖订单与库存**：VRP 里程、运费结算等 M3 指标尚未接入看板（route-service 的可观测数据目前只到 Prometheus，看板要图表化需再补一个上游契约）。
+- **状态机事件表无归档策略**：`order_state_event` 只追加（这是审计表该有的性质），但没有保留期与归档；长期运行需要按合规要求定保留时长并定期导出。
+- **并发推进同一订单时返回 500 而非 409**：`order_state` 的 `@Version` 乐观锁会抛 `ObjectOptimisticLockingFailureException`，当前没有把它映射成 `409 Conflict`。语义上「你的操作基于过期状态」正是 409，属小改动但未做（前端目前只能拿到 500 并重试）。
+- **状态机与履约流水线是两套状态**：`OrderRecord.status`（平台拉取/客服修正驱动，自由字符串）与 `order_state.current_state`（换标工单，枚举 + 状态机）没有打通 —— 演示用的 `DEMO-001` 在 `orders` 表里并不存在。真实系统需要定义两者的边界（例如"订单发货"事件同时推进两边），当前刻意不合并以免演示数据污染真实订单。
 - **安全演示态**：`auth-service` 未接入用户表，按用户名推导角色；JWT 为对称密钥，网关侧 JWKS 端点为占位。
 - **未接入真实平台**：Amazon SP-API 客户端已是**真实 HTTP 实现**（P1-4），但**未用生产卖家账号实战验过**（LWA 正式授权流程、SP-API 的签名/限流配额、真实报文字段都可能有出入）；eBay 仍无实现（只有 Mock）。
 - **商品明细是 N+1 调用**：SP-API 订单列表不含商品名，只能逐单查 `/orderItems`（当前串行，单页 50 单就是 50 次调用）。仅串行 + 单次拉取尚可，规模化前应改并行（有界并发）或改为按需懒加载；`aslp.order.amazon.fetch-item-titles=false` 可先关掉。
 - **探针无额外鉴权**：`POST /api/orders/spapi/probe` 只靠网关 JWT 保护，且能触发对外调用；生产应加管理员角色限制 + 频率限制（它毕竟是一个“可以打外部平台”的入口）。
 - **邮件仅到“收得下”**：MailHog 是**开发/演示用**收件箱（不转发、无 TLS、镜像仅 amd64，Apple Silicon 上走模拟）；生产需接真实 SMTP/邮件服务（如 SES/Postmark）并配 SPF/DKIM。收件人目前是**全局单值**配置（真实业务需按仓/品类路由到不同采购负责人）。
-- **预警邮件只能单实例节流**：节流窗口存在进程内（`AtomicReference`），多实例部署时会各自发信；要真限流需换成 Redis 计数。
+- **邮件只能单实例节流**：节流窗口在 Redis（`inventory:warning:last-mail-at`，`SET NX + TTL`），多实例安全；但 **Redis 不可用时会降级为进程内节流**（单实例仍严格 30 分钟一封，多实例会放宽到每实例一封）—— 这是刻意的取舍：邮件是运维告警通道，既不能因节流组件故障而轰炸，也不能静默失联。详见 `RedisMailThrottle` 类注释
 - **单据无中文/无条码**：PDF 用内置 Helvetica/Courier，只能出英文/德文（中文字形需内嵌 CJK 字体子集，会让镜像变大）；单号目前是等宽大字而不是真条码（需引入 ZXing 生成 Code128）。
 - **MinIO 为单节点演示形态**：无擦除码/多节点、无生命周期与保留策略、无 TLS，演示凭据写在 compose 里（生产须外置密钥 + 开启服务端加密）。
 - **单据不会自动清理**：每次重打都新增一个版本（为了留痕），当前没有保留期/归档策略，长期运行需要配对象生命周期或定期扫导。
 - **面单缺收货地址**：平台订单的收货地址未入库（`orders` 表只存了履约仓），因此面单打印的是「仓内作业联」+ 目的地国家；真实面单需补齐收货地址（或直接对接承运商取面单）。
+- **追踪未用生产凭据实战验证**：DHL 用公开文档里的 Unified Tracking 结构、DPD 按公开的 `parcelLifeCycle` 结构建模（DPD 正式接入走 Web API + OAuth），且**未用真实商户凭据联调过**；契约桩锁住的是「我们理解的契约」。真接入时以实际报文为准并同步更新 `dto/*` 与 `wiremock/mappings/*`（与 P1-4 对 SP-API 的处理同一口径）。
+- **追踪不落地、不推送**：只做「查一次返回一次」，没有把节点变更写入本地（因此无法做“包裹卡住 3 天”这类主动告警）。生产需要的是定时轮询或承运商 Webhook + 事件表（属 P2/P3 范围）。
+- **单号识别是启发式**：靠长度/前缀区分 DHL 与 DPD，行业惯例而非协议保证；已在 API 上保留显式 `carrier` 参数兜底，判不出来就 400（不猜）。
 - ~~DDL 非版本化~~ ✅ **已解决（P0-4）**：数据库结构由 Flyway 版本化管理（`db/migration/{order,inventory}`），`ddl-auto=validate`。
 
 ### 后续路线（详见 `todo.md`）
@@ -563,7 +613,8 @@ CJJ_JAVA_WORKSPACE/            <- git 仓库根（.git 在这里）
 | `.gitignore` | 项目级忽略：`target/`、IDE、`.DS_Store`、日志；**特别注明不能写 `*.sql`**（会吞掉 Flyway 迁移脚本） |
 | `.vscode/settings.json` | `java.autobuild.enabled=false` —— 避免 JDT 语言服务器与 Maven 抢占 `target/classes` |
 | `scripts/container-verify.sh` | P0-3 容器全量验证：构建镜像 → 启动 → 等 healthy → 跑断言 |
-| `scripts/smoke-test.sh` | 端到端冒烟（96 项断言）；`--external` 可直接打已运行的容器 |
+| `scripts/smoke-test.sh` | 端到端冒烟（124 项断言）；`--external` 可直接打已运行的容器 |
+| `DEMO.md` | **演示手册**：8 站动线 + 每站命令与台词 + 测试数据速查 + 追问对答 + 现场排障 |
 | `wiremock/mappings/*.json` | P1-4 平台契约桩（11 个）：LWA 换令牌 / 订单列表两页 / 商品明细（含一个 500）/ 限流 / 5xx / 超时 / 4xx / 空结果。靠 `MarketplaceIds` 查询参数分流 |
 | `services/inventory-service/src/main/resources/templates/email/replenishment.html` | P1-5 补货邮件模板（Thymeleaf）：行内样式 + 表格布局 |
 | `services/order-service/src/main/java/com/aslp/order/document/` | P1-6 单据层：`DocumentType`（白名单枚举）/ `PdfDocumentWriter`（OpenPDF 生成）/ `DocumentNotFoundException`·`DocumentStorageException`（404 vs 503 语义） |
@@ -596,7 +647,7 @@ CJJ_JAVA_WORKSPACE/            <- git 仓库根（.git 在这里）
 | `controller/OrderController.java` | 查询、多条件分页、统计、`/correct` 客服修正 |
 | `controller/OrderPullController.java` | `POST /pull` 触发拉取 |
 | `controller/OrderStateController.java` | 状态机触发与查询 |
-| `statemachine/` | `OrderStates` / `OrderEvents` / `SimpleOrderStateMachine`（纯 Java）/ `OrderStateMachineService`（按 `orderId` 隔离实例） |
+| `statemachine/` | `OrderStates` / `OrderEvents` / `SimpleOrderStateMachine`（纯转换规则，可用初始状态构造）/ `OrderStateMachineService`（读库→判定→同事务写回+记事件；`StateTransition` 返回 from/to/accepted）/ 实体 `OrderStateRecord` · `OrderStateEventRecord` + 仓储（P1-8 持久化） |
 | `strategy/` | `OrderPullStrategy` 接口 + `MockAmazonStrategy`（故障演练注入点）/ `AmazonSpApiStrategy`（P1-4 起为真实 HTTP 实现）+ `OrderDto` / `OrderPullResult` / `PlatformUnavailableException` / `PlatformFailureSwitch` |
 | `spapi/` | P1-4 协议层（防腐层）：`SpApiProperties`（配置）/ `LwaTokenClient`（换令牌 + 缓存）/ `SpApiOrderClient`（分页 + 异常分类）/ `SpApiOrderMapper`（→ M1 统一 DTO：城市按配置映射到履约仓，地址缺失打 `ADDRESS_INVALID`）/ `SpApiOrdersPage`・`SpApiOrderItemsPage`（报文）/ `SpApiHttp`（统一超时）/ `RateLimitedException`・`SpApiClientException`（可重试 vs 不可重试） |
 | `config/SpApiConfig.java` | 装配 SP-API 客户端（注入 Boot 的 `RestClient.Builder`，保留观测/链路透传）；bean 与 `mock-enabled` **无关** —— 探针无论走不走真实策略都能体检对外契约 |
@@ -635,10 +686,24 @@ CJJ_JAVA_WORKSPACE/            <- git 仓库根（.git 在这里）
 | `dto/OptimizeRequest.java` | 求解入参（record，字段用包装类型以区分“没传”与“传 0”） |
 | `dto/VrpPlan.java` | 求解出参：逐车路线、停靠顺序、里程(km)、载重、未指派作业（字段与 `mock-test-data.json` 的 `routeResults` 对齐） |
 | `service/VrpRouteService.java` | jsprit 求解与结果翻译（固定随机种子保证可复现） |
-| `service/TrackingService.java` | DHL/DPD 轨迹拉取（硬编码 `RestTemplate` + 真实端点，暂未单测） |
-| `controller/RouteController.java` | `/health`、`POST /optimize`（接入真实引擎；入参错误 400） |
+| `service/TrackingService.java` | 承运商识别 + 有界 LRU 缓存 + Mock/真实客户端切换 + 缓存标记（P1-9：从骨架升级为真实实现） |
+| `controller/RouteController.java` | `/health`、`POST /optimize`（接入真实引擎；入参错误 400）、`GET /tracking/{number}`（404 / 503 / 502 / 400 的失败语义） |
 
-**`services/report-service/`（M1 报表，:8085）**：`controller/ReportController` —— ECharts 看板数据源
+**`services/report-service/`（M1/M5 报表，:8085）** —— 只读聚合方，不含业务规则：
+
+| 文件 | 职责 |
+|---|---|
+| `ReportServiceApplication.java` | 入口；**显式 `@EnableConfigurationProperties(ReportProperties.class)`**（漏写不报错，只在启动时炸，见 §9 #43） |
+| `config/ReportProperties.java` | `aslp.report.*`：两个下游 baseUrl + 显式超时 + 低库存展示上限 |
+| `client/OrderStatsClient.java` | 消费 `GET /api/orders/stats`（订单计数与三个分布） |
+| `client/InventoryWarningClient.java` | 消费 `GET /api/inventory/warnings/status`（阈值 + 低库存明细，与补货邮件同源口径） |
+| `client/ReportHttp.java` | 复用 Boot 自动装配的 `RestClient.Builder` 并装显式超时（保住 Observation/traceId 透传） |
+| `client/ReportSourceUnavailableException.java` | 把"哪个上游挂了 + 原因"包成一种异常，供聚合层统一降级 |
+| `dto/OrderStatsSnapshot.java` / `InventoryWarningSnapshot.java` | 上游契约的强类型镜像（`ignoreUnknown=true`，前向兼容）；各带 `unavailable()` 兜底快照 |
+| `dto/DashboardReport.java` | 对外聚合根：`degraded` + `unavailable[]` + `orders{}` / `inventory{}`（各含 `available`） + `ChartData{labels,values}` |
+| `service/ReportAggregationService.java` | 聚合 + **部分降级** + `Observation` 埋点（`aslp.report.dashboard`） |
+| `controller/ReportController.java` | `/health`、`/dashboard`（全量）、`/orders`、`/inventory`（单区块） |
+| `resources/static/dashboard.html` | ECharts 看板页（同源托管、15s 自刷新、degraded 徽标、CDN 不可达时降级提示） |
 
 ### 13.4 配置怎么读（最容易踩坑的地方）
 
@@ -646,7 +711,7 @@ CJJ_JAVA_WORKSPACE/            <- git 仓库根（.git 在这里）
 |---|---|
 | `src/main/resources/application.yml` | 默认 profile：面向本机（`localhost` 数据库 / Redis） |
 | `src/main/resources/application-docker.yml` | `docker` profile：面向容器（服务名寻址、定时任务与备份开启） |
-| `src/main/resources/db/migration/<svc>/V<n>__<desc>.sql` | Flyway 迁移；order 读 `db/migration/order`，inventory 读 `db/migration/inventory`，两服务共用同一物理库但历史表独立 |
+| `src/main/resources/db/migration/<svc>/V<n>__<desc>.sql` | Flyway 迁移；order 读 `db/migration/order`（V1 订单表 + V2 状态机表），inventory 读 `db/migration/inventory`，两服务共用同一物理库但历史表独立 |
 
 三条血泪教训（均已登记到 §9）：只有 `SPRING_PROFILES_ACTIVE=docker` 才会加载 docker 覆盖；`redisson.singleServerConfig.*` 不会被 starter 绑定（要写 `spring.data.redis.*`）；容器主机名的下划线对 `java.net.URI` 非法（网关路由要用连字符别名）。
 
@@ -659,6 +724,8 @@ CJJ_JAVA_WORKSPACE/            <- git 仓库根（.git 在这里）
 | 端到端断言 | `scripts/smoke-test.sh` | 经网关 8080 打真实服务，覆盖路由、鉴权与业务链路；限流用并发突发断言（见 §9 #28），带 JSON body 的断言用 `grep -F`（见 §9 #29）；涉及监控的两项做**有界轮询**（见 §9 #33）；断言一律用 here-string 而非管道（见 §9 #32）；含空格的期望值不要对响应体去空白（见 §9 #39） |
 | **契约测试** | `order-service/src/test/java/com/aslp/order/spapi/*ContractTest.java` | 用 WireMock 起在**随机端口**上做真实 HTTP（平台是假的、客户端是真的）：`SpApiOrderClientContractTest` 覆盖 429/超时/5xx/4xx/401 刷新/令牌缓存/分页/空结果/明细失败；`SpApiRetryClassificationTest` 用真实 `RetryConfig` 锁死「异常分类 ↔ 重试配置」一致；`SpApiTestFixture` 是共享夹具（避免各测试各写一套装配） |
 | **邮件/P D F 测试** | `ReplenishmentMailServiceTest` / `PdfDocumentWriterTest` / `DocumentStorageServiceTest` | 邮件用**真实 Thymeleaf 引擎**渲染模板（拼错变量名就报错），并用 `writeTo()` 往返序列化后再断言 MIME（见 §9 #41）；PDF 断言文件头/尾 + 明文内容（压缩级别 0）；存储层 Mock MinioClient，只锁对象键/元数据/异常分类 |
+| **报表聚合测试（P1-7）** | `report-service` `ReportClientTest` / `ReportAggregationServiceTest` / `ReportControllerTest` | 客户端层用 **JDK 自带 `HttpServer`** 起真服务（验路径/反序列化/502 包装，Mockito 验不到“接线”）；聚合层用 Mockito 专攻**部分降级**语义；控制器层**真启动 Spring 上下文**（上游指向死端口）断言 `degraded=true` + 200，并验证静态页确实被打进 jar |
+| **持久化测试（P1-8）** | `order-service` `OrderStateMachineServiceTest`（`@DataJpaTest` + H2） | 状态机持久化**必须真写库**才算验证：`stateSurvivesServiceRestart` 新建一个 service 实例（= 进程内状态归零）读同一个库，断言仍是 `FBA_RELABELED` —— 旧的 `ConcurrentHashMap` 实现会在这里变红。另有「非法转换留痕」「读接口不产生写入」「轨迹顺序」等。H2 建表由实体生成，**关掉 Flyway**（迁移是 PG 方言） |
 
 ### 13.6 可观测性怎么读（P1-1 / P1-3）
 
@@ -782,8 +849,10 @@ curl -s http://localhost:8080/api/orders/AMZ-1001/documents -H "Authorization: B
 2. `readme.md` §2 / §4 —— 技术栈与接口速查
 3. `gateway/.../application-docker.yml` + `security/VpnSecurityConfig.java` —— 流量入口与鉴权
 4. `order-service/service/OrderPullService.java` —— 最能体现工程能力的主流程（策略 + 幂等 + 事务）
-5. `order-service/statemachine/SimpleOrderStateMachine.java` —— 纯 Java 状态机与按订单号隔离
+5. `order-service/statemachine/SimpleOrderStateMachine.java` → `OrderStateMachineService.java` —— 纯转换规则 与 “DB 为唯一真相源” 的持久化写法（重启不丢 + 事件审计）
 6. `inventory-service/service/InventoryLockService.java` —— 分布式锁 + 乐观锁双层防超卖
-7. `scripts/smoke-test.sh` —— 反向检验自己对上面各环节的理解
+7. `report-service/service/ReportAggregationService.java` —— 只读聚合方的“部分降级”取舍（与单据的 503 语义正好相反）
+8. `route-service/tracking/TrackingStatusMapper.java` + `TrackingClientContractTest.java` —— 两家承运商异构状态的归一化，以及“契约测试”到底在验什么
+9. `scripts/smoke-test.sh` —— 反向检验自己对上面各环节的理解
 
 ---

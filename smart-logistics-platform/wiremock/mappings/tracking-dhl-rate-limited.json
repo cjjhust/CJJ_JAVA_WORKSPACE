@@ -1,0 +1,23 @@
+{
+  "name": "tracking-dhl-rate-limited",
+  "priority": 10,
+  "request": {
+    "method": "GET",
+    "urlPath": "/track/shipments",
+    "queryParameters": {
+      "trackingNumber": {"equalTo": "00340434161094000429"}
+    }
+  },
+  "response": {
+    "status": 429,
+    "headers": {
+      "Content-Type": "application/json",
+      "Retry-After": "7"
+    },
+    "jsonBody": {
+      "status": 429,
+      "title": "Too Many Requests",
+      "detail": "Rate limit exceeded for this API key."
+    }
+  }
+}

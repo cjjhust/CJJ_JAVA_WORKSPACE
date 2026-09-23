@@ -5,6 +5,18 @@ spring:
   application:
     name: report-service
 
+# P1-7（M5 报表真实化）：容器内走连字符网络别名（下划线主机名非法，见 §9 #21/#30/#35）。
+# 注意这里刻意**不开启**任何"下游探活"健康组件：报表是只读聚合方，
+# 上游抖动应当体现在响应里的 degraded/unavailable（让看板显示"订单数据暂不可用"），
+# 而不是把本容器的 health 判成 DOWN —— 后者会让编排系统反复重启一个其实正常的服务。
+aslp:
+  report:
+    order-base-url: http://aslp-order-service:8081
+    inventory-base-url: http://aslp-inventory-service:8082
+    connect-timeout: 2s
+    read-timeout: 3s
+    low-stock-limit: 20
+
 management:
   # P1-3：链路追踪（容器内指向 aslp_zipkin）
   tracing:

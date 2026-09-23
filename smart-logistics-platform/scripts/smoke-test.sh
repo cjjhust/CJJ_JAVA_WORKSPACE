@@ -317,6 +317,12 @@ check_post "非法转换被拒绝（COMPLETED→PAY）" \
     "http://localhost:8080/api/orders/state/${STATE_ORDER}/trigger?event=PAY" '"success":false'
 check "状态查询            GET /api/orders/state/{id}" \
     "http://localhost:8080/api/orders/state/${STATE_ORDER}" '"currentState":"COMPLETED"'
+# P1-8：状态持久化后必须能回答"这个订单是怎么走到今天的"。
+# 轨迹里既要有走过的合法迁移，也要有被拒绝的那次尝试（审计的价值就在这里）。
+check "状态轨迹（审计）    GET .../state/{id}/history" \
+    "http://localhost:8080/api/orders/state/${STATE_ORDER}/history" '"event":"FBA_RETURN"'
+check "非法尝试留痕        GET .../state/{id}/history" \
+    "http://localhost:8080/api/orders/state/${STATE_ORDER}/history" '"accepted":false'
 
 echo "--- JWT 签发与鉴权拦截（M1 认证 / M4 网关 VPN 接入）---"
 if [ -n "${TOKEN}" ]; then
@@ -394,6 +400,25 @@ check_post_json_status "VRP 非法入参 400    POST /api/routes/optimize(缺 de
     "http://localhost:8080/api/routes/optimize" \
     '{"depot":{"id":"B","lat":49.1243,"lon":8.5987},"vehicles":[{"id":"V-01","capacity":10}]}' \
     "400"
+
+echo "--- M1/M5 报表看板（P1-7：真实聚合 order-service + inventory-service）---"
+# 这段断言的是"报表里的数字来自真实业务数据"，而不是"接口返回了 200"：
+#  - total=3 与前面 M1 段落的 /api/orders/stats 断言同源（真的读了订单库）；
+#  - lowStock 明细里出现 AMZ-9999@Mönchengladbach，与 P1-5 补货邮件里的 SKU 完全一致
+#    —— 说明「低库存口径」在邮件与看板之间没有分叉（报表不自己算一套）。
+check "看板聚合（未降级）  GET /api/reports/dashboard" \
+    "http://localhost:8080/api/reports/dashboard" '"degraded":false'
+check "看板订单数来自订单库 GET /api/reports/dashboard" \
+    "http://localhost:8080/api/reports/dashboard" '"total":3'
+check "看板仓库分布       GET /api/reports/dashboard" \
+    "http://localhost:8080/api/reports/dashboard" '"byWarehouse":{"Bruchsal":'
+check "看板低库存明细      GET /api/reports/dashboard" \
+    "http://localhost:8080/api/reports/dashboard" 'AMZ-9999@Mönchengladbach'
+check "看板库存阈值口径    GET /api/reports/orders" \
+    "http://localhost:8080/api/reports/orders" '"available":true'
+# 静态看板页由 report-service 同源托管（不经网关路由），直连端口验证资源真的打进了 jar
+check "看板页面已打包      GET :8085/dashboard.html" \
+    "http://localhost:8085/dashboard.html" 'ASLP 运营看板'
 
 echo "--- M5 可观测性（P1-1：Micrometer -> /actuator/prometheus -> Prometheus -> Grafana）---"
 # 1) 服务侧：Prometheus 抓取端点可用。这里直连 8081（不走网关），
@@ -693,6 +718,15 @@ else
     FAIL=$((FAIL + 1))
 fi
 
+# P1-9：追踪桩也是文件版本化的契约资产 —— 缺了它们，追踪的失败路径断言会全部变成 404
+if grep -qF -- '/track/shipments' <<< "${WIREMOCK_MAPPINGS}" \
+        && grep -qF -- '/tracking/v1/parcels/' <<< "${WIREMOCK_MAPPINGS}"; then
+    echo "  ✅ 追踪桩映射已加载（DHL /track/shipments + DPD /tracking/v1/parcels）"
+    PASS=$((PASS + 1))
+else
+    echo "  ❌ 追踪桩映射缺失（DHL/DPD 端点未注册）"
+    FAIL=$((FAIL + 1))
+fi
 # 2) 清空 WireMock 请求日志：之后的计数才是「这一次拉取」的真实开销
 curl -fsS -X DELETE "${WIREMOCK_ADMIN}/__admin/requests" >/dev/null 2>&1
 # 探针 POST 走网关 8080（同时验证网关路由与 JWT 放行）
@@ -735,6 +769,90 @@ check_body "400 → retryable=false（重试只会打光平台配额）" '"retry
 
 EMPTY_BODY="$(probe_failure AMZN-EMPTY)"
 check_body "空结果不是失败：区间内无新单时 ok=true 且 count=0" '"ok":true,"type":"ok","pages":1,"truncated":false,"count":0' "${EMPTY_BODY}"
+
+echo "--- M3 尾程追踪（P1-9：真实 DHL / DPD 客户端 + WireMock 契约桩）---"
+# 契约测试本身跑在单测里（进程内 WireMock，见 TrackingClientContractTest，15 例）；
+# 这里补的是**容器环境**的证据：route-service 容器里的真实 DHL/DPD 客户端
+# （单号识别 → HTTP 调用 → 报文解析 → 状态归一化 → 缓存）打向 aslp_wiremock 容器。
+#
+# 断言刻意分成三类：
+#   ① 成功路径：两家承运商、自动识别、状态归一化（含异常态）
+#   ② 缓存：同一个单号第二次必须标记 stale=true，且**上游只被调了一次**（用 WireMock 计数证明）
+#   ③ 失败语义：404 / 503（含限流与超时）/ 502 / 400 —— 前端要据此决定"改单号"还是"稍后重试"
+TRACKING_BASE="http://localhost:8080/api/routes/tracking"
+TRACKING_ADMIN="${WIREMOCK_ADMIN}"
+
+# 「HTTP 状态码 + 响应体片段」必须同时断言：只看状态码分不清是 503 限流还是 503 故障，
+# 而这两种情况的处置完全不同（退避 vs 看对方状态页）。
+# 注意不能用 curl -f：它会让非 2xx 的响应体消失，正好丢掉我们要断言的内容（readme §9 #46）。
+check_tracking() {
+    local label="$1" url="$2" expect_status="$3" expect_body="$4" code body
+    code="$(curl -s -o "${LOG_DIR}/tracking-body.json" -w '%{http_code}' --max-time 15 \
+        ${AUTH_ARGS[@]+"${AUTH_ARGS[@]}"} "${url}" 2>/dev/null)"
+    body="$(cat "${LOG_DIR}/tracking-body.json" 2>/dev/null)"
+    if [ "${code}" = "${expect_status}" ] && grep -qF -- "${expect_body}" <<< "${body}"; then
+        echo "  ✅ ${label}（HTTP ${code}）"
+        PASS=$((PASS + 1))
+    else
+        echo "  ❌ ${label}"
+        echo "     期望: HTTP ${expect_status} 且含 ${expect_body}"
+        echo "     实际: HTTP ${code}，body=${body:0:220}"
+        FAIL=$((FAIL + 1))
+    fi
+}
+
+# 清零请求日志：WireMock 的请求journal 是累加的，不清零会把上一次运行（或本脚本前半段）的调用也算进来
+curl -fsS --max-time 10 -X DELETE "${TRACKING_ADMIN}/__admin/requests" >/dev/null 2>&1
+
+# 按**单号**精确统计上游调用次数：缓存断言必须落到具体单号上，
+# 否则"其它单号（失败路径用的是同一个 urlPath）也会被算进来"，断言就变成玄学。
+tracking_calls() {
+    curl -fsS --max-time 10 -X POST "${TRACKING_ADMIN}/__admin/requests/count" \
+        -H 'Content-Type: application/json' \
+        -d "{\"method\":\"GET\",\"urlPath\":\"/track/shipments\",\"queryParameters\":{\"trackingNumber\":{\"equalTo\":\"$1\"}}}" \
+        2>/dev/null | sed -n 's/.*"count"[^0-9]*\([0-9]*\).*/\1/p'
+}
+
+expect_calls() {
+    local label="$1" expected="$2" actual="$3"
+    if [ "${actual}" = "${expected}" ]; then
+        echo "  ✅ ${label}（上游被调 ${actual} 次）"
+        PASS=$((PASS + 1))
+    else
+        echo "  ❌ ${label}：上游被调 ${actual:-?} 次（期望 ${expected}）"
+        FAIL=$((FAIL + 1))
+    fi
+}
+
+DHL_NUMBER="00340434161094000000"     # 20 位数字 → 按长度自动识别为 DHL
+DPD_NUMBER="01234567890123"           # 14 位数字 → 自动识别为 DPD
+
+check_tracking "单号自动识别 DHL（20 位）" "${TRACKING_BASE}/${DHL_NUMBER}" 200 '"carrier":"DHL"'
+check_tracking "DHL 妥投状态归一化" "${TRACKING_BASE}/${DHL_NUMBER}" 200 '"state":"DELIVERED"'
+check_tracking "保留承运商原始状态码（不丢信息）" "${TRACKING_BASE}/${DHL_NUMBER}" 200 '"carrierStatus":"delivered"'
+check_tracking "单号自动识别 DPD（14 位）" "${TRACKING_BASE}/${DPD_NUMBER}" 200 '"carrier":"DPD"'
+check_tracking "DPD 在途状态归一化" "${TRACKING_BASE}/${DPD_NUMBER}" 200 '"state":"IN_TRANSIT"'
+# 归一化最容易错的边界：异常文案里含 "deliver"（"Delivery attempt failed"），
+# 判定顺序写反就会把"投递失败"显示成"已送达" —— 最坏的一类错误，必须有端到端覆盖
+check_tracking "异常状态优先于妥投判定" "${TRACKING_BASE}/00340434161094000001" 200 '"state":"EXCEPTION"'
+
+# ② 缓存：上面 3 次查同一单号，只有第一次应该真的打了上游
+check_tracking "同一单号再次查询命中缓存（stale=true）" "${TRACKING_BASE}/${DHL_NUMBER}" 200 '"stale":true'
+expect_calls "缓存硬证据（3 次查询只打上游 1 次）" 1 "$(tracking_calls "${DHL_NUMBER}")"
+# refresh 是"绕过缓存"的显式通道（客服刚打完电话等强实时场景）→ 必须真的再打一次
+check_tracking "refresh=true 强制穿透缓存（stale=false）" "${TRACKING_BASE}/${DHL_NUMBER}?refresh=true" 200 '"stale":false'
+expect_calls "refresh 确实重新查了上游" 2 "$(tracking_calls "${DHL_NUMBER}")"
+
+# ③ 失败语义
+check_tracking "查无此单 → 404 TRACKING_NOT_FOUND" "${TRACKING_BASE}/00340434161094000002" 404 'TRACKING_NOT_FOUND'
+check_tracking "DPD 查无此单 → 404" "${TRACKING_BASE}/01234567890999" 404 'TRACKING_NOT_FOUND'
+check_tracking "429 限流 → 503 TRACKING_RATE_LIMITED" "${TRACKING_BASE}/00340434161094000429" 503 'TRACKING_RATE_LIMITED'
+check_tracking "429 带 Retry-After（前端才能退避）" "${TRACKING_BASE}/00340434161094000429" 503 '"retryAfterSeconds":7'
+check_tracking "5xx → 503 TRACKING_UNAVAILABLE" "${TRACKING_BASE}/00340434161094000503" 503 'TRACKING_UNAVAILABLE'
+# 读超时：容器里 read-timeout=1s 而桩延迟 3s —— 返回 503 说明是我们主动超时，而不是等对方返回
+check_tracking "读超时 → 503（显式超时生效，未等满桩的 3s）" "${TRACKING_BASE}/00340434161094000003" 503 'TRACKING_UNAVAILABLE'
+check_tracking "无法识别承运商 → 400（要求显式指定，不猜）" "${TRACKING_BASE}/ABC-123" 400 'error'
+check_tracking "非法 carrier 参数 → 400" "${TRACKING_BASE}/${DPD_NUMBER}?carrier=GLS" 400 '不支持的承运商'
 
 echo "--- M5 邮件真实化（P1-5：MailHog + Thymeleaf 模板）---"
 # P1-5 之前：SMTP 指向容器内的 localhost（必然失败），异常又被吞掉 ——
@@ -794,6 +912,20 @@ THROTTLED="$(curl -fsS --max-time 20 -X POST ${AUTH_ARGS[@]+"${AUTH_ARGS[@]}"} \
     'http://localhost:8080/api/inventory/warnings/trigger?force=false' 2>/dev/null)"
 check_body "邮件节流生效：force=false 时 mailSkipped=true（不会重复轰炸收件人）" \
     '"mailSkipped":true' "${THROTTLED}"
+# P1-10：节流窗口必须落在**共享存储**里。放在进程内（AtomicReference）时，
+# 「重启后仍在窗口内」与「多副本共用一个窗口」都不成立 —— 而这两点正是节流的意义。
+if docker exec aslp_redis redis-cli ping >/dev/null 2>&1; then
+    THROTTLE_TTL="$(docker exec aslp_redis redis-cli ttl inventory:warning:last-mail-at 2>/dev/null | tr -d '\r\n')"
+    if [ "${THROTTLE_TTL}" -gt 0 ] 2>/dev/null && [ "${THROTTLE_TTL}" -le 1800 ] 2>/dev/null; then
+        echo "  ✅ 节流窗口在 Redis 里（key=inventory:warning:last-mail-at，TTL=${THROTTLE_TTL}s ≤ 30min）"
+        PASS=$((PASS + 1))
+    else
+        echo "  ❌ 节流窗口未落在 Redis（TTL=${THROTTLE_TTL}，期望 0 < TTL ≤ 1800；-2=键不存在）"
+        FAIL=$((FAIL + 1))
+    fi
+else
+    echo "  ℹ️  aslp_redis 容器不可访问，跳过「节流窗口在 Redis」断言"
+fi
 
 echo "--- M5 单据对象存储（P1-6：MinIO + 面单/报关单 PDF）---"
 # 单据是对外凭证：既要生成得出来，也要能下载重打，还要能证明内容没被篡改（sha256）。

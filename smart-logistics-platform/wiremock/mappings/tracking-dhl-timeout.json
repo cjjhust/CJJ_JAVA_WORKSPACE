@@ -1,0 +1,19 @@
+{
+  "name": "tracking-dhl-timeout",
+  "priority": 10,
+  "request": {
+    "method": "GET",
+    "urlPath": "/track/shipments",
+    "queryParameters": {
+      "trackingNumber": {"equalTo": "00340434161094000003"}
+    }
+  },
+  "response": {
+    "status": 200,
+    "fixedDelayMilliseconds": 3000,
+    "headers": {"Content-Type": "application/json"},
+    "jsonBody": {
+      "shipments": []
+    }
+  }
+}

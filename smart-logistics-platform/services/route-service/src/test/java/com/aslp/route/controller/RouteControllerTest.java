@@ -2,6 +2,7 @@ package com.aslp.route.controller;
 
 import com.aslp.route.dto.VrpPlan;
 import com.aslp.route.engine.VrpProblemFactory;
+import com.aslp.route.service.TrackingService;
 import com.aslp.route.service.VrpRouteService;
 import com.graphhopper.jsprit.core.problem.VehicleRoutingProblem;
 import org.junit.jupiter.api.DisplayName;
@@ -48,6 +49,10 @@ class RouteControllerTest {
 
     @MockBean
     private VrpRouteService vrpRouteService;
+
+    /** P1-9：RouteController 新增了追踪端点，切片测试必须把它依赖的服务也 mock 掉（否则上下文起不来）。 */
+    @MockBean
+    private TrackingService trackingService;
 
     @Test
     @DisplayName("健康检查返回引擎信息（网关路由断言依赖 status 字段）")

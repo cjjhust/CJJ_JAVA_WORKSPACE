@@ -120,7 +120,34 @@ public class OrderPullController {
         body.put("shipped", repository.countByStatus("SHIPPED"));
         body.put("completed", repository.countByStatus("COMPLETED"));
         body.put("withErrorTag", repository.countByErrorTagNotNull());
+        // M5 报表看板（report-service）需要「分布」而不是「单个数字」：
+        // 状态分布画饼图、仓库分布画柱状图、异常标签分布回答「今天卡在哪一类问题上」。
+        body.put("byStatus", groupToMap(repository.countGroupByStatus()));
+        body.put("byWarehouse", groupToMap(repository.countGroupByWarehouseCode()));
+        body.put("byErrorTag", groupToMap(repository.countGroupByErrorTag()));
         return ResponseEntity.ok(body);
+    }
+
+    /**
+     * 把 [key, count] 形式的 group by 结果转成<b>有序</b> map。
+     *
+     * <p><b>为什么必须排序</b>：数据库的 {@code group by} <b>不保证行序</b>（Postgres 可能走 HashAggregate），
+     * 所以"上游返回什么顺序就用什么顺序"等于把不确定性透传给下游 ——
+     * 报表看板的图表颜色/顺序会随机跳变，端到端断言也会时通时断。
+     * 这里按键排序，把"同一份数据两次请求顺序一致"变成一个可依赖的性质。
+     *
+     * <p>用 {@link LinkedHashMap} 承载排序结果（而不是直接返回 TreeMap）：
+     * 下游只关心迭代顺序，返回 Map 更通用；键为 {@code null} 时统一记作 {@code UNKNOWN}，
+     * 避免 JSON 里出现 null 键（部分前端图表库会直接报错）。
+     */
+    private static Map<String, Long> groupToMap(java.util.List<Object[]> rows) {
+        Map<String, Long> sorted = new java.util.TreeMap<>();
+        for (Object[] row : rows) {
+            String key = row[0] == null ? "UNKNOWN" : String.valueOf(row[0]);
+            Long count = row[1] == null ? 0L : ((Number) row[1]).longValue();
+            sorted.put(key, count);
+        }
+        return new LinkedHashMap<>(sorted);
     }
 
     /** 单订单详情。 */
