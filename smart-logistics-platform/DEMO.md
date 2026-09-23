@@ -51,6 +51,15 @@ docker compose up -d aslp_postgres aslp_redis # 只起基础设施
 bash scripts/smoke-test.sh                    # 启 6 个服务 → 断言 → 自动清理
 ```
 
+**开演前最后一步：造数据**（否则 Grafana / Zipkin / ECharts 三个界面是空的）：
+
+```bash
+bash scripts/demo-traffic.sh   # 幂等，可重复跑；37 项断言
+# 拉单 / 限流 429 / 库存预占与拒超卖 / VRP 38.6km / DHL+DPD 四类失败 / 状态机 / 看板数据
+```
+
+跑完先自己看一眼：Grafana 11 面板都有曲线、Zipkin 能搜到 3 服务的 trace、ECharts 四个图都有数据。
+
 ---
 
 ## 2. 演示动线（8 站，每站 1-2 分钟）
@@ -253,8 +262,22 @@ curl -s -H "Authorization: Bearer $TOKEN" http://localhost:8080/api/orders/state
 |---|---|---|
 | ① | <http://localhost:3000/d/aslp-overview> | Grafana 看板 11 个面板：业务指标（订单拉取结局、VRP 里程、库存锁结果）+ 日志面板。**数据源与看板都是文件版本化的**，不靠手工点击 |
 | ② | <http://localhost:9090/targets> | Prometheus 6/6 抓取目标 healthy（**注意 targets 用的是连字符别名** `aslp-order-service`，下划线会让 Tomcat 直接回 400） |
-| ③ | <http://localhost:9411/zipkin/> | 点一条 trace：gateway → order-service 的跨服务调用链，同一个 traceId |
+| ③ | <http://localhost:9411/zipkin/> | 点一条 trace：**3 个服务的**跨服务调用链（截图即 gateway → report-service → order-service，9 spans / 117ms） |
 | ④ | <http://localhost:8085/dashboard.html> | **ECharts 业务看板**（订单分布 + 各仓分布 + 低库存带阈值线），15s 自刷新 |
+
+**这四个界面应该长这样**（截图就是本仓库真实跑出来的，不是设计稿；开演前对照一眼，不一样就先去排障）：
+
+**① Grafana · 11 个面板**（`readme.md` §0.1）
+
+<img src="docs/images/grafana-overview.png" width="760" alt="Grafana 11 面板总览">
+
+**② Zipkin · 跨服务调用链**（`readme.md` §0.2）
+
+<img src="docs/images/zipkin-trace.png" width="760" alt="Zipkin 调用链 waterfall">
+
+**③ ECharts · 业务看板**（`readme.md` §0.3）
+
+<img src="docs/images/echarts-dashboard.png" width="760" alt="ECharts 业务看板">
 
 抓一个跨服务 traceId 现场演示：
 

@@ -4,6 +4,7 @@
 
 > **中 / EN / DE 三语对照**（每节三语并列）
 > 开发全过程、56 项缺陷复盘、代码地图 → [`todo.md`](todo.md)｜现场演示脚本（15 分钟动线）→ [`DEMO.md`](DEMO.md)
+> 三个界面的**真实截图**见下方 §0（Grafana / Zipkin / ECharts）
 >
 > 版本 `1.0.0-SNAPSHOT` ｜ 6 个微服务 + 12 个基础设施容器 ｜ **256 个单元测试 / 124 项端到端断言全绿** ｜ 包根 `com.aslp.*`
 
@@ -12,8 +13,12 @@
 ## 0. 先看这三个界面 · Start here: three dashboards · Zuerst: drei Dashboards
 
 > 一句话说明三个界面各自证明什么：**指标**（系统健康与业务趋势）、**调用链**（跨服务是怎么串起来的）、**业务看板**（真实数据长什么样）。
+>
+> 截图均为**本机真实运行**时抓取（`bash scripts/demo-traffic.sh` 造数 → 打开页面），不是设计稿。
 
 ### 0.1 Grafana 运营看板 — <http://localhost:3000/d/aslp-overview>（11 个面板）
+
+<img src="docs/images/grafana-overview.png" width="820" alt="Grafana 11 面板：抓取目标存活 6×UP、HTTP 5xx 速率 0.000 req/s、熔断器、网关路由流量、HTTP P95 延迟、JVM 堆使用、订单拉取结局、VRP 求解 P95 与里程、库存锁操作、服务日志（Loki）、日志量">
 
 | | |
 |---|---|
@@ -23,13 +28,17 @@
 
 ### 0.2 Zipkin 调用链 — <http://localhost:9411>
 
+<img src="docs/images/zipkin-trace.png" width="920" alt="Zipkin 调用链：一次 GET /api/reports/orders 的瀑布图，Services 3 / Total Spans 9，自网关 → report-service → order-service，总耗时 117ms">
+
 | | |
 |---|---|
-| **中文** | 点开任意一条 trace，就能看到一次请求**跨服务**的完整路径与耗时（例如：网关 → 订单服务 → Amazon SP-API 桩）。所有 6 个服务都上报 span，业务埋点（如 `aslp.vrp.solve`、`aslp.tracking.lookup`）带业务属性；`traceId` 自动进日志，**从日志能一键跳到这条 trace**。 |
-| **English** | Open any trace to see the **cross-service** path and latency of a single request (e.g. gateway → order service → Amazon SP-API stub). All 6 services report spans; business spans (`aslp.vrp.solve`, `aslp.tracking.lookup`, …) carry business attributes. The `traceId` is written into every log line, so you can **jump from a log line straight to its trace**. |
-| **Deutsch** | Jeder Trace zeigt den **dienstübergreifenden** Pfad und die Latenz einer Anfrage (z. B. Gateway → Bestelldienst → Amazon-SP-API-Stub). Alle 6 Dienste melden Spans; Business-Spans (`aslp.vrp.solve`, `aslp.tracking.lookup`, …) tragen Fachattribute. Die `traceId` steht in jeder Logzeile – **vom Log direkt zum Trace**. |
+| **中文** | 点开任意一条 trace，就能看到一次请求**跨服务**的完整路径与耗时（截图即：网关 → 报表服务 → 订单服务，9 个 span / 117 ms）。所有 6 个服务都上报 span，业务埋点（如 `aslp.order.pull`、`aslp.vrp.solve`、`aslp.tracking.lookup`）带业务属性；`traceId` 自动进日志，**从日志能一键跳到这条 trace**。 |
+| **English** | Open any trace to see the **cross-service** path and latency of a single request (as in the screenshot: gateway → report service → order service, 9 spans / 117 ms). All 6 services report spans; business spans (`aslp.order.pull`, `aslp.vrp.solve`, `aslp.tracking.lookup`, …) carry business attributes. The `traceId` is written into every log line, so you can **jump from a log line straight to its trace**. |
+| **Deutsch** | Jeder Trace zeigt den **dienstübergreifenden** Pfad und die Latenz einer Anfrage (im Screenshot: Gateway → Report-Dienst → Bestelldienst, 9 Spans / 117 ms). Alle 6 Dienste melden Spans; Business-Spans (`aslp.order.pull`, `aslp.vrp.solve`, `aslp.tracking.lookup`, …) tragen Fachattribute. Die `traceId` steht in jeder Logzeile – **vom Log direkt zum Trace**. |
 
 ### 0.3 ECharts 业务看板 — <http://localhost:8085/dashboard.html>（15 秒自刷新）
+
+<img src="docs/images/echarts-dashboard.png" width="920" alt="ECharts 业务看板：KPI 卡片（订单总数/待发货/已发货/已完成/异常待处理/低库存）、订单状态分布饼图、各履约仓订单量柱状图、低库存 SKU 柱状图（含阈值）、异常订单打标表">
 
 | | |
 |---|---|
@@ -123,6 +132,12 @@ bash scripts/container-verify.sh             # → 18/18 containers, 124/124 ass
 本地开发（不起全部容器）｜ Local development ｜ Lokale Entwicklung：
 
 ```bash
+# 3) 造演示数据（让上面三个界面都有内容）| seed demo data | Demo-Daten erzeugen
+bash scripts/demo-traffic.sh                 # → 37 项断言：拉单/限流/库存/VRP/追踪/状态机/看板
+                                             #    幂等可重复执行；跑完再打开 Grafana / Zipkin / ECharts
+```
+
+```bash
 docker compose up -d aslp_postgres aslp_redis   # 仅基础设施 / infrastructure only
 bash scripts/smoke-test.sh                      # 启 6 个服务 → 断言 → 自动清理
 ```
@@ -174,6 +189,7 @@ bash scripts/smoke-test.sh                      # 启 6 个服务 → 断言 →
 | **数据库未拆**：所有服务共用一个 PostgreSQL 实例（各自独立 Flyway 历史表），更接近"分布式单体"；拆库需要先有服务注册/配置中心（见 P2 路线图）。 | **Database not split**: all services share one PostgreSQL instance (separate Flyway histories), which is closer to a "distributed monolith"; splitting requires service discovery / config management first (see P2 roadmap). | **Datenbank nicht getrennt**: alle Dienste teilen eine PostgreSQL-Instanz (getrennte Flyway-Historien) – eher ein „verteilter Monolith"; eine Trennung setzt Service Discovery/Config Management voraus (siehe P2-Roadmap). |
 | **生产化缺口**：观测端点未鉴权、Grafana 匿名只读、JWT 为对称密钥（RS256 + JWKS 在 P2）、无 CI/CD 与质量门禁、追踪未落地为事件表（因此做不了"包裹卡住 3 天"的主动告警）。 | **Production gaps**: actuator endpoints unauthenticated, Grafana anonymous read-only, symmetric JWT secret (RS256 + JWKS is P2), no CI/CD quality gates, tracking not persisted as an event table (so no proactive "parcel stuck for 3 days" alerts). | **Produktionslücken**: Actuator-Endpunkte ohne Authentifizierung, Grafana anonym lesbar, symmetrisches JWT-Secret (RS256 + JWKS in P2), keine CI/CD-Qualitätsgates, Tracking nicht als Ereignistabelle persistiert (daher keine proaktiven „Sendung hängt seit 3 Tagen"-Alarme). |
 | **外部契约未用生产凭据实战验证**：SP-API 与 DHL/DPD 均按公开文档建模并用契约桩锁定，真接入需凭据联调。 | **External contracts not verified with production credentials**: SP-API and DHL/DPD are modelled from public documentation and locked by contract stubs; real onboarding needs credential-based integration testing. | **Externe Verträge nicht mit Produktivzugangsdaten verifiziert**: SP-API und DHL/DPD sind nach öffentlicher Dokumentation modelliert und durch Contract-Stubs abgesichert; der Produktivbetrieb erfordert eine Integrationsabnahme mit echten Zugangsdaten. |
+| **人工修正会被平台同步覆盖**：`POST /api/orders/{id}/correct` 的本地修正，会在下一次平台同步（每 5 分钟）按平台侧数据覆盖回去——平台是权威源，本地修正只是临时视图；要让人工干预**持久生效**，需引入覆盖标记/优先级字段（已列 roadmap）。 | **Manual corrections are overwritten by platform sync**: a local `POST /api/orders/{id}/correct` is reverted by the next platform sync (every 5 minutes), because the platform stays the source of authority and the local correction is only a temporary view; making manual intervention **stick** needs an override flag / priority field (on the roadmap). | **Manuelle Korrekturen werden vom Plattform-Abgleich überschrieben**: eine lokale Korrektur (`POST /api/orders/{id}/correct`) wird beim nächsten Abgleich (alle 5 Minuten) zurückgesetzt, da die Plattform die autoritative Quelle bleibt; dauerhafte Eingriffe erfordern ein Override-Flag bzw. Prioritätsfeld (Roadmap). |
 
 > 完整限制清单（含逐条处置建议）见 [`todo.md`](todo.md) 顶部附录的 §10。
 
@@ -186,3 +202,5 @@ bash scripts/smoke-test.sh                      # 启 6 个服务 → 断言 →
 | `readme.md`（本文件） | **这个项目做了什么、解决了什么问题**（中 / EN / DE 三语）｜ What was built and which problems it solves |
 | [`DEMO.md`](DEMO.md) | **15 分钟现场演示脚本**：8 站动线、每站命令与台词、测试数据速查、10 条追问对答、现场排障 | Live demo script: 8 stops with commands and talking points, test data, 10 Q&A, troubleshooting |
 | [`todo.md`](todo.md) | **开发全过程复盘**：各轮次日志（P1-1 … P1-10）、56 项缺陷表、接口速查、配置对照、代码地图、故障速查 | Full development journal: round-by-round logs, 56 documented defects, API cheatsheet, config matrix, code map |
+| [`docs/images/`](docs/images) | **三个界面的真实截图**（Grafana / Zipkin / ECharts，本机运行抓取）｜ Real screenshots of the three dashboards |
+| [`scripts/demo-traffic.sh`](scripts/demo-traffic.sh) | **一键造演示数据**（幂等，37 项断言）｜ One-command demo data seeding |
