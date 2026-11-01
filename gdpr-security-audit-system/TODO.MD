@@ -1,3 +1,23 @@
+## 项目收工说明：如何正确读"仍有不足 / 不能作为"（2026-11-01，覆盖下方旧快照）
+
+- **状态：本项目收工并封存。**readme、task_breakdown、TODO 三份文档与代码、CI 状态一致；`mvn -B -Dapi.version=1.44 verify` 全绿（65 项），GitHub Actions 连续两次远端运行通过。
+
+- **三条"不能作为"是同一件事，即本项目没有生产运行环境。**生产环境由预算与组织授权决定，不是靠继续写代码获得；用零预算本地项目去补它只会造出不可信的声明。因此这三条应读作"未验证项"，而不是"实现缺陷项"：任何尚未上线的系统都处于同样状态。
+
+- **判断本项目水平的标准应取"能否接住追问"，而不是"是否上过生产"。**可追问且已有答案的设计点至少有五处：审计与业务同事务的 fail-closed 边界、Outbox 必须同事务入队的原因、`FOR UPDATE SKIP LOCKED` 加租约相对 `select → update` 的优势、initdb 阶段写 `GRANT` 会静默失效的原因、副本校验为何必须全量重放而不是只看末行。规模小是"战役规模"问题，不是"战术水平"问题，二者在简历上分别陈述。
+
+- **本项目所属的真实细分领域是"不可变审计 / 可验证篡改的日志"（tamper-evident logging、append-only ledger、WORM、audit trail）。**其驱动力来自法规而非技术趣味：GoBD（税务留痕）、KassenSichV（TSE）、eIDAS 时间戳、SEC 17a-4、HIPAA audit controls、PCI DSS 10.x、DSGVO Art. 30。对应岗位分布在 Compliance/RegTech、审计软件（DATEV、SAP Audit、AuditBoard 类）、金融风控、医疗器械信息系统、车规 OTA 日志、云厂商不可变备份（S3 Object Lock、Azure Immutable Blob）。本项目实现的哈希链、追加写与最小权限、独立锚点与启动校验，分别是该领域三件核心问题的软件层解法；商用 WORM 用存储层解决同一问题。
+
+- **"技术演示与本地实验平台"的价值与天花板。**价值一：可在面试现场 5 分钟内复现三件事——停掉 ES 后 1,000 条积压自动追平、以 `SET ROLE audit_app` 演示审计行改删被拒、篡改一行哈希后链校验报错，即"可验证的自我声明"。价值二：是低成本容错沙盘（改租约时长、关掉 fail-closed、注入故障），这些操作在真实生产环境不可随意尝试。天花板：价值在自证与学习，不在用户价值，因此后续应转向不同业务域的项目，而不是继续加厚本项目。
+
+- **若要把"不能"变成"可以"，补齐路径按性价比排序（均未做）：**
+  1. 部署到一台 VPS + Caddy 提供 TLS + S3 Object Lock 作为外部锚点（约半天），可同时消掉"无真实主机""无 TLS""无合规级 WORM"三项；
+  2. 用 k6 或 Gatling 做一轮压测，产出 P95 与 QPS 数字（约 2 小时），消掉"无压测"；
+  3. 补一个轻量前端或演示脚本（约 2 小时），消掉"无产品化前端"。
+  以上三项的求职边际收益低于再造一个不同业务域的项目，故默认不做，仅作为可选路线记录。
+
+- 本次追加前备份：`/tmp/TODO.MD.before-closeout-note-20261101`。
+
 ## CI 流水线与项目定位评估（2026-11-01，覆盖下方旧快照）
 
 - **新增 CI：**仓库根目录 `.github/workflows/gdpr-audit-ci.yml`（本仓库是多项目仓库，故用 `working-directory: gdpr-security-audit-system`）。`verify` 作业跑与本地一致的 `mvn -B -ntp verify`（单测 + 4 套 Testcontainers + JaCoCo 门槛），失败也上传 surefire/failsafe/JaCoCo 报告并输出失败用例注解；`image` 作业用 `.env.example` 校验默认与 `resilience` 两套 compose 配置并执行 `docker build`；按 `paths` 过滤，仅本项目变更时触发。
