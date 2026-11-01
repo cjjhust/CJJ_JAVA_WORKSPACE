@@ -56,7 +56,35 @@ jobs:
       # GitHub 的 ubuntu-latest runner 自带可用的 Docker，Testcontainers 会直接拉起
       # PostgreSQL 16 与 Elasticsearch 8.12 容器；SchemaPrivilegeIT 按
       # initdb → V1__init.sql → V2__grant_audit_app.sql 的顺序验证权限链路。
+      #
+      # 临时诊断：每个套件单独一步，便于从步骤结论定位失败点。
+      - name: DIAG · unit tests
+        if: always()
+        continue-on-error: true
+        run: mvn -B -ntp test
+
+      - name: DIAG · SchemaPrivilegeIT
+        if: always()
+        continue-on-error: true
+        run: mvn -B -ntp -Dit.test=SchemaPrivilegeIT -DfailIfNoTests=false verify
+
+      - name: DIAG · AuditLogRepositoryIT
+        if: always()
+        continue-on-error: true
+        run: mvn -B -ntp -Dit.test=AuditLogRepositoryIT -DfailIfNoTests=false verify
+
+      - name: DIAG · PostgresBackupRestoreIT
+        if: always()
+        continue-on-error: true
+        run: mvn -B -ntp -Dit.test=PostgresBackupRestoreIT -DfailIfNoTests=false verify
+
+      - name: DIAG · ElasticsearchAuditIT
+        if: always()
+        continue-on-error: true
+        run: mvn -B -ntp -Dit.test=ElasticsearchAuditIT -DfailIfNoTests=false verify
+
       - name: Build and run all tests
+        if: always()
         run: mvn -B -ntp verify
 
       - name: Upload test reports
