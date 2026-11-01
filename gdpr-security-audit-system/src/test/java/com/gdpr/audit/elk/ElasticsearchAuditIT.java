@@ -46,7 +46,7 @@ class ElasticsearchAuditIT {
             .withEnv("cluster.routing.allocation.disk.threshold_enabled", "false")
             .withEnv("ES_JAVA_OPTS", "-Xms512m -Xmx512m")
             .withExposedPorts(9200)
-            .waitingFor(Wait.forHttp("/").forStatusCode(200).withStartupTimeout(Duration.ofMinutes(2)));
+            .waitingFor(Wait.forHttp("/").forStatusCode(200).withStartupTimeout(Duration.ofMinutes(3)));
 
     @Test
     void indexesAuditsWithExpectedMappingsAndSearchableFields() throws Exception {

@@ -46,6 +46,13 @@ jobs:
           docker version --format '{{.Server.Version}}'
           docker compose version
 
+      # Elasticsearch 容器要求 vm.max_map_count >= 262144，GitHub 托管 runner
+      # 默认只有 65530，不调会让 ES 容器在 bootstrap check 阶段直接退出。
+      - name: Tune kernel for Elasticsearch
+        run: |
+          sudo sysctl -w vm.max_map_count=262144
+          sysctl vm.max_map_count
+
       # GitHub 的 ubuntu-latest runner 自带可用的 Docker，Testcontainers 会直接拉起
       # PostgreSQL 16 与 Elasticsearch 8.12 容器；SchemaPrivilegeIT 按
       # initdb → V1__init.sql → V2__grant_audit_app.sql 的顺序验证权限链路。
