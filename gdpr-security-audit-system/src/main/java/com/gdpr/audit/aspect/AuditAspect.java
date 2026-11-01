@@ -5,8 +5,7 @@ import com.gdpr.audit.annotation.Auditable;
 import com.gdpr.audit.dto.UserDTO;
 import com.gdpr.audit.entity.AuditLog;
 import com.gdpr.audit.gdpr.GdprDataMasker;
-import com.gdpr.audit.service.AuditChainService;
-import com.gdpr.audit.service.AuditOutboxPublisher;
+import com.gdpr.audit.service.AuditEventRecorder;
 import com.gdpr.audit.security.SecurityUtils;
 import jakarta.servlet.http.HttpServletRequest;
 import lombok.RequiredArgsConstructor;
@@ -19,10 +18,6 @@ import org.springframework.http.ResponseEntity;
 import org.springframework.stereotype.Component;
 import org.springframework.web.context.request.RequestContextHolder;
 import org.springframework.web.context.request.ServletRequestAttributes;
-
-import java.util.Map;
-
-import static net.logstash.logback.argument.StructuredArguments.kv;
 
 /**
  * 审计切面 — 拦截所有标注 {@link Auditable} 的方法，自动写入审计日志。
@@ -38,14 +33,10 @@ import static net.logstash.logback.argument.StructuredArguments.kv;
 @RequiredArgsConstructor
 public class AuditAspect {
 
-    /** 审计专用 Logger — 经由 logback-spring.xml 的 AUDIT logger 异步输出 JSON 到 Logstash */
-    private static final org.slf4j.Logger AUDIT_LOGGER = org.slf4j.LoggerFactory.getLogger("AUDIT");
-
     /** 请求体记录的最大长度，超出截断（脱敏前先截断，控制正则开销） */
     private static final int MAX_BODY_LENGTH = 10_000;
 
-    private final AuditChainService auditChainService;
-    private final AuditOutboxPublisher outboxPublisher;
+    private final AuditEventRecorder auditEventRecorder;
     private final ObjectMapper objectMapper;
 
     @Around("@annotation(com.gdpr.audit.annotation.Auditable)")
@@ -95,34 +86,7 @@ public class AuditAspect {
 
             builder.requestBody(maskArgs(joinPoint));
 
-            AuditLog auditLog = auditChainService.append(builder.build());
-
-            // Outbox：同事务记录待投递事件，保证 DB→ELK 至少一次投递
-            outboxPublisher.enqueue(auditLog.getId(), Map.ofEntries(
-                    Map.entry("auditLogId", auditLog.getId()),
-                    Map.entry("chainSequence", auditLog.getChainSequence()),
-                    Map.entry("recordHash", auditLog.getRecordHash()),
-                    Map.entry("signingKeyId", auditLog.getSigningKeyId())
-            ));
-
-            // 双写 ELK：异步经 AUDIT logger → Logstash → Elasticsearch（失败不阻塞业务）
-            AUDIT_LOGGER.info("Audit event: {} {} {} {} {} {} {} {} {}",
-                    kv("action", auditLog.getAction()),
-                    kv("resourceType", auditLog.getResourceType()),
-                    kv("requestMethod", auditLog.getRequestMethod()),
-                    kv("responseStatus", auditLog.getResponseStatus()),
-                    kv("userId", auditLog.getUserId()),
-                    kv("username", auditLog.getUsername()),
-                    kv("userRoles", auditLog.getUserRoles()),
-                    kv("resourceId", auditLog.getResourceId()),
-                    kv("chainSequence", auditLog.getChainSequence()),
-                    kv("recordHash", auditLog.getRecordHash()),
-                    kv("signingKeyId", auditLog.getSigningKeyId()),
-                    kv("clientIp", auditLog.getClientIp()),
-                    kv("duration", auditLog.getDuration()),
-                    kv("success", auditLog.getSuccess()),
-                    kv("requestUri", auditLog.getRequestUri())
-            );
+                auditEventRecorder.record(builder.build());
         } catch (Exception ex) {
             log.warn("Failed to persist audit log for {}#{}: {}",
                     joinPoint.getSignature().getDeclaringTypeName(),

@@ -1,12 +1,49 @@
+## 为什么当前版本还不能用于生产（2026-11-01）
+
+本项目适合作品集/本地演示；“测试通过”只表示已覆盖的功能路径工作，不代表满足生产级安全、可用性、可恢复性或法律合规。下面列出从实现中确认的具体差距，后续状态以验收证据为准。
+
+### 主要差距
+
+1. **审计链没有独立信任锚。** 当前使用 HMAC-SHA256 对称密钥，应用持有密钥且负责签名/验签；密钥从配置注入。数据库中的链头与事件记录处于同一信任域。能同时控制应用密钥和数据库的管理员可以重算链；能控制数据库的人也可能删除历史并把链头重置到仍可通过的短前缀。缺 KMS/HSM 非导出密钥、已签名检查点及独立账户 WORM（Task 32/33）。
+
+2. **Outbox 已补齐单实例本地路径，但仍非跨库事务。** `AuditEventRecorder` 在同一个 PostgreSQL 事务内追加审计链并写 Outbox；Outbox 写失败会向外抛错并回滚链记录。relay 直连 Elasticsearch，收到 HTTP 2xx 才标记 `SENT`，非 2xx/网络错误重试并可进入死信；按 `auditLogId` PUT 使重复请求覆盖同一文档。PG 测试已验证同事务回滚，HTTP 替身测试验证 2xx 和 503→FAILED。仍待多实例消费锁/租约、真实 ES 重启/网络分区、积压恢复和回放端到端验收。该模式提供数据库内原子入队与对 ES 的至少一次尝试，不是 PG+ES 分布式原子提交（Task 30）。
+
+3. **身份和管理面事件仍不完整。** API 401/403 过滤器已改为调用统一事务记录入口，因此与普通审计一样写入 PG 链和 Outbox；Keycloak 登录、失败认证、角色/Client 管理操作仍没有事件源。当前不应声称所有身份和管理面操作都已进入集中审计（Task 35）。
+
+4. **本地权限加固尚未成为部署基线。** `db-hardening.sql` 已在一次性 PG 16 容器验证，但 Compose 数据库仍由初始化超级用户账号运行，脚本未接入迁移/部署流程。数据库超级用户可绕过本地权限和触发器；应用角色配置也必须在目标环境验证（Task 31/37）。
+
+5. **告警没有独立运维信任域。** `SIEM_ALERT` 是单独 logger 名称，但 appender 仍发往本机 Logstash/控制台；Logstash/ES 或宿主机失陷时，告警也可能一起丢失。Prometheus 指标端点受 JWT 保护，匿名请求返回 401，尚无配置好的 scraper 身份、告警服务或真实 SIEM 验收（Task 34/40）。
+
+6. **PII 保护只是有限模式匹配。** 邮箱/电话/IBAN 正则不能覆盖所有国家格式、姓名、地址、结构化/编码/拆分字段；没有字段级采集 allowlist、假名化、完整留存到期处置、Legal Hold 和 DSAR 流程。审计记录仍可能包含个人数据，必须由 DPO/法务确定处理依据、期限和请求流程（Task 28/36）。
+
+7. **部署与恢复假设仍是单机开发环境。** Compose 使用 Keycloak `start-dev`、HTTP、ES 关闭安全认证及演示默认值；没有生产 TLS/Secret Manager、独立网络策略、HA、CI 供应链控制、异地备份、已批准的 RPO/RTO 和恢复演练。Testcontainers 通过不等于已验证故障恢复、并发容量或持续运行能力（Task 37）。
+
+### 后续整改优先级
+
+- [x] **Task 30 原子入队/确认基础：**新增 `AuditEventRecorder` 事务边界；Outbox 保存完整事件；移除 AOP 直接 Logback 双写；relay 对 ES 执行稳定 ID PUT，只有 2xx 才标记 SENT，失败按次数进入 FAILED；PG 故障注入验证 Outbox 插入失败时审计行和链头回滚。仍需多实例锁/租约和真实 ES 故障演练。
+- [ ] **P0 / Task 30 后续：**增加多实例 Outbox 原子抢占/租约、重试退避/熔断、真实 Elasticsearch 容器端到端重复投递/断网/恢复/回放测试，并定义积压 SLO。
+- [ ] **P0 / Task 35：**接入 Keycloak 登录/失败认证/管理变更事件，并验证幂等、主体映射和敏感字段过滤；API 401/403 已进入统一事务 Outbox。
+- [ ] **P1 / Task 31/34/40：**把运行账号与迁移/管理账号真正分离；将授权脚本纳入迁移并在目标 PG 以应用账号做正/负向测试；把告警送到独立 SIEM；为 Prometheus 配置最小权限认证并演练告警。
+- [ ] **P1 / Task 32/33：**接入 KMS/HSM 签名检查点和独立 WORM 锚定，演练轮换、验证、保留期内拒绝覆盖及独立账户恢复。
+- [ ] **P1 / Task 28/36：**由 DPO/法务批准数据分类、处理依据、保留期、删除/限制处理、Legal Hold 和 DSAR 工作流，再按批准结果实现假名化与处置。
+- [ ] **P1 / Task 37：**部署生产配置：TLS、OIDC audience 校验、秘密外置、ES 身份认证与授权、网络隔离、CI/SBOM/镜像扫描/签名、备份恢复和 RPO/RTO 演练。
+
+### 简历表述边界
+
+- 可以写：实现了基于 HMAC-SHA256 的审计链，并通过 PostgreSQL 集成测试验证篡改可检测；实现了 PostgreSQL 同事务审计+Outbox、带 Elasticsearch HTTP 确认和稳定 ID 幂等写入的单实例投递路径，并以故障注入验证事务回滚；实现 RBAC/PII 掩码演示。
+- 不应写：生产级不可篡改、数据库管理员无法篡改、PG/ES 已有事务一致性、全部个人数据已满足 GDPR/DSGVO，或已通过生产安全认证。
+
+本次增量更新前备份：`/tmp/TODO.MD.before-production-gap-notes-20261101`。
+
 ## 项目收尾快照（2026-11-01）
 
 - **作品集范围结论：**本项目可按“本地可运行的安全审计演示系统”收尾；不能宣称生产级不可篡改审计或 DSGVO 法律合规认证。
 - **哈希链修复：**移除 `AuditLog.timestamp` 的 Hibernate `@CreationTimestamp` 覆盖行为，改为仅在时间戳为空时由 `@PrePersist` 生成 UTC 微秒时间；链签名输入与落库数据一致。PostgreSQL 集成测试确认未篡改时 valid，篡改后 invalid。
 - **DB 加固：**`scripts/db-hardening.sql` 增加 `audit_app` 对链头的 SELECT/UPDATE 权限。脚本在一次性 PostgreSQL 16 容器实测成功：追加审计记录/推进链头成功，UPDATE/DELETE 审计行被拒，链头回退被触发器拒绝；未改动 Compose 使用的数据库。
-- **完整验证：**`DOCKER_HOST=unix://$HOME/.docker/run/docker.sock mvn -Dapi.version=1.44 verify` 返回 `BUILD SUCCESS`；PG/ES Testcontainers 集成测试通过，JaCoCo `GdprDataMasker` 51/56 行（91.1%）通过 90% 门槛。`docker compose config --quiet` 通过。
+- **完整验证：**2026-11-01 Outbox 改造后 `DOCKER_HOST=unix://$HOME/.docker/run/docker.sock mvn -Dapi.version=1.44 verify` 返回 `BUILD SUCCESS`；PG 集成测试 7/7、ES 集成测试 1/1、JaCoCo `GdprDataMasker` 51/56 行（91.1%）通过 90% 门槛；Outbox 单测 3/3 覆盖 ES 2xx 与 503→FAILED。PG 故障注入验证 Outbox 写入失败时审计行和链头回滚。`docker compose config --quiet` 通过。
 - **运行状态：**当前 Compose 容器仍运行，`/api/public/health` 返回 `UP`。本轮没有重建/重启正在运行的 App；因此运行中的镜像不是本轮源码部署验收。匿名访问 `/actuator/prometheus` 返回 401，抓取需配置认证。
 - **文档：**README 与 `task_breakdown.md` 已按实测更新，区分本地实现、未完成的全栈验收及生产外部依赖。
-- **仍待完成：**Task 30/34/35/38/39/40 的端到端或外部接入验收；Task 28 法务签署；Task 32 KMS/HSM；Task 33 独立 WORM；Task 36 DPO/DSAR 裁定；Task 37 生产部署与恢复演练。详见 README 与任务清单，不将这些状态伪报为已完成。
+- **仍待完成：**Task 30 的多实例抢占/租约和真实 ES 故障恢复演练；Task 34/40 的独立 SIEM、Prometheus 抓取器认证和告警接入；Task 35 的 Keycloak 登录/管理事件；Task 38/39 的崩溃重启及 Compose 端到端重放验收；Task 28 法务签署；Task 32 KMS/HSM；Task 33 独立 WORM；Task 36 DPO/DSAR 裁定；Task 37 生产部署与恢复演练。详见 README 与任务清单，不将这些状态伪报为已完成。
 - 本次编辑前备份：`/tmp/TODO.MD.before-closeout-20261101`。
 
 ## 最新状态（2026-10-30 17:45 +0100）

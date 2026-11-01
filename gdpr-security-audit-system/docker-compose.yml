@@ -159,6 +159,7 @@ services:
       SPRING_SECURITY_OAUTH2_RESOURCESERVER_JWT_JWK_SET_URI: http://keycloak:8080/realms/audit-realm/protocol/openid-connect/certs
       AUDIT_CHAIN_HMAC_KEY: ${AUDIT_CHAIN_HMAC_KEY:?Set AUDIT_CHAIN_HMAC_KEY in .env}
       AUDIT_CHAIN_KEY_ID: ${AUDIT_CHAIN_KEY_ID:-local-dev-v1}
+      AUDIT_OUTBOX_ELASTICSEARCH_URL: http://elasticsearch:9200
       LOGSTASH_HOST: logstash
     ports:
       - "${APP_PORT:-8081}:8081"

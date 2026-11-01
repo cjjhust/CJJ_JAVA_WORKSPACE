@@ -5,6 +5,8 @@ audit:
   chain:
     hmac-key: ${AUDIT_CHAIN_HMAC_KEY:local-demo-hmac-key-change-before-production-2026}
     key-id: ${AUDIT_CHAIN_KEY_ID:local-dev-v1}
+  outbox:
+    elasticsearch-url: ${AUDIT_OUTBOX_ELASTICSEARCH_URL:http://localhost:9200}
 
 spring:
   application:

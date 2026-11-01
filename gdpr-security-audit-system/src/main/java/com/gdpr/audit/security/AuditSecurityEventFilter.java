@@ -3,7 +3,7 @@ package com.gdpr.audit.security;
 import com.gdpr.audit.entity.AuditLog;
 import com.gdpr.audit.enums.AuditAction;
 import com.gdpr.audit.gdpr.GdprDataMasker;
-import com.gdpr.audit.service.AuditChainService;
+import com.gdpr.audit.service.AuditEventRecorder;
 import jakarta.servlet.FilterChain;
 import jakarta.servlet.ServletException;
 import jakarta.servlet.http.HttpServletRequest;
@@ -18,7 +18,7 @@ import org.springframework.stereotype.Component;
 import org.springframework.web.filter.OncePerRequestFilter;
 
 import java.io.IOException;
-import java.util.List;
+import org.springframework.lang.NonNull;
 
 /**
  * 安全事件审计过滤器（Task 35）— 将 401/403 认证与授权拒绝事件写入 HMAC 审计链。
@@ -31,12 +31,12 @@ import java.util.List;
 @RequiredArgsConstructor
 public class AuditSecurityEventFilter extends OncePerRequestFilter {
 
-    private final AuditChainService auditChainService;
+    private final AuditEventRecorder auditEventRecorder;
 
     @Override
-    protected void doFilterInternal(HttpServletRequest request,
-                                    HttpServletResponse response,
-                                    FilterChain filterChain) throws ServletException, IOException {
+    protected void doFilterInternal(@NonNull HttpServletRequest request,
+                                    @NonNull HttpServletResponse response,
+                                    @NonNull FilterChain filterChain) throws ServletException, IOException {
         try {
             filterChain.doFilter(request, response);
         } finally {
@@ -73,7 +73,7 @@ public class AuditSecurityEventFilter extends OncePerRequestFilter {
                             status == 401 ? "authentication required or token invalid"
                                           : "access denied by authorization rules"))
                     .build();
-            auditChainService.append(event);
+            auditEventRecorder.record(event);
         } catch (Exception ex) {
             // 安全事件审计失败不能影响响应已经产生的结果，只告警
             log.warn("Failed to audit security event {} {}: {}",

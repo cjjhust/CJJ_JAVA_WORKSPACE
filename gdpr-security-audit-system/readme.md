@@ -28,10 +28,10 @@ flowchart LR
     A --> U[User Service]
     A --> X[AuditAspect]
     X --> M[PII 脱敏副本]
-    M --> P[(PostgreSQL audit_logs)]
-    M --> L[异步 AUDIT JSON]
-    L --> LS[Logstash Pipeline]
-    LS --> ES[(Elasticsearch)]
+    M --> P[(PostgreSQL audit_logs + Outbox)]
+    P -->|轮询 + HTTP 2xx ACK| ES[(Elasticsearch)]
+    A -.安全告警.-> LS[Logstash Pipeline]
+    LS -.SIEM / Console.-> ES
     ES --> KB[Kibana Dashboard]
 ```
 
@@ -41,8 +41,59 @@ flowchart LR
 2. Spring Security 校验 issuer/JWK；`JwtRoleConverter` 将 Keycloak 角色转换为 Spring `GrantedAuthority`。
 3. URL 规则和方法安全注解决定是否允许业务请求。
 4. `@Auditable` 触发 `AuditAspect`，抽取主体、角色、资源 ID、HTTP 状态和耗时。
-5. 脱敏后的审计副本写入 PostgreSQL；结构化 AUDIT JSON 异步进入 Logstash。
-6. Logstash 派生 `severity`、`environment` 并写入 Elasticsearch，Kibana 用于检索和聚合。
+5. 脱敏后的审计副本、链头更新和 Outbox 事件在同一个 PostgreSQL 事务中提交。
+6. Outbox relay 直接向 Elasticsearch 写入完整事件；ES 返回 2xx 后标记 `SENT`，失败保留重试/死信状态。Kibana 用于检索和聚合；Logstash 保留给日志/告警通道，不是当前 Outbox 的投递确认端。
+
+### 核心设计原理
+
+本节区分通用设计思想与当前仓库的实际实现。代码里出现某种组件或模式，不等于它已经满足生产级可靠性验收。
+
+#### 1. 身份认证与授权分离
+
+Keycloak 是身份提供方，负责用户、Realm 角色和令牌签发；Spring Boot 是 OAuth2 Resource Server，只验证 JWT 的签名、issuer 和有效期，再把 `realm_access.roles` 映射为 Spring Security 权限。URL 规则提供粗粒度边界，`@PreAuthorize` 可在方法上加细粒度限制。这样业务服务不保存用户密码，也不自行实现认证协议。
+
+这个边界的前提是令牌配置正确：生产环境还需校验 audience、使用 HTTPS、妥善管理 Realm 管理员和客户端凭据，并审查角色映射。开发 Realm、默认账号和 `start-dev` 不能直接用于生产。
+
+#### 2. 声明式审计与数据最小化
+
+业务方法用 `@Auditable` 声明“这个操作需要留痕”；`AuditAspect` 在方法执行前后收集主体、角色、资源、HTTP 上下文、结果和耗时。审计逻辑因此集中在切面中，避免每个 Controller 自己拼日志。审计异常当前按演示模式 fail-open 处理：写审计失败会告警，但不改变已经执行的业务结果。
+
+切面序列化参数副本，先限制长度，再通过 `GdprDataMasker` 对常见邮箱、电话和 IBAN 模式掩码；不会修改原始请求对象。正则掩码只是降低常见 PII 暴露的措施，不是完整的个人数据识别器：姓名、地址、非标准格式、编码/拆分后的值和其他敏感字段仍可能漏过。生产方案应采用字段级 allowlist/分类、敏感字段标注、最小化采集和人工隐私评估，而非把整个请求体默认记下来。
+
+#### 3. HMAC 哈希链：让事后改动可检测
+
+普通日志只把事件逐行保存；哈希链则把每条记录与前一条绑定。当前实现先分配序号、写入前序哈希和密钥 ID，再对版本化规范字节计算 HMAC-SHA256：
+
+```text
+recordHash[i] = HMAC-SHA256(key, canonical-v1(event[i], sequence[i], previousHash[i], keyId[i]))
+previousHash[i + 1] = recordHash[i]
+```
+
+规范编码包含格式版本、序号以及审计事件字段；字符串使用 UTF-8 和长度前缀，避免简单拼接时字段边界产生歧义。起始前序值是固定 genesis hash。每条记录的关键字段改变后，重算出的 HMAC 不再匹配；删行、调序或序号断档也会被验证器发现。
+
+并发写入通过 `audit_chain_heads` 的悲观行锁取得唯一 `nextSequence`，然后在数据库事务中保存审计行并推进链头，避免两个并发请求拿到同一序号。验证器依序检查序号、`previousHash`、记录 HMAC 和最终链头；启动校验发现链头序号与记录最大序号不一致时进入 SAFE MODE，拒绝继续追加。
+
+**HMAC 的能力边界：**HMAC 使用共享密钥，应用既能签名也能验证；它证明“记录与当前密钥一致”，不是公开可验证的数字签名。密钥若与应用一起泄露，攻击者可以重算链。链头也存放在同一数据库，若管理员能同时重写整库并把链头重置到较短的有效前缀，单靠本地校验无法证明被删历史曾经存在。因此还需要 KMS/HSM 非导出密钥、定期签名检查点，以及独立信任域中的 WORM 锚定。
+
+当前只有一个 `global` 链流；多租户/多分区、密钥轮换与旧密钥验证未完成。SAFE MODE 的启动检查是序号/链头一致性检查；它不替代每次启动都完整重算哈希链，也不能替代外部锚点。
+
+#### 4. Outbox：数据库原子入队与下游确认
+
+Transactional Outbox 的核心思想是：业务事务中同时写入权威数据和一条待投递事件，事务提交后由独立发布器异步发送。事务回滚时两者一起消失；发布器重试时可能重复发送，因此下游必须按稳定事件 ID 幂等处理。它通常提供的是“至少一次 + 幂等消费”，而不是消息只发送一次。
+
+本项目由 `AuditEventRecorder` 在一个事务中调用链追加和 Outbox 入队；Outbox 插入失败会抛出异常并使审计行与链头一起回滚。发布器将完整审计 envelope 直接 PUT 到 Elasticsearch，以 `auditLogId` 作为文档 ID；收到 2xx 才标记 `SENT`，网络错误或非 2xx 会递增重试次数并最终进入 `FAILED`，管理员可请求回放。PG 集成测试覆盖同事务落库以及 Outbox 插入失败时的整体回滚；发布器测试覆盖 ES 2xx 和 503→死信。
+
+该语义是“数据库内原子入队 + 对 ES 的至少一次尝试 + 稳定 ID 幂等覆盖”，不是跨 PostgreSQL/Elasticsearch 的分布式原子事务。ES 写成功但应用在更新 `SENT` 前崩溃时会重试，同一 ID 的 PUT 覆盖同一文档。当前 publisher 假设单个应用实例轮询；多实例需加入行级抢占/租约或消息中间件，避免并发重复消费。生产部署还应通过真实 ES 故障注入、认证 TLS、重试退避/熔断、积压 SLO 和恢复演练验证。
+
+#### 5. 追加写控制、巡检与告警
+
+`scripts/db-hardening.sql` 将应用、迁移和 DBA 权限分开；应用角色对 `audit_logs` 只读/追加，REVOKE 和触发器拒绝改写/删除，链头触发器拒绝序号回退。它降低了日常应用账号误操作或被滥用的风险，但数据库超级用户仍能提升权限、禁用触发器或恢复数据；这不是 WORM。脚本只在一次性 PostgreSQL 环境验证过，尚未作为生产迁移应用到实际运行账号。
+
+`AuditIntegrityMonitor` 周期检查哈希链和 Outbox 深度，Micrometer 导出链长、链头、验证结果和积压/死信指标；API 401/403 过滤器将拒绝事件写入 PG 审计链。当前拒绝事件路径没有同步写 Outbox，也没有显式发送到 ES。`SIEM_ALERT` 是独立 logger/appender 名称，但配置仍指向本机 Logstash/控制台，不等同于部署了独立 SIEM。`/actuator/prometheus` 受 Spring Security 认证保护，匿名访问返回 401；生产抓取需配置受限的服务身份或内部网络认证策略。
+
+#### 6. 测试证明了什么
+
+Testcontainers 用真实 PostgreSQL 和 Elasticsearch 测试映射、查询、索引、搜索和聚合；哈希链测试验证正常校验与篡改检测；JaCoCo 对 `GdprDataMasker` 设置了行覆盖率门槛。这些测试证明已覆盖场景的行为，不等于证明高并发吞吐、节点故障恢复、消息最终交付、管理员对抗能力、灾难恢复或法规合规。生产验收还需要故障注入、并发压测、权限负向测试、恢复演练和组织级安全/法律审查。
 
 ### 运行演示
 
@@ -76,7 +127,7 @@ DOCKER_HOST=unix://$HOME/.docker/run/docker.sock mvn -Dapi.version=1.44 verify
 
 ### 当前安全边界
 
-Phase 1 **不是生产级不可篡改审计**：PG 与 ES 双写并非原子事务；PG/ES 默认管理员仍可更改数据；当前没有签名链、外部 WORM 锚定或独立密钥管理。演示凭据、Keycloak `start-dev`、HTTP 和关闭 ES 安全功能仅适用于本地。生产级目标及验收标准见 Phase 2 路线图。此说明不是 DSGVO/法律合规意见，保留期与数据主体请求需由组织 DPO/法务确认。
+当前项目虽已实现 PG 内审计链+Outbox 原子入队，以及带 HTTP 成功确认的 ES 投递，**仍不是生产级不可篡改审计**：PG 与 ES 不是分布式原子事务；HMAC 密钥与链头未隔离到独立信任域；管理员仍可能绕过本地权限；单实例、多租户、灾备和法规流程未完成。演示凭据、Keycloak `start-dev`、HTTP 和关闭 ES 安全功能仅适用于本地。生产级目标及验收标准见 Phase 2 路线图。此说明不是 DSGVO/法律合规意见，保留期与数据主体请求需由组织 DPO/法务确认。
 
 ### 项目状态与收尾验收 — 2026-11-01
 
@@ -100,9 +151,9 @@ Phase 1 **不是生产级不可篡改审计**：PG 与 ES 双写并非原子事�
 
 | 范围 | 尚缺的证据 |
 |------|------------|
-| Task 30 Outbox | 单元测试通过；尚未在故障注入下验证 PG 到 Logstash/ES 的最终一致、重复投递和重放全链路。 |
-| Task 34/39/40 运行接入 | SIEM 未连接；重复投递去重、Outbox 重放及 Prometheus 抓取未做 Compose 端到端验收。`/actuator/prometheus` 受 Spring Security 保护，匿名请求实测返回 401；抓取器需配置认证。 |
-| Task 35 身份事件 | 已覆盖应用 API 的 401/403；Keycloak 登录/登出、失败认证及管理面变更事件源尚未接入。 |
+| Task 30 Outbox | 已验证 DB 原子入队回滚、发布器对 ES 2xx/503 的处理；仍需多实例并发抢占、真实 ES 重启/网络分区、积压恢复和重放端到端演练。当前实现直连 ES，不再依赖 Logstash；如保留 Logstash 管道，需明确其用途并验证不会造成双路重复写。 |
+| Task 34/39/40 运行接入 | SIEM 未连接；真实 ES 故障恢复、重复投递和回放仍需 Compose 端到端验收。`/actuator/prometheus` 受 Spring Security 保护，匿名请求实测返回 401；抓取器需配置认证。 |
+| Task 35 身份事件 | 应用 API 的 401/403 现经统一事务入口写入 PG 和 Outbox；Keycloak 登录/登出、失败认证及管理面变更事件源尚未接入。 |
 | Task 28/31/38 | 威胁模型待 DPO/法务签署；加固脚本已在隔离 PG 验证，但尚未应用到长期运行的 Compose 数据库；重启/崩溃故障注入未完成。 |
 
 #### 生产化范围（有意不在本地演示中虚构完成）
@@ -164,7 +215,7 @@ The full verification covers PII masking, PostgreSQL/Elasticsearch Testcontainer
 
 ### Security boundary
 
-Phase 1 is **not production-grade immutable auditing**. PostgreSQL and Elasticsearch dual writes are not atomic; privileged administrators can still alter stored data; hash chaining, external WORM anchoring, and independent key management are not implemented. Demo credentials, Keycloak `start-dev`, HTTP, and disabled Elasticsearch security are local-development settings only. Phase 2 requirements are documented in the roadmap. Retention and data-subject handling require review by the organization's DPO/legal team; this repository is not legal advice.
+The project now atomically writes the audit chain and Outbox within PostgreSQL and marks delivery only after an Elasticsearch HTTP success response. It is still **not production-grade immutable auditing**: PostgreSQL and Elasticsearch are not one distributed transaction; HMAC keys and chain heads are not isolated in an independent trust domain; privileged administrators can bypass local controls; multi-instance coordination, disaster recovery, and legal workflows remain incomplete. Demo credentials, Keycloak `start-dev`, HTTP, and disabled Elasticsearch security are local-development settings only. Retention and data-subject handling require review by the organization's DPO/legal team; this repository is not legal advice.
 
 ---
 
@@ -213,7 +264,7 @@ Die vollständige Prüfung umfasst PII-Maskierung, PostgreSQL/Elasticsearch-Test
 
 ### Sicherheitsgrenzen
 
-Phase 1 ist **keine produktionsreife manipulationssichere Audit-Plattform**. Die parallelen Schreibvorgänge nach PostgreSQL und Elasticsearch sind nicht atomar; privilegierte Administratoren können gespeicherte Daten ändern; Hash-Kette, externe WORM-Verankerung und unabhängige Schlüsselverwaltung fehlen. Demo-Zugangsdaten, Keycloak `start-dev`, HTTP und deaktivierte Elasticsearch-Sicherheit sind ausschließlich für die lokale Entwicklung vorgesehen. Die Phase-2-Anforderungen stehen in der Roadmap. Aufbewahrungsfristen und Betroffenenrechte müssen durch DPO/Rechtsabteilung geprüft werden; dieses Projekt ist keine Rechtsberatung.
+Das Projekt schreibt Audit-Kette und Outbox inzwischen atomar innerhalb von PostgreSQL und markiert die Zustellung erst nach einer erfolgreichen Elasticsearch-HTTP-Antwort. Es ist weiterhin **keine produktionsreife manipulationssichere Audit-Plattform**: PostgreSQL und Elasticsearch bilden keine gemeinsame verteilte Transaktion; HMAC-Schlüssel und Kettenkopf sind nicht in einer unabhängigen Vertrauensdomäne isoliert; privilegierte Administratoren können lokale Kontrollen umgehen; Mehrinstanzbetrieb, Disaster Recovery und rechtliche Abläufe sind unvollständig. Demo-Zugangsdaten, Keycloak `start-dev`, HTTP und deaktivierte Elasticsearch-Sicherheit sind ausschließlich für die lokale Entwicklung vorgesehen. Aufbewahrungsfristen und Betroffenenrechte müssen durch DPO/Rechtsabteilung geprüft werden; dieses Projekt ist keine Rechtsberatung.
 
 ---
 

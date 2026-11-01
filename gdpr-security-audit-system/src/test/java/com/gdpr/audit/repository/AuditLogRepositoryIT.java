@@ -1,5 +1,6 @@
 package com.gdpr.audit.repository;
 
+import com.fasterxml.jackson.databind.ObjectMapper;
 import com.gdpr.audit.entity.AuditLog;
 import com.gdpr.audit.entity.AuditChainHead;
 import com.gdpr.audit.enums.AuditAction;
@@ -7,6 +8,8 @@ import com.gdpr.audit.service.AuditChainService;
 import com.gdpr.audit.service.AuditChainStartupValidator;
 import com.gdpr.audit.service.AuditChainVerification;
 import com.gdpr.audit.service.AuditChainVerifier;
+import com.gdpr.audit.service.AuditEventRecorder;
+import com.gdpr.audit.repository.AuditOutboxRepository;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
@@ -16,6 +19,10 @@ import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.test.context.DynamicPropertyRegistry;
 import org.springframework.test.context.DynamicPropertySource;
 import org.springframework.context.annotation.Import;
+import org.springframework.boot.test.context.TestConfiguration;
+import org.springframework.context.annotation.Bean;
+import org.springframework.transaction.annotation.Propagation;
+import org.springframework.transaction.annotation.Transactional;
 import jakarta.persistence.EntityManager;
 import org.testcontainers.containers.PostgreSQLContainer;
 import org.testcontainers.junit.jupiter.Container;
@@ -33,9 +40,19 @@ import static org.assertj.core.api.Assertions.assertThat;
     "audit.chain.key-id=test-key-v1"
 })
 @AutoConfigureTestDatabase(replace = AutoConfigureTestDatabase.Replace.NONE)
-@Import({AuditChainService.class, AuditChainVerifier.class, AuditChainStartupValidator.class})
+@Import({AuditChainService.class, AuditChainVerifier.class, AuditChainStartupValidator.class,
+    AuditEventRecorder.class, com.gdpr.audit.service.AuditOutboxPublisher.class,
+    AuditLogRepositoryIT.JsonConfiguration.class})
 @Testcontainers
 class AuditLogRepositoryIT {
+
+    @TestConfiguration
+    static class JsonConfiguration {
+        @Bean
+        ObjectMapper testObjectMapper() {
+            return new ObjectMapper();
+        }
+    }
 
     @Container
     static final PostgreSQLContainer<?> POSTGRES = new PostgreSQLContainer<>("postgres:16-alpine")
@@ -61,6 +78,12 @@ class AuditLogRepositoryIT {
 
     @Autowired
     private AuditChainVerifier auditChainVerifier;
+
+    @Autowired
+    private AuditEventRecorder auditEventRecorder;
+
+    @Autowired
+    private AuditOutboxRepository outboxRepository;
 
     @Autowired
     private JdbcTemplate jdbcTemplate;
@@ -152,6 +175,67 @@ class AuditLogRepositoryIT {
         assertThat(verification.firstInvalidSequence()).isEqualTo(1L);
         assertThat(verification.reason()).isEqualTo("record HMAC mismatch");
         }
+
+    @Test
+    void recordsAuditLogAndOutboxEventTogether() {
+        AuditLog saved = auditEventRecorder.record(AuditLog.builder()
+                .userId("user-1")
+                .username("admin-user")
+                .userRoles("ROLE_ADMIN")
+                .action(AuditAction.DELETE)
+                .resourceType("User")
+                .resourceId("10")
+                .success(true)
+                .build());
+
+        assertThat(repository.findById(saved.getId())).isPresent();
+        assertThat(outboxRepository.findByStatusOrderByCreatedAtAsc(
+                com.gdpr.audit.entity.AuditOutboxEvent.OutboxStatus.PENDING,
+                org.springframework.data.domain.PageRequest.of(0, 10)))
+                .singleElement()
+                .satisfies(outbox -> {
+                    assertThat(outbox.getAuditLogId()).isEqualTo(saved.getId());
+                    assertThat(outbox.getPayload()).contains("\"action\":\"DELETE\"", "\"severity\":\"HIGH\"");
+                });
+    }
+
+    @Test
+    @Transactional(propagation = Propagation.NOT_SUPPORTED)
+    void rollsBackAuditChainWhenOutboxInsertFails() {
+        jdbcTemplate.execute("""
+                CREATE FUNCTION reject_outbox_insert() RETURNS trigger AS $$
+                BEGIN
+                    RAISE EXCEPTION 'forced outbox failure';
+                END;
+                $$ LANGUAGE plpgsql
+                """);
+        jdbcTemplate.execute("""
+                CREATE TRIGGER reject_outbox_insert_trigger
+                BEFORE INSERT ON audit_outbox_events
+                FOR EACH ROW EXECUTE FUNCTION reject_outbox_insert()
+                """);
+
+        try {
+            org.assertj.core.api.Assertions.assertThatThrownBy(() -> auditEventRecorder.record(AuditLog.builder()
+                    .userId("user-1")
+                    .username("admin-user")
+                    .userRoles("ROLE_ADMIN")
+                    .action(AuditAction.CREATE)
+                    .resourceType("User")
+                    .resourceId("11")
+                    .success(true)
+                    .build()))
+                    .isInstanceOf(IllegalStateException.class)
+                    .hasMessageContaining("Failed to enqueue audit event");
+
+            assertThat(repository.count()).isZero();
+            assertThat(chainHeadRepository.findById(AuditChainService.STREAM_ID)
+                    .orElseThrow().getNextSequence()).isEqualTo(1);
+        } finally {
+            jdbcTemplate.execute("DROP TRIGGER IF EXISTS reject_outbox_insert_trigger ON audit_outbox_events");
+            jdbcTemplate.execute("DROP FUNCTION IF EXISTS reject_outbox_insert()");
+        }
+    }
 
     private AuditLog save(String userId, AuditAction action, String timestamp) {
         AuditLog saved = repository.save(AuditLog.builder()

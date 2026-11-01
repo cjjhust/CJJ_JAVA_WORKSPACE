@@ -2,7 +2,7 @@ package com.gdpr.audit.security;
 
 import com.gdpr.audit.entity.AuditLog;
 import com.gdpr.audit.enums.AuditAction;
-import com.gdpr.audit.service.AuditChainService;
+import com.gdpr.audit.service.AuditEventRecorder;
 import jakarta.servlet.FilterChain;
 import jakarta.servlet.ServletException;
 import org.junit.jupiter.api.BeforeEach;
@@ -29,7 +29,7 @@ import static org.mockito.Mockito.verify;
 class AuditSecurityEventFilterTest {
 
     @Mock
-    private AuditChainService auditChainService;
+    private AuditEventRecorder auditEventRecorder;
 
     @Mock
     private FilterChain filterChain;
@@ -38,7 +38,7 @@ class AuditSecurityEventFilterTest {
 
     @BeforeEach
     void setUp() {
-        filter = new AuditSecurityEventFilter(auditChainService);
+        filter = new AuditSecurityEventFilter(auditEventRecorder);
     }
 
     private void downstreamReturns(MockHttpServletResponse res, int status)
@@ -60,7 +60,7 @@ class AuditSecurityEventFilterTest {
         filter.doFilter(req, res, filterChain);
 
         ArgumentCaptor<AuditLog> captor = ArgumentCaptor.forClass(AuditLog.class);
-        verify(auditChainService).append(captor.capture());
+        verify(auditEventRecorder).record(captor.capture());
         AuditLog event = captor.getValue();
         assertThat(event.getAction()).isEqualTo(AuditAction.LOGIN);
         assertThat(event.getResourceType()).isEqualTo("SecurityEvent");
@@ -82,7 +82,7 @@ class AuditSecurityEventFilterTest {
         filter.doFilter(req, res, filterChain);
 
         ArgumentCaptor<AuditLog> captor = ArgumentCaptor.forClass(AuditLog.class);
-        verify(auditChainService).append(captor.capture());
+        verify(auditEventRecorder).record(captor.capture());
         AuditLog event = captor.getValue();
         assertThat(event.getAction()).isEqualTo(AuditAction.VIEW);
         assertThat(event.getResourceId()).isEqualTo("403");
@@ -96,11 +96,11 @@ class AuditSecurityEventFilterTest {
 
         filter.doFilter(req, res, filterChain);
 
-        verify(auditChainService, never()).append(any(AuditLog.class));
+        verify(auditEventRecorder, never()).record(any(AuditLog.class));
     }
 
     private void whenAppendReturnsSame() {
         doAnswer(inv -> inv.getArgument(0))
-                .when(auditChainService).append(any(AuditLog.class));
+                .when(auditEventRecorder).record(any(AuditLog.class));
     }
 }
