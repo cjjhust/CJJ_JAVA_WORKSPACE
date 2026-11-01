@@ -1,6 +1,7 @@
 # GDPR Security Audit System
 
 [![Java 21](https://img.shields.io/badge/Java-21-007396?logo=openjdk&logoColor=white)](https://openjdk.org/)
+[![CI](https://github.com/cjjhust/CJJ_JAVA_WORKSPACE/actions/workflows/gdpr-audit-ci.yml/badge.svg?branch=main)](https://github.com/cjjhust/CJJ_JAVA_WORKSPACE/actions/workflows/gdpr-audit-ci.yml)
 [![Spring Boot 3.2](https://img.shields.io/badge/Spring%20Boot-3.2.3-6DB33F?logo=springboot&logoColor=white)](https://spring.io/projects/spring-boot)
 [![Keycloak](https://img.shields.io/badge/Identity-Keycloak-4D4D4D?logo=keycloak&logoColor=white)](https://www.keycloak.org/)
 [![PostgreSQL](https://img.shields.io/badge/Database-PostgreSQL-4169E1?logo=postgresql&logoColor=white)](https://www.postgresql.org/)
@@ -214,6 +215,17 @@ DOCKER_HOST=unix://$HOME/.docker/run/docker.sock mvn -Dapi.version=1.44 verify
 
 完整 `verify` 包含 GDPR 脱敏、PG/ES Testcontainers、aggregation/mapping/索引验证，以及 JaCoCo `GdprDataMasker` 行覆盖率至少 90% 的质量门槛。本机 Docker Desktop 使用用户级 socket，因此命令显式提供 `DOCKER_HOST` 和 API 版本。
 
+### 持续集成（GitHub Actions）
+
+流水线定义在仓库根目录的 `.github/workflows/gdpr-audit-ci.yml`（本仓库是多项目仓库，因此工作流放在根目录并用 `working-directory` 指向本项目）：
+
+- 触发条件：`gdpr-security-audit-system/**` 或该工作流文件发生变更时，在 `push`（`main`）与 `pull_request` 上运行，也支持手动 `workflow_dispatch`；
+- `verify` 作业：Temurin JDK 21 + Maven 缓存，执行与本地完全一致的 `mvn -B -ntp verify`（单测 + 4 套 Testcontainers 集成测试 + JaCoCo 门槛），失败时仍上传 surefire / failsafe / JaCoCo 报告；
+- `image` 作业：用 `.env.example` 生成 `.env` 后校验默认与 `resilience` 两套 compose 配置，并执行 `docker build`；
+- 同一分支的新提交会取消上一次仍在运行的构建。
+
+GitHub 的 `ubuntu-latest` runner 自带可用的 Docker，因此 Testcontainers 无需额外配置。首次远端运行结果见仓库 Actions 页面；在此之前，评分中不给 CI 计分。
+
 ### 当前安全边界
 
 当前项目已实现 PG 内审计链+Outbox 原子入队、多实例 Outbox 租约领取，以及带 HTTP 成功确认的 ES 投递，**仍不是生产级不可篡改审计**：PG 与 ES 不是分布式原子事务；HMAC 密钥与链头未隔离到独立信任域；数据库和应用仍同处单机管理域；PG 高可用、异地主机灾备、多租户和组织级法规流程未完成。演示凭据、Keycloak `start-dev`、HTTP 和关闭 ES 安全功能仅适用于本地。生产级目标及验收标准见本节基线与 Phase 2 路线图。此说明不是 DSGVO/法律合规意见，保留期与数据主体请求需由组织 DPO/法务确认。
@@ -323,7 +335,7 @@ DSGVO 下审计记录（IP、username、操作历史）就是 personal data。�
 | 代码质量 | 18/20 | +1 | 修掉 fail-open 返回 `null` 的语义 bug、删除死分支、列长度对齐 schema、副本服务改全量重放；仍有 AOP 隐式事务、无统一分页规范等小瑕疵 |
 | 测试工程 | 18/20 | +1 | 65 项测试全绿（49 单测 + 4 套 Testcontainers），新增 `SchemaPrivilegeIT` 把"initdb 建角色 → V1 建表 → V2 授权"链路固化为回归；强制覆盖率仍只覆盖 `GdprDataMasker` |
 | 架构与文档 | 15/15 | 0 | 三语文档、威胁模型、Runbook、阻塞分析完整，且如实标注能力边界 |
-| 生产就绪 | 12/15 | +3 | Flyway + DDL/DML 双账号分离、fail-closed 分级、Outbox 租约消费、本机 append-only 副本与 RPO/RTO 基线均已落地；KMS/HSM 签名、合规级 WORM、TLS、CI、PG 高可用仍需外部设施 |
+| 生产就绪 | 12/15 | +3 | Flyway + DDL/DML 双账号分离、fail-closed 分级、Outbox 租约消费、本机 append-only 副本与 RPO/RTO 基线均已落地；CI 流水线已配置（`.github/workflows/gdpr-audit-ci.yml`，与本地同款 `mvn verify` + 镜像构建），首次远端运行通过前不计分；KMS/HSM 签名、合规级 WORM、TLS、PG 高可用仍需外部设施 |
 | 合规闭环 | 8/10 | 0 | PII 脱敏与数据最小化文档完整；保留期限与删除权冲突待 DPO/法务书面裁定 |
 
 **本轮提分的关键三点（都可复现）：**
@@ -333,6 +345,38 @@ DSGVO 下审计记录（IP、username、操作历史）就是 personal data。�
 3. **证据链可重跑**：`mvn -B -Dapi.version=1.44 verify` exit 0，65 项测试全绿（含 ES 停启 1,000 条补投 20.02 秒、PG 备份恢复 11.73 秒），JaCoCo 门槛通过。
 
 **评估结论：**该项目可以正式收尾。技术能力描述可进入简历，但按诚实披露原则，KMS/HSM 签名、外部 WORM 锚定、Keycloak 管理事件接入、PG 高可用与生产合规验证应列明为"生产化阶段工作"而非已完成能力。文档三件套（readme / task_breakdown / TODO.MD）状态一致。
+
+#### 项目定位与能力边界（第三方复核，2026-11-01）
+
+**本项目在同类作品集中的位置。** 常见的学生或转行作品集是"Spring Boot CRUD + JWT + 若干张表 + 接口截图"；本项目把范围收窄到"审计证据链"这一件事，并在该范围内做到可以追问到底：
+
+- **完整性**：HMAC-SHA256 哈希链 + 链头悲观锁 + 启动一致性校验 + SAFE MODE 熔断，篡改可被检出，而不只是"记了日志"；
+- **一致性**：审计与业务写入共享同一个 PostgreSQL 事务，失败时业务行、审计行、链头整体回滚（fail-closed 分级），而不是"先写业务再补日志"；
+- **并发**：Outbox 采用 `FOR UPDATE SKIP LOCKED` + 租约 + 指数退避，多实例消费不重复；
+- **最小权限**：DDL / DML 双账号分离，运行账号对 `audit_logs` 只有 `SELECT, INSERT`，并由集成测试证明 `UPDATE` / `DELETE` / `TRUNCATE` / `CREATE TABLE` 被数据库拒绝；
+- **证据**：65 项测试（49 单测 + 4 套 Testcontainers 集成测试）、JaCoCo 行覆盖率门槛、ES 停机补投与 PG 备份恢复的实测耗时；
+- **文档**：威胁模型、事件响应 Runbook、RPO/RTO 基线与能力边界声明齐备。
+
+**本项目仍有不足。**
+
+- 单服务、单机：演示栈跑在本机 Docker Compose 上，没有 Kubernetes、没有云上部署、没有真实流量与压力测试；
+- CI 目前只覆盖"构建 + 测试 + 镜像构建"，尚无多环境发布、镜像扫描与制品签名；
+- 故障演练规模有限（2 个消费者 + 1,000 条 backlog），证明机制正确，不证明性能；
+- 呈现层依赖 Kibana，没有产品化前端；
+- Keycloak 管理事件接入、DSAR 删除流程、保留期限策略尚未闭环，其中删除权与审计留存的法律冲突必须由 DPO 书面裁定，代码不能自我授权；
+- 代码量约 3,900 行（主代码 ~2,500 / 测试 ~1,400），属于"小体积深项目"，不等同于大型系统经验。
+
+**本项目可以作为：**
+
+- 可以作为 Java / Spring Boot 后端岗位的求职作品集——它提供的是"能讲清分布式一致性、权限边界与合规约束"的可追问素材，而不是功能清单；
+- 可以作为不可变审计/证据链方向的技术演示与本地实验平台：篡改注入、ES 中断恢复、备份恢复、权限边界均可复现；
+- 可以作为简历中的具体条目，但须写明验证层级为"本地可运行 + 容器级故障验证"。
+
+**本项目不能作为：**
+
+- 不能作为生产就绪（production-ready）系统：缺 KMS/HSM 密钥托管、外部 WORM 锚定、TLS 与网络隔离、高可用与异地灾备；
+- 不能作为 GDPR 合规认证或法律意义上的审计留痕证明：合规结论需要组织、DPO 与法务签字；
+- 不能据此宣称具备大规模分布式系统的运维经验。
 
 **作品集收尾结论：**本仓库可作为本地可运行、测试全绿的安全审计演示项目收尾；简历可描述已实现的技术能力，但须将 KMS/HSM、外部 WORM、Keycloak 管理事件和生产合规验证列为未完成/生产化工作。任务级状态与已知限制以 [`task_breakdown.md`](task_breakdown.md) 为准。
 

@@ -1,3 +1,10 @@
+## CI 流水线与项目定位评估（2026-11-01，覆盖下方旧快照）
+
+- **新增 CI：**仓库根目录 `.github/workflows/gdpr-audit-ci.yml`（本仓库是多项目仓库，故用 `working-directory: gdpr-security-audit-system`）。`verify` 作业跑与本地一致的 `mvn -B -ntp verify`（单测 + 4 套 Testcontainers + JaCoCo 门槛），失败也上传 surefire/failsafe/JaCoCo 报告；`image` 作业用 `.env.example` 校验默认与 `resilience` 两套 compose 配置并执行 `docker build`；按 `paths` 过滤，仅本项目变更时触发。本地已用 `ruby -ryaml` 解析确认 YAML 结构合法，**首次远端运行尚未观察**，故评分中暂不给 CI 计分。
+- **文档：**readme 新增「持续集成（GitHub Actions）」章节与 CI 徽章；新增「项目定位与能力边界（第三方复核）」章节，按"本项目在同类作品集中的位置 / 本项目仍有不足 / 本项目可以作为 / 本项目不能作为"四段客观陈述，未上调评分（仍为 89/100，CI 首次远端通过后可至 90）。
+- **不变的边界：**单服务单机、无云部署与真实压测、无产品化前端、Keycloak 管理事件与 DSAR/保留策略未闭环、代码量约 3,900 行属"小体积深项目"。
+- 本次追加前备份：`/tmp/TODO.MD.before-ci-20261101`、`/tmp/readme.md.before-ci-20261101`。
+
 ## 双账号授权链路与 fail-open 修正（2026-11-01，覆盖下方旧快照）
 
 - **P0-1 授权链路断裂（已修）：**initdb 阶段表还不存在，原 `GRANT` 会静默失败，且 `audit_app` 无 `CREATE` 导致 Flyway 无法创建 `flyway_schema_history`。现改为：`docker/postgres-init/01-create-audit-app.sql` 只建角色 + `GRANT USAGE ON SCHEMA public`；新增 `V2__grant_audit_app.sql` 在建表之后授予 `users` 增删改查、`audit_logs` 仅 `SELECT, INSERT`、`audit_outbox_events` 增删改查、`audit_chain_heads` 仅 `SELECT, UPDATE`、序列 `USAGE, SELECT`，并用 `ALTER DEFAULT PRIVILEGES` 覆盖后续新表；Flyway 用独立 `FLYWAY_USER`/`FLYWAY_PASSWORD`（默认 `audit_user`）执行 DDL，App 与 app-secondary 用 `audit_app` 运行。
