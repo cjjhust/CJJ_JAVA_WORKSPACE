@@ -1,0 +1,46 @@
+# Prometheus 告警规则（Task 34）— 审计完整性巡检
+#
+# 用法：Prometheus 配置 rule_files 指向本文件；
+# 数据来源为应用的 /actuator/prometheus（Task 40 指标）。
+groups:
+  - name: gdpr-audit-integrity
+    rules:
+      # 链校验失败：篡改/断链/重排 — 最高优先级
+      - alert: AuditChainInvalid
+        expr: audit_chain_verification == 0
+        for: 0m
+        labels:
+          severity: critical
+        annotations:
+          summary: "审计链校验失败 — 疑似篡改/断链/重排"
+          description: "audit_chain_verification=0 已持续，链头与记录不一致。立即启动 docs/runbooks/audit-integrity.md 第 2 节流程。"
+
+      # 链长度回退：链头 nextSequence 小于已记录的最大序号
+      - alert: AuditChainHeadRegression
+        expr: audit_chain_head_next < audit_chain_length
+        for: 1m
+        labels:
+          severity: critical
+        annotations:
+          summary: "审计链头序号回退"
+          description: "audit_chain_head_next < audit_chain_length，链头可能被回滚或数据被截断。"
+
+      # Outbox 死信：投递最终失败，需人工回放
+      - alert: AuditOutboxDeadLetter
+        expr: audit_outbox_failed_depth > 0
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "审计 Outbox 出现死信事件"
+          description: "audit_outbox_failed_depth > 0。用 ROLE_AUDITOR 查 GET /api/audit/outbox/failed，ROLE_ADMIN 调 POST /api/admin/outbox/{id}/replay 回放。"
+
+      # Outbox 积压：投递延迟（ELK 链路疑似不可用）
+      - alert: AuditOutboxBacklog
+        expr: audit_outbox_pending_depth > 500
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: "审计 Outbox 积压超过阈值"
+          description: "PENDING 深度 > 500 持续 10 分钟，Logstash/ES 链路可能不可用。检查 audit-logstash 容器与 ES 健康。"

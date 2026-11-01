@@ -1,5 +1,3 @@
-version: '3.8'
-
 services:
   # -----------------------------------------------------------------
   # 1. 主业务数据库：PostgreSQL 16
@@ -9,9 +7,9 @@ services:
     container_name: audit-postgres
     restart: always
     environment:
-      POSTGRES_DB: audit_db
-      POSTGRES_USER: audit_user
-      POSTGRES_PASSWORD: audit_password
+      POSTGRES_DB: ${POSTGRES_DB:-audit_db}
+      POSTGRES_USER: ${POSTGRES_USER:-audit_user}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-audit_password}
     ports:
       - "5432:5432"
     volumes:
@@ -28,18 +26,20 @@ services:
   keycloak:
     image: quay.io/keycloak/keycloak:24.0
     container_name: audit-keycloak
-    command: start-dev
+    command: start-dev --import-realm
     environment:
-      KEYCLOAK_ADMIN: admin
-      KEYCLOAK_ADMIN_PASSWORD: admin_password
+      KEYCLOAK_ADMIN: ${KEYCLOAK_ADMIN:-admin}
+      KEYCLOAK_ADMIN_PASSWORD: ${KEYCLOAK_ADMIN_PASSWORD:-admin_password}
       KC_DB: postgres
-      KC_DB_URL: jdbc:postgresql://postgres:5432/audit_db
-      KC_DB_USERNAME: audit_user
-      KC_DB_PASSWORD: audit_password
+      KC_DB_URL: jdbc:postgresql://postgres:5432/${POSTGRES_DB:-audit_db}
+      KC_DB_USERNAME: ${POSTGRES_USER:-audit_user}
+      KC_DB_PASSWORD: ${POSTGRES_PASSWORD:-audit_password}
       KC_HEALTH_ENABLED: "true"
       KC_METRICS_ENABLED: "true"
     ports:
       - "8080:8080"
+    volumes:
+      - ./keycloak/realm-export.json:/opt/keycloak/data/import/realm-export.json
     depends_on:
       postgres:
         condition: service_healthy
@@ -78,6 +78,24 @@ services:
       - elasticsearch
 
   # -----------------------------------------------------------------
+  # 4a. Elasticsearch Index Template 初始化（幂等）
+  # -----------------------------------------------------------------
+  es-init:
+    image: curlimages/curl:8.12.1
+    container_name: audit-es-init
+    volumes:
+      - ./scripts/es-init-template.sh:/scripts/es-init-template.sh:ro
+    environment:
+      ES_URL: http://elasticsearch:9200
+    entrypoint: ["sh", "-c"]
+    command:
+      - >-
+        until curl --fail --silent http://elasticsearch:9200/ >/dev/null; do sleep 2; done;
+        sh /scripts/es-init-template.sh
+    depends_on:
+      - elasticsearch
+
+  # -----------------------------------------------------------------
   # 5. 可视化仪表盘：Kibana 8.12
   # -----------------------------------------------------------------
   kibana:
@@ -89,6 +107,72 @@ services:
       - ELASTICSEARCH_HOSTS=http://elasticsearch:9200
     depends_on:
       - elasticsearch
+
+  # -----------------------------------------------------------------
+  # 5a. Kibana Saved Objects 初始化（dashboard + visualizations）
+  # -----------------------------------------------------------------
+  kibana-init:
+    image: curlimages/curl:8.12.1
+    container_name: audit-kibana-init
+    volumes:
+      - ./kibana/audit-dashboard.ndjson:/objects/audit-dashboard.ndjson:ro
+      - ./kibana/audit-dashboard-extra.ndjson:/objects/audit-dashboard-extra.ndjson:ro
+      - ./kibana/audit-dashboard-final.ndjson:/objects/audit-dashboard-final.ndjson:ro
+      - ./kibana/audit-dashboard-xy-fix.ndjson:/objects/audit-dashboard-xy-fix.ndjson:ro
+    depends_on:
+      - kibana
+    entrypoint: ["sh", "-c"]
+    command:
+      - >-
+        until curl --fail --silent http://kibana:5601/api/status >/dev/null; do sleep 2; done;
+        curl --fail --silent --show-error -X POST
+        'http://kibana:5601/api/saved_objects/_import?overwrite=true'
+        -H 'kbn-xsrf: true'
+        -F 'file=@/objects/audit-dashboard.ndjson;type=application/ndjson';
+        curl --fail --silent --show-error -X POST
+        'http://kibana:5601/api/saved_objects/_import?overwrite=true'
+        -H 'kbn-xsrf: true'
+        -F 'file=@/objects/audit-dashboard-extra.ndjson;type=application/ndjson'
+        ; curl --fail --silent --show-error -X POST
+        'http://kibana:5601/api/saved_objects/_import?overwrite=true'
+        -H 'kbn-xsrf: true'
+        -F 'file=@/objects/audit-dashboard-final.ndjson;type=application/ndjson'
+        ; curl --fail --silent --show-error -X POST
+        'http://kibana:5601/api/saved_objects/_import?overwrite=true'
+        -H 'kbn-xsrf: true'
+        -F 'file=@/objects/audit-dashboard-xy-fix.ndjson;type=application/ndjson'
+
+  # -----------------------------------------------------------------
+  # 6. Java API：Spring Boot Resource Server + 审计服务
+  # -----------------------------------------------------------------
+  app:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: audit-app
+    restart: unless-stopped
+    environment:
+      SPRING_DATASOURCE_URL: jdbc:postgresql://postgres:5432/${POSTGRES_DB:-audit_db}
+      SPRING_DATASOURCE_USERNAME: ${POSTGRES_USER:-audit_user}
+      SPRING_DATASOURCE_PASSWORD: ${POSTGRES_PASSWORD:-audit_password}
+      SPRING_SECURITY_OAUTH2_RESOURCESERVER_JWT_ISSUER_URI: http://localhost:8080/realms/audit-realm
+      SPRING_SECURITY_OAUTH2_RESOURCESERVER_JWT_JWK_SET_URI: http://keycloak:8080/realms/audit-realm/protocol/openid-connect/certs
+      AUDIT_CHAIN_HMAC_KEY: ${AUDIT_CHAIN_HMAC_KEY:?Set AUDIT_CHAIN_HMAC_KEY in .env}
+      AUDIT_CHAIN_KEY_ID: ${AUDIT_CHAIN_KEY_ID:-local-dev-v1}
+      LOGSTASH_HOST: logstash
+    ports:
+      - "${APP_PORT:-8081}:8081"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      keycloak:
+        condition: service_started
+      elasticsearch:
+        condition: service_started
+      logstash:
+        condition: service_started
+      es-init:
+        condition: service_completed_successfully
 
 volumes:
   postgres_data:

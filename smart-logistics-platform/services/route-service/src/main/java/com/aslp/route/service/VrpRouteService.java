@@ -38,7 +38,7 @@ import java.util.Random;
  * {@code IllegalStateException: no search-strategy found}（已用独立程序复现确认）。
  * 端到端之所以长期没暴露，是因为 {@code RouteController.optimize()} 当时是桩方法，从未调用本服务。
  *
- * <p>修复方式：改用官方高层入口 {@link Jsprit.Builder#buildAlgorithm()}，
+ * <p>修复方式：改用官方高层入口 {@link Jsprit.Builder#buildAl  gorithm()}，
  * 它把初始解构造（{@code InsertionInitialSolutionFactory}）、搜索策略集合、状态与约束、
  * 终止条件（迭代上限）一次性装配好。
  *

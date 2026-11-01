@@ -128,6 +128,9 @@ public class AuthTestController {
     /**
      * 从 JWT 中提取 realm_access.roles 角色列表。
      */
+    /**
+     * 从 JWT 中提取 realm_access.roles 角色列表。
+     */
     @SuppressWarnings("unchecked")
     private List<String> extractRoles(Jwt jwt) {
         Map<String, Object> realmAccess = jwt.getClaim("realm_access");

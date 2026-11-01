@@ -1,0 +1,46 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<configuration>
+    <!-- 引入 Spring Boot 默认配置（console 格式等） -->
+    <include resource="org/springframework/boot/logging/logback/defaults.xml"/>
+    <include resource="org/springframework/boot/logging/logback/console-appender.xml"/>
+
+    <!-- Appender 1: Logstash TCP JSON 输出 -->
+    <appender name="LOGSTASH" class="net.logstash.logback.appender.LogstashTcpSocketAppender">
+        <destination>${LOGSTASH_HOST:-localhost}:50000</destination>
+        <encoder class="net.logstash.logback.encoder.LogstashEncoder">
+            <includeMdcKeyName>traceId</includeMdcKeyName>
+            <includeMdcKeyName>userId</includeMdcKeyName>
+            <customFields>{"application":"gdpr-audit-system"}</customFields>
+        </encoder>
+        <reconnectionDelay>5 seconds</reconnectionDelay>
+    </appender>
+
+    <!-- Appender 2: 异步包装，避免审计日志阻塞业务线程；Logstash 不可用时入队不抛异常 -->
+    <appender name="ASYNC_LOGSTASH" class="ch.qos.logback.classic.AsyncAppender">
+        <appender-ref ref="LOGSTASH"/>
+        <queueSize>512</queueSize>
+        <discardingThreshold>0</discardingThreshold>
+    </appender>
+
+    <!-- 审计专用 Logger：Async Logstash + Console 双输出，不向 root 传播 -->
+    <logger name="AUDIT" level="INFO" additivity="false">
+        <appender-ref ref="ASYNC_LOGSTASH"/>
+        <appender-ref ref="CONSOLE"/>
+    </logger>
+
+    <!-- SIEM 告警专用 Logger（Task 34）：独立异步通道，审计完整性告警不依赖被监控的存储 -->
+    <appender name="SIEM_ASYNC" class="ch.qos.logback.classic.AsyncAppender">
+        <appender-ref ref="LOGSTASH"/>
+        <appender-ref ref="CONSOLE"/>
+        <queueSize>256</queueSize>
+        <discardingThreshold>0</discardingThreshold>
+    </appender>
+
+    <logger name="SIEM_ALERT" level="WARN" additivity="false">
+        <appender-ref ref="SIEM_ASYNC"/>
+    </logger>
+
+    <root level="INFO">
+        <appender-ref ref="CONSOLE"/>
+    </root>
+</configuration>

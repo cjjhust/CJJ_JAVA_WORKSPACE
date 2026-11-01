@@ -1,0 +1,17 @@
+# Build output
+target/
+bin/
+
+# IDE
+.vscode/
+.idea/
+*.iml
+
+# macOS
+.DS_Store
+
+# Logs
+*.log
+
+# Local secrets / environment overrides
+.env

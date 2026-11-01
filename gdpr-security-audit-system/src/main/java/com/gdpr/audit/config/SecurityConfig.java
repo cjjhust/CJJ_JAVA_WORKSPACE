@@ -1,5 +1,6 @@
 package com.gdpr.audit.config;
 
+import com.gdpr.audit.security.AuditSecurityEventFilter;
 import com.gdpr.audit.security.JwtRoleConverter;
 import lombok.RequiredArgsConstructor;
 import org.springframework.context.annotation.Bean;
@@ -32,10 +33,14 @@ import org.springframework.security.web.SecurityFilterChain;
 public class SecurityConfig {
 
     private final JwtRoleConverter jwtRoleConverter;
+    private final AuditSecurityEventFilter auditSecurityEventFilter;
 
     @Bean
     public SecurityFilterChain filterChain(HttpSecurity http) throws Exception {
         http
+            // 安全事件审计过滤器：401/403 拒绝事件写入审计链（Task 35）
+            .addFilterBefore(auditSecurityEventFilter,
+                org.springframework.security.web.access.intercept.AuthorizationFilter.class)
             // REST API 不需要 CSRF 防护
             .csrf(csrf -> csrf.disable())
 
