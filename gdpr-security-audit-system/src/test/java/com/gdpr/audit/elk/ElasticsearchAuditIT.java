@@ -2,12 +2,30 @@ package com.gdpr.audit.elk;
 
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.gdpr.audit.entity.AuditOutboxEvent;
+import com.gdpr.audit.repository.AuditOutboxRepository;
+import com.gdpr.audit.service.AuditOutboxClaimService;
+import com.gdpr.audit.service.AuditOutboxPublisher;
 import org.junit.jupiter.api.Test;
 import org.testcontainers.containers.GenericContainer;
 import org.testcontainers.containers.wait.strategy.Wait;
 import org.testcontainers.junit.jupiter.Container;
 import org.testcontainers.junit.jupiter.Testcontainers;
 import org.testcontainers.utility.DockerImageName;
+import org.springframework.test.util.ReflectionTestUtils;
+
+import java.time.Instant;
+import java.util.List;
+import java.util.concurrent.atomic.AtomicInteger;
+import java.util.stream.IntStream;
+
+import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.anyInt;
+import static org.mockito.ArgumentMatchers.anyString;
+import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.times;
+import static org.mockito.Mockito.verify;
+import static org.mockito.Mockito.when;
 
 import java.time.Duration;
 import java.util.UUID;
@@ -15,10 +33,12 @@ import java.util.UUID;
 import static org.assertj.core.api.Assertions.assertThat;
 
 @Testcontainers
+@SuppressWarnings("resource")
 class ElasticsearchAuditIT {
 
     private static final ObjectMapper OBJECT_MAPPER = new ObjectMapper();
     @Container
+        @SuppressWarnings("resource")
     static final GenericContainer<?> ELASTICSEARCH = new GenericContainer<>(
             DockerImageName.parse("docker.elastic.co/elasticsearch/elasticsearch:8.12.2"))
             .withEnv("discovery.type", "single-node")
@@ -82,6 +102,61 @@ class ElasticsearchAuditIT {
                 .path("key").asText()).isEqualTo("admin-user");
         assertThat(aggregation.path("aggregations").path("by_user").path("buckets").get(0)
                 .path("doc_count").asInt()).isEqualTo(1);
+    }
+
+    @Test
+    void retriesOutboxEventAfterElasticsearchEndpointRecovers() throws Exception {
+        AuditOutboxRepository repository = mock(AuditOutboxRepository.class);
+        AuditOutboxClaimService claims = mock(AuditOutboxClaimService.class);
+        AuditOutboxPublisher publisher = new AuditOutboxPublisher(repository, claims, OBJECT_MAPPER);
+        List<AuditOutboxEvent> backlog = java.util.stream.IntStream.range(0, 1_000)
+                .mapToObj(index -> {
+                    long id = 731L + index;
+                    return AuditOutboxEvent.builder()
+                            .id(id)
+                            .auditLogId(id)
+                            .payload("""
+                                    {"auditLogId":%d,"timestamp":"2026-01-01T10:00:00",
+                                     "action":"DELETE","severity":"HIGH","username":"admin-user"}
+                                    """.formatted(id))
+                            .status(AuditOutboxEvent.OutboxStatus.PROCESSING)
+                            .attempts(0)
+                            .createdAt(Instant.now())
+                            .build();
+                }).toList();
+        List<List<AuditOutboxEvent>> pages = IntStream.range(0, 10)
+                .mapToObj(page -> backlog.subList(page * 100, (page + 1) * 100))
+                .toList();
+        AtomicInteger claimCount = new AtomicInteger();
+        when(claims.claimBatch(anyString(), anyInt(), any(), any())).thenAnswer(invocation -> {
+            int current = claimCount.getAndIncrement();
+            return current == 0 ? List.of(backlog.getFirst()) : pages.get(current - 1);
+        });
+        when(repository.releaseAfterFailure(any(), anyString(), anyInt(), any())).thenReturn(1);
+        when(repository.markSentIfOwned(any(), anyString(), any())).thenReturn(1);
+        ReflectionTestUtils.setField(publisher, "indexPrefix", "outbox-recovery-it");
+        ReflectionTestUtils.setField(publisher, "elasticsearchUrl",
+                "http://" + ELASTICSEARCH.getHost() + ":" + ELASTICSEARCH.getMappedPort(9200));
+
+        Instant outageStartedAt = Instant.now();
+        ELASTICSEARCH.stop();
+        publisher.relay();
+        verify(repository).releaseAfterFailure(any(), anyString(), anyInt(), any());
+
+        ELASTICSEARCH.start();
+        ReflectionTestUtils.setField(publisher, "elasticsearchUrl",
+                "http://" + ELASTICSEARCH.getHost() + ":" + ELASTICSEARCH.getMappedPort(9200));
+        for (int page = 0; page < 10; page++) {
+            publisher.relay();
+        }
+        verify(repository, times(1_000)).markSentIfOwned(any(), anyString(), any());
+
+        send("POST", "http://localhost:9200/outbox-recovery-it-2026.01.01/_refresh", null, 200);
+        JsonNode count = OBJECT_MAPPER.readTree(send("GET",
+                "http://localhost:9200/outbox-recovery-it-2026.01.01/_count", null, 200));
+        assertThat(count.path("count").asInt()).isEqualTo(1_000);
+        assertThat(Duration.between(outageStartedAt, Instant.now()))
+                .isLessThan(Duration.ofMinutes(15));
     }
 
     private String send(String method, String target, String body, int expectedStatus) throws Exception {

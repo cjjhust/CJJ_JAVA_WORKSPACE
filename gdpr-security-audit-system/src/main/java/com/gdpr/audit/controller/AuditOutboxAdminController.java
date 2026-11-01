@@ -3,17 +3,15 @@ package com.gdpr.audit.controller;
 import com.gdpr.audit.entity.AuditOutboxEvent;
 import com.gdpr.audit.repository.AuditOutboxRepository;
 import lombok.RequiredArgsConstructor;
-import org.springframework.data.domain.Page;
 import org.springframework.data.domain.PageRequest;
 import org.springframework.data.domain.Sort;
 import org.springframework.http.ResponseEntity;
 import org.springframework.security.access.prepost.PreAuthorize;
-import org.springframework.transaction.annotation.Transactional;
 import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.PathVariable;
 import org.springframework.web.bind.annotation.PostMapping;
-import org.springframework.web.bind.annotation.RequestMapping;
 import org.springframework.web.bind.annotation.RestController;
+import org.springframework.transaction.annotation.Transactional;
 
 import java.time.Instant;
 import java.util.Map;
@@ -45,6 +43,7 @@ public class AuditOutboxAdminController {
     @PostMapping("/api/admin/outbox/{id}/replay")
     @PreAuthorize("hasRole('ADMIN')")
     @Transactional
+    @SuppressWarnings("null")
     public ResponseEntity<Map<String, Object>> replay(@PathVariable Long id) {
         AuditOutboxEvent event = outboxRepository.findById(id).orElse(null);
         if (event == null) {
@@ -55,10 +54,9 @@ public class AuditOutboxAdminController {
                     "error", "only FAILED events can be replayed",
                     "currentStatus", event.getStatus().name()));
         }
-        event.setStatus(AuditOutboxEvent.OutboxStatus.PENDING);
-        event.setAttempts(0);
-        event.setSentAt(null);
-        outboxRepository.save(event);
+        if (outboxRepository.replayFailed(id) == 0) {
+            return ResponseEntity.badRequest().body(Map.of("error", "event changed before replay"));
+        }
         return ResponseEntity.ok(Map.of(
                 "replayed", id,
                 "status", "PENDING",

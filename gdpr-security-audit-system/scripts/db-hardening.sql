@@ -46,7 +46,7 @@ GRANT SELECT, INSERT ON TABLE audit_logs TO audit_app;
 GRANT SELECT, INSERT ON TABLE audit_outbox_events TO audit_app;
 GRANT SELECT, UPDATE ON TABLE audit_outbox_events TO audit_app;  -- Outbox 状态流转需要 UPDATE
 REVOKE UPDATE, DELETE ON TABLE audit_logs FROM PUBLIC, audit_app;
-REVOKE DELETE ON TABLE audit_outbox_events FROM PUBLIC, audit_app;
+GRANT DELETE ON TABLE audit_outbox_events TO audit_app; -- 触发器只允许清理已发送且过期的行
 
 -- 链头表：应用需要行级 UPDATE（悲观锁推进 next_sequence/last_hash），但禁止 DELETE/INSERT
 GRANT SELECT, UPDATE ON TABLE audit_chain_heads TO audit_app;
@@ -74,6 +74,23 @@ DROP TRIGGER IF EXISTS trg_audit_logs_no_delete ON audit_logs;
 CREATE TRIGGER trg_audit_logs_no_delete
     BEFORE DELETE ON audit_logs
     FOR EACH ROW EXECUTE FUNCTION forbid_audit_mutation();
+
+-- Outbox 载荷仅允许清理已成功投递且超过 7 天的记录，满足 publisher.cleanup()。
+CREATE OR REPLACE FUNCTION allow_expired_sent_outbox_delete()
+RETURNS trigger AS $$
+BEGIN
+    IF OLD.status <> 'SENT' OR OLD.sent_at IS NULL
+       OR OLD.sent_at >= now() - INTERVAL '7 days' THEN
+        RAISE EXCEPTION 'only SENT outbox rows older than 7 days may be deleted';
+    END IF;
+    RETURN OLD;
+END;
+$$ LANGUAGE plpgsql;
+
+DROP TRIGGER IF EXISTS trg_outbox_delete_only_expired_sent ON audit_outbox_events;
+CREATE TRIGGER trg_outbox_delete_only_expired_sent
+    BEFORE DELETE ON audit_outbox_events
+    FOR EACH ROW EXECUTE FUNCTION allow_expired_sent_outbox_delete();
 
 -- 链头记录同样不可删除、不可回退序号
 CREATE OR REPLACE FUNCTION forbid_chain_head_rollback()

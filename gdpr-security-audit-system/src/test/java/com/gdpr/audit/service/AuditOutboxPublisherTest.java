@@ -24,8 +24,11 @@ import java.util.concurrent.atomic.AtomicInteger;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
+import static org.mockito.ArgumentMatchers.anyString;
+import static org.mockito.ArgumentMatchers.anyInt;
 
 /**
  * Outbox 投递器单测：入队写 PENDING、投递成功标记 SENT、超限标记 FAILED。
@@ -36,6 +39,9 @@ class AuditOutboxPublisherTest {
     @Mock
     private AuditOutboxRepository outboxRepository;
 
+    @Mock
+    private AuditOutboxClaimService claimService;
+
     private AuditOutboxPublisher publisher;
     private HttpServer elasticsearch;
     private AtomicInteger responseStatus;
@@ -43,7 +49,7 @@ class AuditOutboxPublisherTest {
 
     @BeforeEach
     void setUp() {
-        publisher = new AuditOutboxPublisher(outboxRepository, new ObjectMapper());
+        publisher = new AuditOutboxPublisher(outboxRepository, claimService, new ObjectMapper());
         ReflectionTestUtils.setField(publisher, "batchSize", 100);
         ReflectionTestUtils.setField(publisher, "maxAttempts", 5);
         responseStatus = new AtomicInteger(201);
@@ -98,16 +104,14 @@ class AuditOutboxPublisherTest {
                 .attempts(0)
                 .createdAt(java.time.Instant.now())
                 .build();
-        when(outboxRepository.findByStatusOrderByCreatedAtAsc(
-                any(AuditOutboxEvent.OutboxStatus.class), any(Pageable.class)))
-                .thenReturn(List.of(pending));
+        when(claimService.claimBatch(anyString(), anyInt(), any(), any()))
+            .thenReturn(List.of(pending));
+        when(outboxRepository.markSentIfOwned(any(), anyString(), any())).thenReturn(1);
 
         publisher.relay();
 
-        assertThat(pending.getStatus()).isEqualTo(AuditOutboxEvent.OutboxStatus.SENT);
-        assertThat(pending.getSentAt()).isNotNull();
         assertThat(requestCount.get()).isEqualTo(1);
-        verify(outboxRepository).saveAll(List.of(pending));
+        verify(outboxRepository).markSentIfOwned(eq(pending.getId()), anyString(), any());
     }
 
     @Test
@@ -120,14 +124,37 @@ class AuditOutboxPublisherTest {
                 .createdAt(java.time.Instant.now())
                 .build();
         responseStatus.set(503);
-        when(outboxRepository.findByStatusOrderByCreatedAtAsc(
-                any(AuditOutboxEvent.OutboxStatus.class), any(Pageable.class)))
-                .thenReturn(List.of(retried));
+        when(claimService.claimBatch(anyString(), anyInt(), any(), any()))
+            .thenReturn(List.of(retried));
+        when(outboxRepository.releaseAfterFailure(any(), anyString(), anyInt(), any())).thenReturn(1);
 
         publisher.relay();
 
-        assertThat(retried.getAttempts()).isEqualTo(5);
-        assertThat(retried.getStatus()).isEqualTo(AuditOutboxEvent.OutboxStatus.FAILED);
-        assertThat(retried.getSentAt()).isNull();
+        verify(outboxRepository).releaseAfterFailure(eq(retried.getId()), anyString(), eq(5), any());
+        }
+
+        @Test
+        void retriesPendingEventAfterElasticsearchRecovers() {
+        AuditOutboxEvent event = AuditOutboxEvent.builder()
+            .id(3L)
+            .auditLogId(3L)
+            .payload("{\"auditLogId\":3,\"timestamp\":\"2026-01-01T10:00:00\"}")
+            .status(AuditOutboxEvent.OutboxStatus.PROCESSING)
+            .attempts(1)
+            .createdAt(java.time.Instant.now())
+            .build();
+        when(claimService.claimBatch(anyString(), anyInt(), any(), any()))
+            .thenReturn(List.of(event), List.of(event));
+        when(outboxRepository.releaseAfterFailure(any(), anyString(), anyInt(), any())).thenReturn(1);
+        when(outboxRepository.markSentIfOwned(any(), anyString(), any())).thenReturn(1);
+
+        responseStatus.set(503);
+        publisher.relay();
+        responseStatus.set(200);
+        publisher.relay();
+
+        assertThat(requestCount.get()).isEqualTo(2);
+        verify(outboxRepository).releaseAfterFailure(eq(event.getId()), anyString(), eq(5), any());
+        verify(outboxRepository).markSentIfOwned(eq(event.getId()), anyString(), any());
     }
 }

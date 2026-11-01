@@ -8,8 +8,6 @@ import com.gdpr.audit.repository.AuditOutboxRepository;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.beans.factory.annotation.Value;
-import org.springframework.data.domain.PageRequest;
-import org.springframework.data.domain.Pageable;
 import org.springframework.scheduling.annotation.Scheduled;
 import org.springframework.stereotype.Component;
 import org.springframework.transaction.annotation.Transactional;
@@ -38,7 +36,9 @@ import java.util.Map;
 public class AuditOutboxPublisher {
 
     private final AuditOutboxRepository outboxRepository;
+    private final AuditOutboxClaimService claimService;
     private final ObjectMapper objectMapper;
+    private final String workerId = AuditOutboxClaimService.newOwnerId();
     private final HttpClient httpClient = HttpClient.newBuilder()
             .connectTimeout(Duration.ofSeconds(3))
             .build();
@@ -54,6 +54,9 @@ public class AuditOutboxPublisher {
 
     @Value("${audit.outbox.max-attempts:5}")
     private int maxAttempts;
+
+    @Value("${audit.outbox.lease-seconds:900}")
+    private int leaseSeconds;
 
     /**
      * 将完整审计事件写入 Outbox；调用方应在保存链记录的同一事务中调用。
@@ -82,27 +85,27 @@ public class AuditOutboxPublisher {
     /**
         * 周期投递：ES 返回 2xx 后标记 SENT；失败则保留 PENDING 并计数，达到上限后进入 FAILED。
      */
-    @Scheduled(fixedDelayString = "${audit.outbox.poll-interval-ms:2000}")
-    @SuppressWarnings("null")
+    @Scheduled(fixedDelayString = "${audit.outbox.poll-interval-ms:1000}")
     public void relay() {
-        Pageable page = PageRequest.of(0, batchSize);
-        List<AuditOutboxEvent> pending = outboxRepository.findByStatusOrderByCreatedAtAsc(
-                AuditOutboxEvent.OutboxStatus.PENDING, page);
-        for (AuditOutboxEvent event : pending) {
+        List<AuditOutboxEvent> claimed = claimService.claimBatch(
+                workerId, batchSize, Instant.now(), Duration.ofSeconds(leaseSeconds));
+        for (AuditOutboxEvent event : claimed) {
             try {
                 sendToElasticsearch(event);
-                event.setStatus(AuditOutboxEvent.OutboxStatus.SENT);
-                event.setSentAt(Instant.now());
-            } catch (Exception ex) {
-                event.setAttempts(event.getAttempts() + 1);
-                if (event.getAttempts() >= maxAttempts) {
-                    event.setStatus(AuditOutboxEvent.OutboxStatus.FAILED);
+                int updated = outboxRepository.markSentIfOwned(event.getId(), workerId, Instant.now());
+                if (updated == 0) {
+                    log.warn("Outbox lease lost before completing event {}", event.getId());
                 }
+            } catch (Exception ex) {
+                int updated = outboxRepository.releaseAfterFailure(event.getId(), workerId, maxAttempts,
+                    Instant.now().plusSeconds(retryDelaySeconds(event.getAttempts() + 1)));
                 log.warn("Outbox relay attempt {} failed for event {}: {}",
-                        event.getAttempts(), event.getId(), ex.getMessage());
+                        event.getAttempts() + 1, event.getId(), ex.getMessage());
+                if (updated == 0) {
+                    log.warn("Outbox lease lost before recording failure for event {}", event.getId());
+                }
             }
         }
-        outboxRepository.saveAll(pending);
     }
 
     /**
@@ -147,6 +150,10 @@ public class AuditOutboxPublisher {
             case MODIFY -> "MEDIUM";
             default -> "LOW";
         };
+    }
+
+    private long retryDelaySeconds(int attempt) {
+        return Math.min(1L << Math.min(attempt, 8), 300L);
     }
 
     private Map<String, Object> toPayload(AuditLog event) {

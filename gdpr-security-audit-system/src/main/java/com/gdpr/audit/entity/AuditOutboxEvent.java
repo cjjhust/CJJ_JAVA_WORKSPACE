@@ -59,5 +59,14 @@ public class AuditOutboxEvent {
     @Column(name = "sent_at")
     private Instant sentAt;
 
-    public enum OutboxStatus { PENDING, SENT, FAILED }
+    @Column(name = "lease_owner", length = 100)
+    private String leaseOwner;
+
+    @Column(name = "lease_until")
+    private Instant leaseUntil;
+
+    @Column(name = "next_attempt_at")
+    private Instant nextAttemptAt;
+
+    public enum OutboxStatus { PENDING, PROCESSING, SENT, FAILED }
 }

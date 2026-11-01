@@ -8,14 +8,20 @@ import com.gdpr.audit.gdpr.GdprDataMasker;
 import com.gdpr.audit.service.AuditEventRecorder;
 import com.gdpr.audit.security.SecurityUtils;
 import jakarta.servlet.http.HttpServletRequest;
-import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.aspectj.lang.ProceedingJoinPoint;
 import org.aspectj.lang.annotation.Around;
 import org.aspectj.lang.annotation.Aspect;
+import org.aspectj.lang.reflect.MethodSignature;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.ResponseEntity;
 import org.springframework.stereotype.Component;
+import org.springframework.transaction.PlatformTransactionManager;
+import org.springframework.transaction.TransactionDefinition;
+import org.springframework.transaction.support.TransactionTemplate;
+import org.springframework.core.Ordered;
+import org.springframework.core.annotation.Order;
+import org.springframework.lang.NonNull;
 import org.springframework.web.context.request.RequestContextHolder;
 import org.springframework.web.context.request.ServletRequestAttributes;
 
@@ -25,12 +31,12 @@ import org.springframework.web.context.request.ServletRequestAttributes;
  * 流程：记录开始时间 → 执行目标方法 → 提取 HTTP 上下文与用户信息（JWT）→
  * 对 requestBody / errorMessage 做 GDPR 脱敏 → 追加到 PostgreSQL HMAC 审计链。
  *
- * 当前演示模式下审计持久化失败只记录 WARN；生产应根据威胁模型配置 fail-closed。
+ * 成功路径采用 fail-closed：业务事务与审计链/Outbox 同事务提交，审计失败则业务回滚。
  */
 @Slf4j
 @Aspect
 @Component
-@RequiredArgsConstructor
+@Order(Ordered.HIGHEST_PRECEDENCE)
 public class AuditAspect {
 
     /** 请求体记录的最大长度，超出截断（脱敏前先截断，控制正则开销） */
@@ -38,60 +44,77 @@ public class AuditAspect {
 
     private final AuditEventRecorder auditEventRecorder;
     private final ObjectMapper objectMapper;
+    private final TransactionTemplate transactionTemplate;
+
+    public AuditAspect(AuditEventRecorder auditEventRecorder, ObjectMapper objectMapper,
+                       @NonNull PlatformTransactionManager transactionManager) {
+        this.auditEventRecorder = auditEventRecorder;
+        this.objectMapper = objectMapper;
+        this.transactionTemplate = new TransactionTemplate(transactionManager);
+        this.transactionTemplate.setPropagationBehavior(TransactionDefinition.PROPAGATION_REQUIRED);
+    }
 
     @Around("@annotation(com.gdpr.audit.annotation.Auditable)")
     public Object audit(ProceedingJoinPoint joinPoint) throws Throwable {
         long start = System.currentTimeMillis();
-
         Auditable auditable = getAuditable(joinPoint);
-        Throwable businessError = null;
-        Object result = null;
         try {
-            result = joinPoint.proceed();
-            return result;
-        } catch (Throwable ex) {
-            businessError = ex;
-            throw ex;
-        } finally {
-            saveAuditLog(joinPoint, auditable, result, businessError, System.currentTimeMillis() - start);
+            return transactionTemplate.execute(status -> {
+                final Object result;
+                try {
+                    result = joinPoint.proceed();
+                } catch (Throwable businessError) {
+                    status.setRollbackOnly();
+                    throw new BusinessInvocationFailure(businessError);
+                }
+                auditEventRecorder.record(buildAuditLog(joinPoint, auditable, result, null,
+                        System.currentTimeMillis() - start));
+                return result;
+            });
+        } catch (BusinessInvocationFailure failure) {
+            recordBusinessFailure(joinPoint, auditable, failure.getCause(),
+                    System.currentTimeMillis() - start);
+            throw failure.getCause();
         }
     }
 
-    /** 构建并持久化审计日志；异常被吞掉，不影响业务响应 */
-    private void saveAuditLog(ProceedingJoinPoint joinPoint, Auditable auditable,
-                              Object result, Throwable error, long durationMs) {
+    private void recordBusinessFailure(ProceedingJoinPoint joinPoint, Auditable auditable,
+                                       Throwable businessError, long durationMs) {
         try {
-            HttpServletRequest request = currentRequest();
-
-            AuditLog.AuditLogBuilder builder = AuditLog.builder()
-                    .userId(SecurityUtils.getCurrentUserId())
-                    .username(SecurityUtils.getCurrentUsername())
-                    .userRoles(SecurityUtils.getCurrentUserRoles())
-                    .action(auditable.action())
-                    .resourceType(auditable.resourceType())
-                    .resourceId(extractResourceId(joinPoint.getArgs(), result))
-                    .duration(durationMs)
-                    .success(error == null)
-                    .errorMessage(error != null ? GdprDataMasker.maskPii(error.getMessage()) : null);
-
-            if (request != null) {
-                builder.requestMethod(request.getMethod())
-                        .requestUri(request.getRequestURI())
-                        .clientIp(resolveClientIp(request))
-                        .userAgent(request.getHeader("User-Agent"))
-                        .responseStatus(resolveStatus(result, error));
-            } else {
-                builder.responseStatus(error != null ? 500 : 200);
-            }
-
-            builder.requestBody(maskArgs(joinPoint));
-
-                auditEventRecorder.record(builder.build());
-        } catch (Exception ex) {
-            log.warn("Failed to persist audit log for {}#{}: {}",
+            auditEventRecorder.record(buildAuditLog(joinPoint, auditable, null, businessError, durationMs));
+        } catch (RuntimeException auditError) {
+            businessError.addSuppressed(auditError);
+            log.error("Failed to persist audit record for failed operation {}#{}",
                     joinPoint.getSignature().getDeclaringTypeName(),
-                    joinPoint.getSignature().getName(), ex.getMessage());
+                    joinPoint.getSignature().getName(), auditError);
         }
+    }
+
+    private AuditLog buildAuditLog(ProceedingJoinPoint joinPoint, Auditable auditable,
+                                   Object result, Throwable error, long durationMs) {
+        HttpServletRequest request = currentRequest();
+        AuditLog.AuditLogBuilder builder = AuditLog.builder()
+                .userId(SecurityUtils.getCurrentUserId())
+                .username(SecurityUtils.getCurrentUsername())
+                .userRoles(SecurityUtils.getCurrentUserRoles())
+                .action(auditable.action())
+                .resourceType(auditable.resourceType())
+                .resourceId(extractResourceId(joinPoint.getArgs(), result))
+                .duration(durationMs)
+                .success(error == null)
+                .errorMessage(error != null ? GdprDataMasker.maskPii(error.getMessage()) : null)
+                .requestBody(maskArgs(joinPoint));
+
+        if (request != null) {
+            builder.requestMethod(request.getMethod())
+                    .requestUri(request.getRequestURI())
+                    .clientIp(resolveClientIp(request))
+                    .userAgent(request.getHeader("User-Agent"))
+                    .responseStatus(resolveStatus(result, error));
+        } else {
+            builder.responseStatus(error != null ? 500 : 200);
+        }
+        return builder.build();
     }
 
     /** 方法参数序列化为 JSON 后脱敏，作为请求体记录；超长截断 */
@@ -139,15 +162,12 @@ public class AuditAspect {
     }
 
     private Auditable getAuditable(ProceedingJoinPoint joinPoint) {
-        for (var m : joinPoint.getTarget().getClass().getMethods()) {
-            if (m.getName().equals(joinPoint.getSignature().getName())) {
-                Auditable a = m.getAnnotation(Auditable.class);
-                if (a != null) {
-                    return a;
-                }
-            }
+        MethodSignature signature = (MethodSignature) joinPoint.getSignature();
+        Auditable auditable = signature.getMethod().getAnnotation(Auditable.class);
+        if (auditable == null) {
+            throw new IllegalStateException("Audit advice invoked without @Auditable metadata");
         }
-        return null;
+        return auditable;
     }
 
     private HttpServletRequest currentRequest() {
@@ -176,5 +196,11 @@ public class AuditAspect {
             return status != null ? status.value() : response.getStatusCode().value();
         }
         return 200;
+    }
+
+    private static final class BusinessInvocationFailure extends RuntimeException {
+        private BusinessInvocationFailure(Throwable cause) {
+            super(cause);
+        }
     }
 }

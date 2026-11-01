@@ -3,19 +3,25 @@ package com.gdpr.audit.repository;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.gdpr.audit.entity.AuditLog;
 import com.gdpr.audit.entity.AuditChainHead;
+import com.gdpr.audit.entity.AuditOutboxEvent;
+import com.gdpr.audit.entity.User;
+import com.gdpr.audit.aspect.AuditAspect;
+import com.gdpr.audit.annotation.Auditable;
+import com.gdpr.audit.dto.UserDTO;
 import com.gdpr.audit.enums.AuditAction;
 import com.gdpr.audit.service.AuditChainService;
 import com.gdpr.audit.service.AuditChainStartupValidator;
 import com.gdpr.audit.service.AuditChainVerification;
 import com.gdpr.audit.service.AuditChainVerifier;
 import com.gdpr.audit.service.AuditEventRecorder;
-import com.gdpr.audit.repository.AuditOutboxRepository;
+import com.gdpr.audit.service.AuditOutboxClaimService;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.autoconfigure.orm.jpa.DataJpaTest;
 import org.springframework.boot.test.autoconfigure.jdbc.AutoConfigureTestDatabase;
 import org.springframework.jdbc.core.JdbcTemplate;
+import org.springframework.http.ResponseEntity;
 import org.springframework.test.context.DynamicPropertyRegistry;
 import org.springframework.test.context.DynamicPropertySource;
 import org.springframework.context.annotation.Import;
@@ -23,15 +29,24 @@ import org.springframework.boot.test.context.TestConfiguration;
 import org.springframework.context.annotation.Bean;
 import org.springframework.transaction.annotation.Propagation;
 import org.springframework.transaction.annotation.Transactional;
+import org.springframework.transaction.PlatformTransactionManager;
+import org.springframework.transaction.support.TransactionTemplate;
 import jakarta.persistence.EntityManager;
 import org.testcontainers.containers.PostgreSQLContainer;
 import org.testcontainers.junit.jupiter.Container;
 import org.testcontainers.junit.jupiter.Testcontainers;
+import org.testcontainers.utility.MountableFile;
+import org.aspectj.lang.ProceedingJoinPoint;
+import org.aspectj.lang.reflect.MethodSignature;
 
 import java.time.LocalDateTime;
+import java.sql.SQLException;
 import java.util.List;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
+import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.when;
 
 @DataJpaTest(properties = {
         "spring.jpa.hibernate.ddl-auto=create-drop",
@@ -41,10 +56,19 @@ import static org.assertj.core.api.Assertions.assertThat;
 })
 @AutoConfigureTestDatabase(replace = AutoConfigureTestDatabase.Replace.NONE)
 @Import({AuditChainService.class, AuditChainVerifier.class, AuditChainStartupValidator.class,
-    AuditEventRecorder.class, com.gdpr.audit.service.AuditOutboxPublisher.class,
+    AuditEventRecorder.class, AuditAspect.class, com.gdpr.audit.service.AuditOutboxPublisher.class,
+    AuditOutboxClaimService.class,
     AuditLogRepositoryIT.JsonConfiguration.class})
 @Testcontainers
+@SuppressWarnings({"null", "resource"})
 class AuditLogRepositoryIT {
+
+    static class AuditedOperation {
+        @Auditable(action = AuditAction.CREATE, resourceType = "User")
+        public ResponseEntity<UserDTO> create() {
+            return ResponseEntity.ok().build();
+        }
+    }
 
     @TestConfiguration
     static class JsonConfiguration {
@@ -83,7 +107,16 @@ class AuditLogRepositoryIT {
     private AuditEventRecorder auditEventRecorder;
 
     @Autowired
+    private AuditAspect auditAspect;
+
+    @Autowired
+    private UserRepository userRepository;
+
+    @Autowired
     private AuditOutboxRepository outboxRepository;
+
+    @Autowired
+    private AuditOutboxClaimService outboxClaimService;
 
     @Autowired
     private JdbcTemplate jdbcTemplate;
@@ -91,9 +124,21 @@ class AuditLogRepositoryIT {
     @Autowired
     private EntityManager entityManager;
 
+    @Autowired
+    private PlatformTransactionManager transactionManager;
+
     @BeforeEach
     void cleanRepository() {
+        jdbcTemplate.execute("DROP TRIGGER IF EXISTS trg_audit_logs_no_update ON audit_logs");
+        jdbcTemplate.execute("DROP TRIGGER IF EXISTS trg_audit_logs_no_delete ON audit_logs");
+        jdbcTemplate.execute("DROP TRIGGER IF EXISTS trg_outbox_delete_only_expired_sent ON audit_outbox_events");
+        jdbcTemplate.execute("DROP TRIGGER IF EXISTS trg_chain_heads_no_delete ON audit_chain_heads");
+        jdbcTemplate.execute("DROP TRIGGER IF EXISTS trg_chain_heads_no_rollback ON audit_chain_heads");
+        outboxRepository.deleteAll();
         repository.deleteAll();
+        chainHeadRepository.deleteAll();
+        chainHeadRepository.flush();
+        entityManager.clear();
         chainHeadRepository.save(new AuditChainHead(
             AuditChainService.STREAM_ID,
             1,
@@ -235,6 +280,175 @@ class AuditLogRepositoryIT {
             jdbcTemplate.execute("DROP TRIGGER IF EXISTS reject_outbox_insert_trigger ON audit_outbox_events");
             jdbcTemplate.execute("DROP FUNCTION IF EXISTS reject_outbox_insert()");
         }
+    }
+
+    @Test
+    @Transactional(propagation = Propagation.NOT_SUPPORTED)
+    void failsClosedAndRollsBackBusinessWriteWhenAuditOutboxFails() throws Throwable {
+        jdbcTemplate.execute("""
+                CREATE FUNCTION reject_outbox_insert() RETURNS trigger AS $$
+                BEGIN
+                    RAISE EXCEPTION 'forced outbox failure';
+                END;
+                $$ LANGUAGE plpgsql
+                """);
+        jdbcTemplate.execute("""
+                CREATE TRIGGER reject_outbox_insert_trigger
+                BEFORE INSERT ON audit_outbox_events
+                FOR EACH ROW EXECUTE FUNCTION reject_outbox_insert()
+                """);
+
+        AuditedOperation target = new AuditedOperation();
+        ProceedingJoinPoint joinPoint = mock(ProceedingJoinPoint.class);
+        MethodSignature signature = mock(MethodSignature.class);
+        when(joinPoint.getTarget()).thenReturn(target);
+        when(joinPoint.getSignature()).thenReturn(signature);
+        when(signature.getName()).thenReturn("create");
+        when(signature.getMethod()).thenReturn(AuditedOperation.class.getMethod("create"));
+        when(joinPoint.getArgs()).thenReturn(new Object[0]);
+        when(joinPoint.proceed()).thenAnswer(invocation -> {
+            userRepository.save(User.builder()
+                    .firstName("Fail")
+                    .lastName("Closed")
+                    .email("fail-closed@example.test")
+                    .build());
+            return ResponseEntity.ok().body(UserDTO.builder().id(1L).build());
+        });
+
+        try {
+            assertThatThrownBy(() -> auditAspect.audit(joinPoint))
+                    .isInstanceOf(IllegalStateException.class)
+                    .hasMessageContaining("Failed to enqueue audit event");
+            assertThat(userRepository.count()).isZero();
+            assertThat(repository.count()).isZero();
+            assertThat(chainHeadRepository.findById(AuditChainService.STREAM_ID)
+                    .orElseThrow().getNextSequence()).isEqualTo(1);
+        } finally {
+            jdbcTemplate.execute("DROP TRIGGER IF EXISTS reject_outbox_insert_trigger ON audit_outbox_events");
+            jdbcTemplate.execute("DROP FUNCTION IF EXISTS reject_outbox_insert()");
+        }
+    }
+
+    @Test
+    @Transactional(propagation = Propagation.NOT_SUPPORTED)
+    void concurrentConsumersClaimDisjointOutboxRows() throws Exception {
+        for (int i = 0; i < 4; i++) {
+            auditEventRecorder.record(AuditLog.builder()
+                    .userId("user-" + i)
+                    .username("user-" + i)
+                    .action(AuditAction.VIEW)
+                    .resourceType("User")
+                    .resourceId(String.valueOf(i))
+                    .success(true)
+                    .build());
+        }
+
+        java.util.concurrent.ExecutorService consumers = java.util.concurrent.Executors.newFixedThreadPool(2);
+        java.util.concurrent.CountDownLatch start = new java.util.concurrent.CountDownLatch(1);
+        try {
+            var first = consumers.submit(() -> {
+                start.await();
+                return outboxClaimService.claimBatch("consumer-a", 2,
+                        java.time.Instant.now(), java.time.Duration.ofSeconds(30));
+            });
+            var second = consumers.submit(() -> {
+                start.await();
+                return outboxClaimService.claimBatch("consumer-b", 2,
+                        java.time.Instant.now(), java.time.Duration.ofSeconds(30));
+            });
+            start.countDown();
+
+            List<Long> firstIds = first.get().stream().map(event -> event.getId()).toList();
+            List<Long> secondIds = second.get().stream().map(event -> event.getId()).toList();
+            assertThat(firstIds).hasSize(2);
+            assertThat(secondIds).hasSize(2);
+            assertThat(firstIds).doesNotContainAnyElementsOf(secondIds);
+        } finally {
+            consumers.shutdownNow();
+        }
+    }
+
+    @Test
+    @Transactional(propagation = Propagation.NOT_SUPPORTED)
+    void expiredConsumerLeaseCanBeClaimedByAnotherInstance() {
+        auditEventRecorder.record(AuditLog.builder()
+                .userId("user-1")
+                .username("user-1")
+                .action(AuditAction.VIEW)
+                .resourceType("User")
+                .success(true)
+                .build());
+
+        java.time.Instant now = java.time.Instant.now();
+        List<AuditOutboxEvent> firstClaim = outboxClaimService.claimBatch(
+                "consumer-crashed", 1, now, java.time.Duration.ofSeconds(5));
+        assertThat(firstClaim).hasSize(1);
+
+        List<AuditOutboxEvent> recoveredClaim = outboxClaimService.claimBatch(
+                "consumer-recovery", 1, now.plusSeconds(6), java.time.Duration.ofSeconds(5));
+        assertThat(recoveredClaim).extracting(AuditOutboxEvent::getId)
+                .containsExactly(firstClaim.getFirst().getId());
+        assertThat(recoveredClaim.getFirst().getLeaseOwner()).isEqualTo("consumer-recovery");
+
+        java.time.Instant retryAt = now.plusSeconds(60);
+        Integer released = new TransactionTemplate(transactionManager).execute(status ->
+            outboxRepository.releaseAfterFailure(
+                recoveredClaim.getFirst().getId(), "consumer-recovery", 5, retryAt));
+        assertThat(released).isEqualTo(1);
+        assertThat(outboxClaimService.claimBatch("consumer-too-early", 1,
+            now.plusSeconds(30), java.time.Duration.ofSeconds(5))).isEmpty();
+        assertThat(outboxClaimService.claimBatch("consumer-after-backoff", 1,
+            now.plusSeconds(61), java.time.Duration.ofSeconds(5))).hasSize(1);
+    }
+
+    @Test
+    @Transactional(propagation = Propagation.NOT_SUPPORTED)
+    void restrictedApplicationRoleCanAppendButCannotMutateAuditRows() {
+        POSTGRES.copyFileToContainer(
+                MountableFile.forHostPath(java.nio.file.Path.of("scripts/db-hardening.sql").toAbsolutePath()),
+                "/tmp/db-hardening.sql");
+        try {
+            var result = POSTGRES.execInContainer("psql", "-U", "test", "-d", "audit_test",
+                    "-v", "ON_ERROR_STOP=1", "-f", "/tmp/db-hardening.sql");
+            assertThat(result.getExitCode()).isZero().withFailMessage("Hardening SQL failed: %s", result.getStderr());
+        } catch (Exception ex) {
+            throw new IllegalStateException("Unable to execute database hardening SQL", ex);
+        }
+
+        jdbcTemplate.execute((org.springframework.jdbc.core.ConnectionCallback<Void>) connection -> {
+            try (java.sql.Statement statement = connection.createStatement()) {
+                statement.execute("SET ROLE audit_app");
+                try {
+                    statement.execute("""
+                        INSERT INTO audit_logs(user_id, username, action, resource_type, timestamp)
+                        VALUES ('restricted-user', 'restricted-user', 'VIEW', 'User', CURRENT_TIMESTAMP)
+                        """);
+                        assertThat(statement.executeUpdate("""
+                            UPDATE audit_chain_heads
+                               SET next_sequence = next_sequence + 1, last_hash = repeat('1', 64)
+                             WHERE stream_id = 'global'
+                            """)).isEqualTo(1);
+                    assertThatThrownBy(() -> statement.executeUpdate(
+                        "UPDATE audit_logs SET username='changed' WHERE user_id='restricted-user'"))
+                        .isInstanceOf(SQLException.class)
+                        .hasMessageContaining("permission denied");
+                    assertThatThrownBy(() -> statement.executeUpdate(
+                        "DELETE FROM audit_logs WHERE user_id='restricted-user'"))
+                        .isInstanceOf(SQLException.class)
+                        .hasMessageContaining("permission denied");
+                                        assertThatThrownBy(() -> statement.executeUpdate("""
+                                                        UPDATE audit_chain_heads
+                                                             SET next_sequence = 1
+                                                         WHERE stream_id = 'global'
+                                                        """))
+                                                        .isInstanceOf(SQLException.class)
+                                                        .hasMessageContaining("rollback blocked");
+                } finally {
+                    statement.execute("RESET ROLE");
+                }
+            }
+            return null;
+        });
     }
 
     private AuditLog save(String userId, AuditAction action, String timestamp) {

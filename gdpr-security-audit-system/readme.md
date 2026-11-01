@@ -14,7 +14,7 @@
 
 ### 项目定位
 
-Java 21 / Spring Boot 3 审计服务示例：Keycloak 管理身份和 Realm 角色；Spring Security 校验 JWT 并授权；AOP 记录业务审计事件；个人信息在审计副本入库前脱敏；PostgreSQL 保存审计主记录，Logback 异步将结构化事件送到 Logstash/Elasticsearch，Kibana 提供检索和仪表盘。
+Java 21 / Spring Boot 3 审计服务示例：Keycloak 管理身份和 Realm 角色；Spring Security 校验 JWT 并授权；AOP 记录业务审计事件；个人信息在审计副本入库前脱敏；PostgreSQL 保存审计主记录与 Outbox，发布器确认 Elasticsearch HTTP 写入成功后标记投递完成，Kibana 提供检索和仪表盘。
 
 ### 架构
 
@@ -56,7 +56,9 @@ Keycloak 是身份提供方，负责用户、Realm 角色和令牌签发；Sprin
 
 #### 2. 声明式审计与数据最小化
 
-业务方法用 `@Auditable` 声明“这个操作需要留痕”；`AuditAspect` 在方法执行前后收集主体、角色、资源、HTTP 上下文、结果和耗时。审计逻辑因此集中在切面中，避免每个 Controller 自己拼日志。审计异常当前按演示模式 fail-open 处理：写审计失败会告警，但不改变已经执行的业务结果。
+业务方法用 `@Auditable` 声明“这个操作需要留痕”；`AuditAspect` 在方法执行前后收集主体、角色、资源、HTTP 上下文、结果和耗时。审计逻辑因此集中在切面中，避免每个 Controller 自己拼日志。当前成功路径是 **fail-closed**：切面在执行目标方法前开启 PostgreSQL 事务，业务数据库变更、审计链和 Outbox 一起提交；审计写入失败会向外传播并回滚同一事务，不能返回业务成功。目标方法自身失败时，业务事务回滚，切面再用独立事务尽量记录失败事件；该失败事件若也无法落库会记录严重告警，但不会把原业务错误伪装成成功。
+
+这个保证只覆盖参与同一 PostgreSQL 事务的数据库变更。若被审计方法在事务中直接调用邮件、支付或第三方 HTTP，外部副作用不能被 PG 回滚；这类操作必须先写业务 Outbox，再由可幂等消费者执行外部动作，不能在事务里直接发送后期待数据库回滚撤销它。
 
 切面序列化参数副本，先限制长度，再通过 `GdprDataMasker` 对常见邮箱、电话和 IBAN 模式掩码；不会修改原始请求对象。正则掩码只是降低常见 PII 暴露的措施，不是完整的个人数据识别器：姓名、地址、非标准格式、编码/拆分后的值和其他敏感字段仍可能漏过。生产方案应采用字段级 allowlist/分类、敏感字段标注、最小化采集和人工隐私评估，而非把整个请求体默认记下来。
 
@@ -81,19 +83,106 @@ previousHash[i + 1] = recordHash[i]
 
 Transactional Outbox 的核心思想是：业务事务中同时写入权威数据和一条待投递事件，事务提交后由独立发布器异步发送。事务回滚时两者一起消失；发布器重试时可能重复发送，因此下游必须按稳定事件 ID 幂等处理。它通常提供的是“至少一次 + 幂等消费”，而不是消息只发送一次。
 
-本项目由 `AuditEventRecorder` 在一个事务中调用链追加和 Outbox 入队；Outbox 插入失败会抛出异常并使审计行与链头一起回滚。发布器将完整审计 envelope 直接 PUT 到 Elasticsearch，以 `auditLogId` 作为文档 ID；收到 2xx 才标记 `SENT`，网络错误或非 2xx 会递增重试次数并最终进入 `FAILED`，管理员可请求回放。PG 集成测试覆盖同事务落库以及 Outbox 插入失败时的整体回滚；发布器测试覆盖 ES 2xx 和 503→死信。
+本项目由 `AuditEventRecorder` 在一个事务中调用链追加和 Outbox 入队；Outbox 插入失败会抛出异常并使审计行与链头一起回滚。发布器将完整审计 envelope 直接 PUT 到 Elasticsearch，以 `auditLogId` 作为文档 ID；收到 2xx 才标记 `SENT`。消费者使用 `FOR UPDATE SKIP LOCKED` 领取 `PENDING` 事件，增加 `PROCESSING` 状态和 15 分钟租约；失败时按指数退避，达到最大次数进入 `FAILED`，管理员可请求回放。PG 集成测试覆盖并发消费者领取无重叠、租约超时接管、退避、受限账号权限以及 Outbox 插入失败时的整体回滚。
 
-该语义是“数据库内原子入队 + 对 ES 的至少一次尝试 + 稳定 ID 幂等覆盖”，不是跨 PostgreSQL/Elasticsearch 的分布式原子事务。ES 写成功但应用在更新 `SENT` 前崩溃时会重试，同一 ID 的 PUT 覆盖同一文档。当前 publisher 假设单个应用实例轮询；多实例需加入行级抢占/租约或消息中间件，避免并发重复消费。生产部署还应通过真实 ES 故障注入、认证 TLS、重试退避/熔断、积压 SLO 和恢复演练验证。
+该语义是“数据库内原子入队 + 对 ES 的至少一次尝试 + 稳定 ID 幂等覆盖”，不是跨 PostgreSQL/Elasticsearch 的分布式原子事务。ES 写成功但应用在更新 `SENT` 前崩溃时会重试，同一 ID 的 PUT 覆盖同一文档。15 分钟租约覆盖当前默认 100 条批次的 HTTP 超时上界；消费者崩溃后其他实例可在租约过期后接管。失败按指数退避（上限 256 秒），达到最大次数进入 `FAILED`，可由管理员回放。
+
+**完整性边界：**成功的 `@Auditable` 操作现在 fail-closed，PG 内业务写入、审计链和 Outbox 同事务提交；故障注入测试证明 Outbox 插入失败时业务行、审计行和链头全部回滚。仍需记住，fail-closed 会牺牲可用性：审计数据库不可用时敏感操作返回失败；客户端重试必须使用幂等键或业务幂等逻辑。它不覆盖数据库事务之外的邮件、HTTP 等外部副作用，也不抵抗同一 PG 超级用户或主机管理员。
 
 #### 5. 追加写控制、巡检与告警
 
 `scripts/db-hardening.sql` 将应用、迁移和 DBA 权限分开；应用角色对 `audit_logs` 只读/追加，REVOKE 和触发器拒绝改写/删除，链头触发器拒绝序号回退。它降低了日常应用账号误操作或被滥用的风险，但数据库超级用户仍能提升权限、禁用触发器或恢复数据；这不是 WORM。脚本只在一次性 PostgreSQL 环境验证过，尚未作为生产迁移应用到实际运行账号。
 
-`AuditIntegrityMonitor` 周期检查哈希链和 Outbox 深度，Micrometer 导出链长、链头、验证结果和积压/死信指标；API 401/403 过滤器将拒绝事件写入 PG 审计链。当前拒绝事件路径没有同步写 Outbox，也没有显式发送到 ES。`SIEM_ALERT` 是独立 logger/appender 名称，但配置仍指向本机 Logstash/控制台，不等同于部署了独立 SIEM。`/actuator/prometheus` 受 Spring Security 认证保护，匿名访问返回 401；生产抓取需配置受限的服务身份或内部网络认证策略。
+`AuditIntegrityMonitor` 周期检查哈希链和 Outbox 深度，Micrometer 导出链长、链头、验证结果和积压/死信指标；API 401/403 过滤器通过统一事务入口写入 PG 审计链和 Outbox。`SIEM_ALERT` 是独立 logger/appender 名称，但配置仍指向本机 Logstash/控制台，不等同于部署了独立 SIEM。`/actuator/prometheus` 受 Spring Security 认证保护，匿名访问返回 401；生产抓取需配置受限的服务身份或内部网络认证策略。
 
 #### 6. 测试证明了什么
 
 Testcontainers 用真实 PostgreSQL 和 Elasticsearch 测试映射、查询、索引、搜索和聚合；哈希链测试验证正常校验与篡改检测；JaCoCo 对 `GdprDataMasker` 设置了行覆盖率门槛。这些测试证明已覆盖场景的行为，不等于证明高并发吞吐、节点故障恢复、消息最终交付、管理员对抗能力、灾难恢复或法规合规。生产验收还需要故障注入、并发压测、权限负向测试、恢复演练和组织级安全/法律审查。
+
+### 学习记录：生产化相关概念
+
+| 概念 | 直白解释 | 本地能不能做 |
+|------|----------|--------------|
+| 多实例消费者租约/原子抢占 | 两个或更多 App 同时读 Outbox 时，用数据库锁或租约决定“这条消息当前由谁处理”，避免竞态、状态覆盖。 | **能。**在 Compose 跑两个 App 实例，用 PostgreSQL `FOR UPDATE SKIP LOCKED` 或租约字段实现，再用并发测试验证。 |
+| Elasticsearch 中断与恢复 | ES 停机期间事件留在 Outbox；ES 恢复后重试，成功后清除积压，重复发送不产生重复文档。 | **能。**本地停启 ES、断网、制造重复投递并观察恢复结果。 |
+| KMS/HSM | KMS 是 Key Management Service（密钥管理服务）；HSM 是 Hardware Security Module（硬件安全模块）。应用请求它们签名，但按权限策略不能导出私钥。 | **能做接口、轮换流程和本地模拟。**但本地软件密钥不能证明“管理员拿不到私钥”；这项属性要由实际 KMS/HSM 的权限和审计机制证明。 |
+| WORM 独立归档 | Write Once, Read Many：写入后，在规定保留期内无法覆盖或删除。 | **能测流程和接口。**但同一台机器上的文件权限或对象存储容器，仍可被这台机器的管理员删除，不等于独立 WORM。 |
+| 生产权限与密钥隔离 | App 只拿业务所需的最小权限；迁移、运维和密钥管理使用不同身份，秘密不放在代码或默认配置里。 | **大部分能。**本地 PostgreSQL 可验证角色权限；本地 Vault 可练习密钥注入。真实生产身份仍需在部署环境验证。 |
+| SIEM | Security Information and Event Management，集中收集多个系统的安全事件，关联、告警并交给值班人员处理。 | **能搭本地演示。**例如让告警进入单独的本地安全监控服务并验证规则；但它和被监控系统共用主机时，不能证明主机失陷后告警仍独立存在。 |
+| DPO/法务决策 | DPO（Data Protection Officer，数据保护官）与法务决定审计数据为何收集、保存多久、删除请求如何处理、法律保全何时适用。 | **技术流程可以本地开发，法律结论不能靠代码推导。**它需要对实际组织、数据和业务有责任的人批准。 |
+| 备份恢复、RPO/RTO | RPO（Recovery Point Objective）是最多能接受丢失多少数据；RTO（Recovery Time Objective）是最多能接受多久停机。恢复演练要实测备份能否恢复及耗时。 | **能测备份脚本和本机恢复。**跨主机、跨区域灾难恢复则需要相应的独立环境才能验证。 |
+
+### 本项目的本地生产就绪基线
+
+不存在适用于所有行业和系统的单一“最高标准”。本项目采用一组明确、偏严格且能在本地反复验证的基线；它是作品集项目的工程验收目标，不是行业认证，也不能替真实业务组织决定风险接受程度。
+
+| 指标 | 本项目基线 | 适用故障范围 |
+|------|------------|--------------|
+| 已提交审计事务 RPO | **0**：审计链记录和 Outbox 在同一个 PostgreSQL 事务提交；任一插入失败则整体回滚。只对已提交到仍可用 PG 持久卷的数据成立；当前切面 fail-open，因此不保证每次成功业务响应都一定有审计记录。 | App/ES 容器故障时已提交记录仍在 PG；不承诺 PG 持久卷、主机或磁盘整体损毁后的零丢失。 |
+| Outbox 消费 | 双消费者不能重复领取未过期事件；消费者崩溃后 15 分钟租约到期可接管；ES 重复 PUT 按审计 ID 幂等。 | 同一 PostgreSQL 内的多个应用实例；不是跨主机数据库 HA。 |
+| ES 单容器故障 RTO | **目标 ≤15 分钟**；PG 数据卷保留。最新完整回归中的真实 ES 容器停机/重启用例耗时 11.2 秒。App 容器自动重启尚未单独演练。 | 本机 ES 容器故障，不包含宿主机、存储设备或供电整体故障。 |
+| Elasticsearch 投影追平 | **目标 ≤15 分钟处理 1,000 条积压事件**；本地 Testcontainers 实测 1,000/1,000 全部可查，用例耗时 11.2 秒；ES 不可用时事件留在 PG Outbox，恢复后自动重试。 | 指定测试负载，不外推为任意生产吞吐。 |
+| 数据库权限 | 运行角色可读写业务数据、追加审计记录并推进链头；不能改写/删除审计行或回退链头。 | PostgreSQL 应用角色权限边界；超级用户和主机管理员仍可绕过本地控制。 |
+| 恢复演练 | `pg_dump` 备份可恢复到独立 PostgreSQL 数据目录，恢复后核对标记记录；最新完整回归用例耗时 12.2 秒。 | 同一台开发机上的逻辑备份恢复；不是异地灾备证明。 |
+
+这些数值是本项目的验收基线，不是宣称“业内最高”：例如金融系统可能要求跨可用区同步复制、极低 RTO、独立安全运营和正式审计认证；个人电脑单机无法证明这些目标。若目标组织要求更严，需替换基线并在目标环境重新演练。
+
+#### 本地故障演练
+
+在本项目 Compose 服务和端口未与其他项目冲突、`.env` 已配置的前提下，可启动第二个 App 实例（共享 PG/ES，不占宿主机 API 端口）：
+
+```bash
+APP_PORT=8082 docker compose --profile resilience up --build -d app app-secondary
+docker compose ps
+```
+
+ES 容器中断/恢复演练只停止服务，不删除数据卷：
+
+```bash
+docker compose stop elasticsearch
+# 在 ES 停止期间产生审计事件，确认事件留在 Outbox / 出现待处理积压
+docker compose start elasticsearch
+```
+
+数据库运行账号负向测试应在临时/可丢弃环境先做。先用有迁移权限的账号启动一次以创建/更新 schema，然后停 App、执行 `scripts/db-hardening.sql`，将 `.env` 中 `APP_DB_USER=audit_app`、`APP_DB_PASSWORD=change_me_app`（或脚本中设置的密码），再重建 App；确认业务读写和审计追加成功，审计 UPDATE/DELETE 被拒。脚本里的示例密码必须在真实部署前替换。不要在未备份的个人长期数据库上直接演练权限脚本。
+
+自动化证据（2026-11-01）：PG Testcontainers 10/10 通过，覆盖双消费者无重叠领取、租约过期接管、退避、执行实际 `scripts/db-hardening.sql` 后 `audit_app` 追加/推进链头成功、审计行改删及链头回退被拒，以及审计写失败时业务行/审计行/链头整体回滚；ES Testcontainers 2/2 通过，实际停止并重启 ES 容器，在恢复后用默认 100 条批次补投 1,000 条 backlog，索引 refresh 后核对 1,000/1,000，最新完整回归用例耗时 11.2 秒（目标 <15 分钟）；备份恢复测试通过，源 PG `pg_dump` 恢复到另一 PostgreSQL 容器和不同数据目录并核对记录，最新用例耗时 12.2 秒。这些是单机容器级故障证据，不覆盖主机/磁盘毁损；App 自动重启和长期 Compose 双实例并行尚未演练。
+
+### DSGVO 合规流程是什么
+
+DSGVO（欧盟《通用数据保护条例》，GDPR 的德文名称）合规不是“加上脱敏代码”或通过一组单元测试，而是组织对个人数据处理建立并持续运行的一套治理流程。系统开发者能提供技术控制和证据，但不能自行替组织决定处理是否合法，也不能凭个人项目宣称获得合规认证。
+
+典型流程包括：
+
+1. **明确角色与处理范围：**确认谁是数据控制者（决定处理目的和方式）、谁是处理者；盘点数据主体、数据类别、来源、接收方、处理目的和系统边界。
+2. **确定目的与法律依据：**每类数据只用于明确目的，并由组织确定适用的法律依据；不能因为“系统需要审计”就默认可以无限记录或长期保留。
+3. **做隐私风险评估：**识别数据泄露、越权访问、过度收集、无法履行数据主体权利等风险；高风险处理可能需要 DPIA（数据保护影响评估）。是否需要以及结论由组织/DPO 判断。
+4. **落实隐私设计与安全控制：**数据最小化、字段级脱敏/假名化、最小权限、加密、访问审计、供应商和处理者管理、事件响应。正则掩码只覆盖已知格式，不等于完整识别个人数据。
+5. **设置保存与处置规则：**为每类数据确定有依据的保留期限、归档、删除或限制处理方式；Legal Hold 必须有授权、范围和解除流程，不能用“审计不可变”作为无限期保存的理由。
+6. **建立数据主体请求流程（DSAR）：**受理访问、更正、删除、限制处理、反对或可携带性请求；完成身份核验、审批、执行、例外判断和处理留痕。删除请求与审计证据保留冲突时，应由组织 DPO/法务决定处理依据和技术方案。
+7. **准备问责证据并持续复核：**维护处理活动记录、权限审查、供应商协议、培训、事件记录和审计证据；定期检查控制是否仍有效。个人数据泄露时，组织要有评估、升级和依法通知监管机构/相关人员的流程；具体义务和时限由组织法务确认。
+
+因此，本项目的 PII 掩码、RBAC 和审计链只是可用于合规方案的**技术控制组件**，不是完整 DSGVO 合规流程。真实组织需要结合业务目的、数据类型、合同和适用法规作出判断；本 README 不构成法律意见。
+
+### 生产级意味着什么
+
+“生产级”不是做完一个技术清单就自动获得的标签，也不是一项通用认证。它表示系统针对**明确的业务要求、威胁模型和运行环境**，有设计、有运维责任人，并有测试或演练证据证明达到约定目标。至少要回答：
+
+- **保护目标和威胁主体：**要防普通用户、被盗用的应用账号、DBA，还是基础设施管理员？同一主机管理员仍能控制该主机上的容器、文件和本地秘密；若要求抵抗平台管理员，需要把密钥、锚点或告警放到他无权控制的管理域。
+- **安全和可靠性目标：**身份认证、权限边界、秘密轮换、漏洞修复、容量上限、可用性、告警响应分别由谁负责，如何验证？
+- **故障与恢复目标：**业务方先定义 RPO（允许丢失的最大数据窗口）和 RTO（允许的最大恢复时间），再通过备份恢复、数据库/ES 中断、消息积压和故障切换演练实测。
+- **数据治理责任：**明确处理目的、法律依据、字段、保留期、访问者、DSAR 和 Legal Hold 流程，并取得组织授权。
+- **证据和运营闭环：**权限负向测试、并发压测、故障注入、恢复演练、监控告警、值班和事件响应都要有结果与负责人；测试通过不等于验证了未覆盖的故障或攻击者能力。
+
+完成这些工程步骤会显著提升生产就绪度，但不能单独推出“已认证”或“满足所有法规”。目标环境、业务要求和独立审查仍决定最终是否可投产；生产级是针对具体场景的验收结论，不是代码库自我授予的称号。
+
+### 必须使用云服务吗
+
+**不必须。**生产系统可以部署在企业自有数据中心、托管机房、私有云、公有云或混合环境。KMS/HSM 可以是自有硬件 HSM 或合规托管服务；不可变归档可以使用云 Object Lock，也可以使用由另一套独立管理域控制的企业归档平台。关键不是“用了云”，而是权限、管理职责和恢复副本是否真正隔离，以及能否验证。
+
+本机可完成并证明很多工程工作：跑多个 App 实例、实现 Outbox 行锁/租约、停止 ES 后验证积压恢复、做数据库最小权限负向测试、搭本地 SIEM 接收器、备份后恢复到新卷、测本机 RPO/RTO。单机模拟适合开发和故障测试，但多个容器仍由同一个主机管理员控制，所以不能证明抵抗该管理员，也不能代表异地灾害恢复。若要求这些独立性属性，才需要不同主机、不同管理账号、独立 HSM/归档服务或组织控制的环境；云只是可选实现方式之一。
+
+**面试回答示例：**“我不会把本地 HMAC 原型称为绝对不可篡改。当前设计能防止或检测应用账号权限范围内的常见改写，并通过集成测试验证事务回滚和 ES 投递确认。下一步我会先明确要抵御的威胁主体和 RPO/RTO，再完成多实例竞争、故障恢复、权限负向测试和恢复演练。若要求抵抗主机/平台管理员，我会把签名密钥、检查点归档或告警移到由不同权限主体控制的信任域；这可以在自建机房或云上实现，云本身不是安全保证。数据处理依据与保留期由组织 DPO/法务批准。”
 
 ### 运行演示
 
@@ -127,7 +216,7 @@ DOCKER_HOST=unix://$HOME/.docker/run/docker.sock mvn -Dapi.version=1.44 verify
 
 ### 当前安全边界
 
-当前项目虽已实现 PG 内审计链+Outbox 原子入队，以及带 HTTP 成功确认的 ES 投递，**仍不是生产级不可篡改审计**：PG 与 ES 不是分布式原子事务；HMAC 密钥与链头未隔离到独立信任域；管理员仍可能绕过本地权限；单实例、多租户、灾备和法规流程未完成。演示凭据、Keycloak `start-dev`、HTTP 和关闭 ES 安全功能仅适用于本地。生产级目标及验收标准见 Phase 2 路线图。此说明不是 DSGVO/法律合规意见，保留期与数据主体请求需由组织 DPO/法务确认。
+当前项目已实现 PG 内审计链+Outbox 原子入队、多实例 Outbox 租约领取，以及带 HTTP 成功确认的 ES 投递，**仍不是生产级不可篡改审计**：PG 与 ES 不是分布式原子事务；HMAC 密钥与链头未隔离到独立信任域；数据库和应用仍同处单机管理域；PG 高可用、异地主机灾备、多租户和组织级法规流程未完成。演示凭据、Keycloak `start-dev`、HTTP 和关闭 ES 安全功能仅适用于本地。生产级目标及验收标准见本节基线与 Phase 2 路线图。此说明不是 DSGVO/法律合规意见，保留期与数据主体请求需由组织 DPO/法务确认。
 
 ### 项目状态与收尾验收 — 2026-11-01
 
@@ -141,20 +230,20 @@ DOCKER_HOST=unix://$HOME/.docker/run/docker.sock mvn -Dapi.version=1.44 verify
 |------|------------|
 | Phase 1（Task 01-27） | Keycloak/OIDC、RBAC、AOP 审计、PII 掩码、PG/ELK、Kibana 九面板和 Testcontainers；历史完整验收记录见下方项目收尾快照。 |
 | Task 29 哈希链 | HMAC-SHA256、确定性二进制字段编码、链头悲观锁、启动一致性检查；2026-11-01 PG 集成测试验证正常链通过，篡改后失败。 |
-| Task 31 数据库加固 | `scripts/db-hardening.sql`；在一次性 PostgreSQL 16 容器实测脚本安装成功，`audit_app` 可追加记录并推进链头，更新/删除审计行被拒，链头回退被触发器拒绝。该测试未改动 Compose 使用的数据库。 |
+| Task 30/31 多实例与权限 | Outbox 通过 PostgreSQL `SKIP LOCKED` + 租约领取；Testcontainers 实测两个消费者无重复领取、过期租约接管、退避；PG 测试实际执行 `scripts/db-hardening.sql`，验证 `audit_app` 可追加、审计行改删被拒、链头不可回退。Compose 长期运行数据库仍未切换为该受限账号。 |
 | Task 34/38 巡检基线 | 完整性巡检、SAFE MODE、Prometheus 告警规则和 Runbook 已实现；代码测试通过。 |
 | Task 35 安全拒绝事件 | API 401/403 事件进入审计链并做脱敏；过滤器单测通过。 |
 | Task 39/40 运维接口 | Outbox 死信查询/回放、ES `document_id` 幂等配置和审计链指标已实现。 |
-| 收尾验证 | 2026-11-01 完整 `mvn -Dapi.version=1.44 verify`：BUILD SUCCESS；JaCoCo 检查 `GdprDataMasker` 51/56 行（91.1%）通过。`docker compose config --quiet` 通过；当前演示栈健康端点返回 `UP`。 |
+| 收尾验证 | 最近一次完整 `mvn -Dapi.version=1.44 verify`：BUILD SUCCESS；PG/ES Testcontainers、JaCoCo `GdprDataMasker` 51/56 行（91.1%）通过。本文所述新的并发、权限、停启 ES 千条恢复和双卷备份测试已分别通过窄验证；之后会再跑一次完整 verify。 |
 
 #### 已实现但仍缺端到端或外部验收
 
 | 范围 | 尚缺的证据 |
 |------|------------|
-| Task 30 Outbox | 已验证 DB 原子入队回滚、发布器对 ES 2xx/503 的处理；仍需多实例并发抢占、真实 ES 重启/网络分区、积压恢复和重放端到端演练。当前实现直连 ES，不再依赖 Logstash；如保留 Logstash 管道，需明确其用途并验证不会造成双路重复写。 |
+| Task 30 Outbox | 已验证原子入队回滚、SKIP LOCKED 并发领取、租约接管/退避，以及真实 ES 停止重启后 1,000 条积压约 12.4 秒追平；仍需长期运行多 App Compose 故障演练及生产级负载测量。当前实现直连 ES，不再依赖 Logstash。 |
 | Task 34/39/40 运行接入 | SIEM 未连接；真实 ES 故障恢复、重复投递和回放仍需 Compose 端到端验收。`/actuator/prometheus` 受 Spring Security 保护，匿名请求实测返回 401；抓取器需配置认证。 |
 | Task 35 身份事件 | 应用 API 的 401/403 现经统一事务入口写入 PG 和 Outbox；Keycloak 登录/登出、失败认证及管理面变更事件源尚未接入。 |
-| Task 28/31/38 | 威胁模型待 DPO/法务签署；加固脚本已在隔离 PG 验证，但尚未应用到长期运行的 Compose 数据库；重启/崩溃故障注入未完成。 |
+| Task 28/31/38 | 威胁模型待 DPO/法务签署；加固脚本在 PG Testcontainers 实际执行并通过权限负测，但尚未应用到长期运行的 Compose 数据库；PostgreSQL/宿主机故障恢复边界仍需独立演练。 |
 
 #### 生产化范围（有意不在本地演示中虚构完成）
 
@@ -163,7 +252,7 @@ DOCKER_HOST=unix://$HOME/.docker/run/docker.sock mvn -Dapi.version=1.44 verify
 | Task 32 KMS/HSM | 外部 KMS/HSM 账号、不可导出签名密钥及密钥生命周期策略。 |
 | Task 33 独立 WORM | 与应用管理权限隔离的对象存储账户、锁定保留策略及法律批准的保留期。 |
 | Task 36 DSGVO/DSAR | DPO/法务对删除权、保留依据、期限、Legal Hold 和 DSAR 流程作书面裁定。 |
-| Task 37 生产部署 | 真实域名/TLS、CI/镜像仓库/Secret Manager、备份恢复目标及 RPO/RTO 演练环境。 |
+| Task 37 生产部署 | 真实域名/TLS、CI/镜像仓库/Secret Manager、异地主机备份恢复、HA 和组织批准的 RPO/RTO 演练。单机逻辑备份恢复已测，但不等于异地灾备。 |
 
 **作品集收尾结论：**本仓库可作为本地可运行、测试通过的安全审计演示项目收尾；简历可描述已实现的技术能力，但须将 KMS/HSM、外部 WORM、Keycloak 管理事件和生产合规验证列为未完成/生产化工作。任务级状态与已知限制以 [`task_breakdown.md`](task_breakdown.md) 为准。
 
@@ -174,7 +263,7 @@ DOCKER_HOST=unix://$HOME/.docker/run/docker.sock mvn -Dapi.version=1.44 verify
 
 ### Project scope
 
-A Java 21 / Spring Boot 3 audit-service demo. Keycloak manages identities and realm roles; Spring Security validates JWTs and authorizes requests; an AOP aspect records business events; PII is masked in the audit copy before persistence. PostgreSQL stores the primary audit record, while Logback asynchronously sends structured events through Logstash to Elasticsearch for Kibana search and dashboards.
+A Java 21 / Spring Boot 3 audit-service portfolio system. Keycloak manages identities and realm roles; Spring Security validates JWTs and authorizes requests; an AOP aspect records business events; PII is masked in the audit copy before persistence. PostgreSQL atomically stores the audit chain and Outbox; multiple app instances claim Outbox work with PostgreSQL row locking and lease expiry, then write to Elasticsearch using an idempotent document ID. Kibana provides search and dashboards.
 
 ### Request flow
 
@@ -182,8 +271,8 @@ A Java 21 / Spring Boot 3 audit-service demo. Keycloak manages identities and re
 2. Spring Security validates issuer/JWK; `JwtRoleConverter` maps Keycloak roles to Spring `GrantedAuthority` values.
 3. URL rules and method-security annotations authorize the API operation.
 4. `@Auditable` invokes `AuditAspect` to capture principal, roles, resource ID, HTTP result, and duration.
-5. The masked audit copy is stored in PostgreSQL; structured AUDIT JSON is queued asynchronously.
-6. Logstash derives `severity` and `environment`, writes to Elasticsearch, and Kibana provides search and aggregation.
+5. The masked audit copy, chain head, and Outbox event commit in one PostgreSQL transaction.
+6. Outbox consumers claim work with `FOR UPDATE SKIP LOCKED`; Elasticsearch 2xx confirms delivery, stable event IDs make retries idempotent, and Kibana provides search and aggregation.
 
 ### Run the demo
 
@@ -211,11 +300,11 @@ mvn test
 DOCKER_HOST=unix://$HOME/.docker/run/docker.sock mvn -Dapi.version=1.44 verify
 ```
 
-The full verification covers PII masking, PostgreSQL/Elasticsearch Testcontainers, indexes/mappings/aggregations, and a JaCoCo line-coverage gate of at least 90% for `GdprDataMasker`.
+The full verification covers PII masking, PostgreSQL/Elasticsearch-Testcontainers, indexes/mappings/aggregations, and a JaCoCo line-coverage gate of at least 90% for `GdprDataMasker`.
 
 ### Security boundary
 
-The project now atomically writes the audit chain and Outbox within PostgreSQL and marks delivery only after an Elasticsearch HTTP success response. It is still **not production-grade immutable auditing**: PostgreSQL and Elasticsearch are not one distributed transaction; HMAC keys and chain heads are not isolated in an independent trust domain; privileged administrators can bypass local controls; multi-instance coordination, disaster recovery, and legal workflows remain incomplete. Demo credentials, Keycloak `start-dev`, HTTP, and disabled Elasticsearch security are local-development settings only. Retention and data-subject handling require review by the organization's DPO/legal team; this repository is not legal advice.
+The project atomically writes the audit chain and Outbox within PostgreSQL, supports multiple Outbox consumers with leases, and marks ES projection complete only after HTTP success. It is still **not production-certified or immutable against platform administrators**: PostgreSQL and Elasticsearch are not one distributed transaction; HMAC keys and chain heads are not isolated in an independent trust domain; the Compose runtime has not been switched to its restricted DB role; host-loss disaster recovery and legal governance remain incomplete. Demo credentials, Keycloak `start-dev`, HTTP, and disabled Elasticsearch security are local-development settings only. Retention and data-subject handling require review by the organization's DPO/legal team; this repository is not legal advice.
 
 ---
 
@@ -223,7 +312,7 @@ The project now atomically writes the audit chain and Outbox within PostgreSQL a
 
 ### Projektumfang
 
-Ein Audit-Service-Demo mit Java 21 und Spring Boot 3. Keycloak verwaltet Identitäten und Realm-Rollen; Spring Security prüft JWTs und autorisiert Anfragen; ein AOP-Aspect protokolliert Geschäftsereignisse. Personenbezogene Daten werden in der Audit-Kopie vor der Speicherung maskiert. PostgreSQL speichert den primären Audit-Datensatz; strukturierte Ereignisse werden asynchron über Logstash an Elasticsearch für Suche und Kibana-Dashboards gesendet.
+Ein Audit-Service-Portfolio-Projekt mit Java 21 und Spring Boot 3. Keycloak verwaltet Identitäten und Realm-Rollen; Spring Security prüft JWTs und autorisiert Anfragen; ein AOP-Aspect protokolliert Geschäftsereignisse. Personenbezogene Daten werden in der Audit-Kopie vor der Speicherung maskiert. PostgreSQL speichert Audit-Kette und Outbox atomar; mehrere App-Instanzen übernehmen Outbox-Ereignisse mit Zeilensperren und Lease-Ablauf und schreiben idempotent nach Elasticsearch. Kibana dient Suche und Dashboard.
 
 ### Ablauf einer Anfrage
 
@@ -231,8 +320,8 @@ Ein Audit-Service-Demo mit Java 21 und Spring Boot 3. Keycloak verwaltet Identit
 2. Spring Security prüft Issuer/JWK; `JwtRoleConverter` bildet Keycloak-Rollen auf Spring `GrantedAuthority` ab.
 3. URL-Regeln und Method-Security autorisieren den API-Aufruf.
 4. `@Auditable` aktiviert `AuditAspect`, der Identität, Rollen, Ressourcen-ID, HTTP-Ergebnis und Dauer erfasst.
-5. Die maskierte Audit-Kopie wird in PostgreSQL gespeichert; strukturiertes AUDIT-JSON wird asynchron eingereiht.
-6. Logstash ergänzt `severity` und `environment`, schreibt nach Elasticsearch; Kibana ermöglicht Suche und Aggregation.
+5. Die maskierte Audit-Kopie, der Kettenkopf und das Outbox-Ereignis werden gemeinsam in einer PostgreSQL-Transaktion gespeichert.
+6. Outbox-Consumer übernehmen Ereignisse mit `FOR UPDATE SKIP LOCKED`; erst eine erfolgreiche Elasticsearch-HTTP-Antwort bestätigt die Zustellung. Stabile Ereignis-IDs machen Wiederholungen idempotent.
 
 ### Demo starten
 
@@ -264,7 +353,7 @@ Die vollständige Prüfung umfasst PII-Maskierung, PostgreSQL/Elasticsearch-Test
 
 ### Sicherheitsgrenzen
 
-Das Projekt schreibt Audit-Kette und Outbox inzwischen atomar innerhalb von PostgreSQL und markiert die Zustellung erst nach einer erfolgreichen Elasticsearch-HTTP-Antwort. Es ist weiterhin **keine produktionsreife manipulationssichere Audit-Plattform**: PostgreSQL und Elasticsearch bilden keine gemeinsame verteilte Transaktion; HMAC-Schlüssel und Kettenkopf sind nicht in einer unabhängigen Vertrauensdomäne isoliert; privilegierte Administratoren können lokale Kontrollen umgehen; Mehrinstanzbetrieb, Disaster Recovery und rechtliche Abläufe sind unvollständig. Demo-Zugangsdaten, Keycloak `start-dev`, HTTP und deaktivierte Elasticsearch-Sicherheit sind ausschließlich für die lokale Entwicklung vorgesehen. Aufbewahrungsfristen und Betroffenenrechte müssen durch DPO/Rechtsabteilung geprüft werden; dieses Projekt ist keine Rechtsberatung.
+Das Projekt schreibt Audit-Kette und Outbox atomar innerhalb von PostgreSQL, unterstützt mehrere Outbox-Consumer mit Lease und markiert die Zustellung erst nach einer erfolgreichen Elasticsearch-HTTP-Antwort. Es ist weiterhin **keine produktionszertifizierte oder gegen Plattformadministratoren manipulationssichere Audit-Plattform**: PostgreSQL und Elasticsearch bilden keine gemeinsame verteilte Transaktion; HMAC-Schlüssel und Kettenkopf sind nicht in einer unabhängigen Vertrauensdomäne isoliert; die Compose-Laufzeit verwendet noch nicht die eingeschränkte DB-Rolle; PostgreSQL-HA, standortübergreifende Wiederherstellung und rechtliche Abläufe sind unvollständig. Demo-Zugangsdaten, Keycloak `start-dev`, HTTP und deaktivierte Elasticsearch-Sicherheit sind ausschließlich für die lokale Entwicklung vorgesehen. Aufbewahrungsfristen und Betroffenenrechte müssen durch DPO/Rechtsabteilung geprüft werden; dieses Projekt ist keine Rechtsberatung.
 
 ---
 

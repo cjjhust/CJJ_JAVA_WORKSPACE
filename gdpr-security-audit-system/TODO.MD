@@ -1,3 +1,23 @@
+## Fail-closed 审计事务进展（2026-11-01）
+
+- **已改变的策略：**`@Auditable` 成功路径不再 fail-open。`AuditAspect` 用 PostgreSQL `TransactionTemplate` 包住敏感数据库操作；目标方法成功后追加审计链并写 Outbox，再统一提交。Outbox/审计写失败会传播异常并回滚同一事务，不会返回业务成功。
+- **业务异常语义：**目标方法抛错时先回滚业务事务，再用独立事务写 `success=false` 的失败审计；若失败事件自身也无法落库，记录 ERROR 并保留原业务异常。fail-closed 保护成功路径证据，不应把已失败的业务操作改写成成功。
+- **故障注入：**PG Testcontainers 强制 Outbox INSERT 失败；AOP 目标方法先插入 User，最终调用抛出审计异常，业务 User 行、审计行和链头均回滚。`AuditLogRepositoryIT` 10/10 通过。
+- **完整验证：**`DOCKER_HOST=unix://$HOME/.docker/run/docker.sock mvn -Dapi.version=1.44 verify`：BUILD SUCCESS；Surefire 39/39，PG 集成 10/10，ES 集成 2/2，备份恢复 1/1，共 52 项通过；JaCoCo 门槛通过。默认与 `resilience` Compose 配置解析、`git diff --check` 通过。
+- **边界：**同一 PostgreSQL 事务内的业务数据库写入可和审计一起回滚；邮件、支付、第三方 HTTP 等不可由 PG 回滚，必须由业务 Outbox/幂等消费者处理。fail-closed 会在审计数据库不可用时拒绝敏感操作，提升完整性但降低可用性；客户端重试需幂等键。它不抵抗 PG 超级用户或主机管理员。
+- 本次追加前备份：`/tmp/TODO.MD.before-fail-closed-20261101`。
+
+## 本地韧性基线进展（2026-11-01，覆盖下方旧快照）
+
+- **本轮目标：**对已提交 PostgreSQL 审计/Outbox 事务定义 RPO=0；对本地 ES 单容器故障定义 RTO≤15 分钟；对 1,000 条 Outbox backlog 定义 ES 恢复后 15 分钟内追平。RPO 仅适用于 PG 持久卷仍可用，不代表宿主机/磁盘毁损时零丢失；`AuditAspect` 仍 fail-open，不代表每个成功业务请求必有审计记录。
+- **多实例消费者：**Outbox 新增 `PROCESSING`、`lease_owner`、`lease_until`、`next_attempt_at`；PostgreSQL `FOR UPDATE SKIP LOCKED` 领取，租约默认 900 秒，失败指数退避最高 256 秒，成功/失败状态更新按 owner 条件事务提交。Compose 增加 `resilience` profile 的第二 App 实例，但本轮未重建当前运行 App，也未在现有演示栈长时间启动双实例。
+- **PG Testcontainers 9/9：**两个消费者批次无重叠；租约过期接管；退避窗口内不重领、到期后可重试；真实执行 `scripts/db-hardening.sql` 后以 `audit_app` 验证 INSERT 和链头前进成功、审计行 UPDATE/DELETE 被拒、链头回退被拒；原子 Outbox 失败回滚测试通过。
+- **ES Testcontainers 2/2：**真实停止并重启 Elasticsearch 容器；1,000 条 backlog 按默认 100 条批次恢复投递，refresh 后查询 1,000/1,000；本次恢复用例 10.7 秒，低于 15 分钟项目目标。
+- **备份恢复：**PostgreSQL 16 `pg_dump` 恢复到独立容器和另一数据目录，恢复记录核验成功；用例 11.4 秒。此为单机逻辑备份恢复，不是异地灾备证明。
+- **全量验证：**`DOCKER_HOST=unix://$HOME/.docker/run/docker.sock mvn -Dapi.version=1.44 verify`：BUILD SUCCESS；PG 9/9、ES 2/2、备份恢复 1/1、Surefire 39/39，共 51 项测试，JaCoCo 90% 门槛通过。ES 停启/1,000 条补投 11.2 秒；PG 独立数据目录恢复 12.2 秒。默认与 `resilience` Compose 配置均解析通过；编辑器 Java 诊断清零。
+- **仍未完成：**现有 Compose App 尚未切换至 `audit_app`；双实例 Compose 长时间联跑与 App 自动重启未实测；PG 高可用/异地灾备、独立 KMS/WORM、独立 SIEM、Keycloak 管理事件及 DPO/法务决策仍不在本地容器测试可证明范围。
+- 本次追加前备份：`/tmp/TODO.MD.before-resilience-count-correction-20261101`；初始增量备份：`/tmp/TODO.MD.before-resilience-closeout-20261101`。
+
 ## 为什么当前版本还不能用于生产（2026-11-01）
 
 本项目适合作品集/本地演示；“测试通过”只表示已覆盖的功能路径工作，不代表满足生产级安全、可用性、可恢复性或法律合规。下面列出从实现中确认的具体差距，后续状态以验收证据为准。
