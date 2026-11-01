@@ -1,7 +1,11 @@
 ## CI 流水线与项目定位评估（2026-11-01，覆盖下方旧快照）
 
-- **新增 CI：**仓库根目录 `.github/workflows/gdpr-audit-ci.yml`（本仓库是多项目仓库，故用 `working-directory: gdpr-security-audit-system`）。`verify` 作业跑与本地一致的 `mvn -B -ntp verify`（单测 + 4 套 Testcontainers + JaCoCo 门槛），失败也上传 surefire/failsafe/JaCoCo 报告；`image` 作业用 `.env.example` 校验默认与 `resilience` 两套 compose 配置并执行 `docker build`；按 `paths` 过滤，仅本项目变更时触发。本地已用 `ruby -ryaml` 解析确认 YAML 结构合法，**首次远端运行尚未观察**，故评分中暂不给 CI 计分。
-- **文档：**readme 新增「持续集成（GitHub Actions）」章节与 CI 徽章；新增「项目定位与能力边界（第三方复核）」章节，按"本项目在同类作品集中的位置 / 本项目仍有不足 / 本项目可以作为 / 本项目不能作为"四段客观陈述，未上调评分（仍为 89/100，CI 首次远端通过后可至 90）。
+- **新增 CI：**仓库根目录 `.github/workflows/gdpr-audit-ci.yml`（本仓库是多项目仓库，故用 `working-directory: gdpr-security-audit-system`）。`verify` 作业跑与本地一致的 `mvn -B -ntp verify`（单测 + 4 套 Testcontainers + JaCoCo 门槛），失败也上传 surefire/failsafe/JaCoCo 报告并输出失败用例注解；`image` 作业用 `.env.example` 校验默认与 `resilience` 两套 compose 配置并执行 `docker build`；按 `paths` 过滤，仅本项目变更时触发。
+- **首次远端运行通过（`e9a49e3`）。** 过程中暴露并修复了两个只在 Linux runner 才出现的问题，本地 macOS 无法复现：
+  1. GitHub 托管 runner 默认 `vm.max_map_count=65530`，Elasticsearch 容器在 bootstrap check 阶段退出 → 流水线加 `sudo sysctl -w vm.max_map_count=262144`；
+  2. `PostgresBackupRestoreIT` 清理绑定目录时抛 `AccessDeniedException`（PG 容器以 uid 999/700 写入，宿主机用户无法遍历删除；macOS Docker Desktop 经 VM 映射掩盖了差异）→ 清理改为尽力而为，并把恒真的 `sourceData != restoredData` 断言换成两个容器 ID 比较。
+- **定位手段：**无凭据时拿不到 Actions 日志（`/actions/jobs/{id}/logs` 返回 403、API 有速率限制），因此在流水线里加了一步把 surefire/failsafe 失败用例写成 GitHub 注解，再用运行页面读出失败用例与断言消息。
+- **文档：**readme 新增「持续集成（GitHub Actions）」章节与 CI 徽章；新增「项目定位与能力边界（第三方复核）」章节，按"本项目在同类作品集中的位置 / 本项目仍有不足 / 本项目可以作为 / 本项目不能作为"四段客观陈述。评分由 89 上调至 **90/100**（生产就绪 12→13，CI 首次远端通过后才计分）。
 - **不变的边界：**单服务单机、无云部署与真实压测、无产品化前端、Keycloak 管理事件与 DSAR/保留策略未闭环、代码量约 3,900 行属"小体积深项目"。
 - 本次追加前备份：`/tmp/TODO.MD.before-ci-20261101`、`/tmp/readme.md.before-ci-20261101`。
 
