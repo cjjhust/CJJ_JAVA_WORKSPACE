@@ -14,6 +14,8 @@ services:
       - "5432:5432"
     volumes:
       - postgres_data:/var/lib/postgresql/data
+      # 首次初始化时创建 audit_app 受限账号（append-only 审计权限，见 db-hardening）
+      - ./docker/postgres-init:/docker-entrypoint-initdb.d:ro
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U audit_user -d audit_db"]
       interval: 5s
@@ -153,8 +155,11 @@ services:
     restart: unless-stopped
     environment:
       SPRING_DATASOURCE_URL: jdbc:postgresql://postgres:5432/${POSTGRES_DB:-audit_db}
-      SPRING_DATASOURCE_USERNAME: ${APP_DB_USER:-audit_user}
-      SPRING_DATASOURCE_PASSWORD: ${APP_DB_PASSWORD:-audit_password}
+      SPRING_DATASOURCE_USERNAME: ${APP_DB_USER:-audit_app}
+      SPRING_DATASOURCE_PASSWORD: ${APP_DB_PASSWORD:-audit_app_password}
+      # 迁移使用具备 DDL 权限的账号，与运行账号分离
+      FLYWAY_USER: ${POSTGRES_USER:-audit_user}
+      FLYWAY_PASSWORD: ${POSTGRES_PASSWORD:-audit_password}
       SPRING_SECURITY_OAUTH2_RESOURCESERVER_JWT_ISSUER_URI: http://localhost:8080/realms/audit-realm
       SPRING_SECURITY_OAUTH2_RESOURCESERVER_JWT_JWK_SET_URI: http://keycloak:8080/realms/audit-realm/protocol/openid-connect/certs
       AUDIT_CHAIN_HMAC_KEY: ${AUDIT_CHAIN_HMAC_KEY:?Set AUDIT_CHAIN_HMAC_KEY in .env}
@@ -186,8 +191,11 @@ services:
     restart: unless-stopped
     environment:
       SPRING_DATASOURCE_URL: jdbc:postgresql://postgres:5432/${POSTGRES_DB:-audit_db}
-      SPRING_DATASOURCE_USERNAME: ${APP_DB_USER:-audit_user}
-      SPRING_DATASOURCE_PASSWORD: ${APP_DB_PASSWORD:-audit_password}
+      SPRING_DATASOURCE_USERNAME: ${APP_DB_USER:-audit_app}
+      SPRING_DATASOURCE_PASSWORD: ${APP_DB_PASSWORD:-audit_app_password}
+      # 迁移使用具备 DDL 权限的账号，与运行账号分离
+      FLYWAY_USER: ${POSTGRES_USER:-audit_user}
+      FLYWAY_PASSWORD: ${POSTGRES_PASSWORD:-audit_password}
       SPRING_SECURITY_OAUTH2_RESOURCESERVER_JWT_ISSUER_URI: http://localhost:8080/realms/audit-realm
       SPRING_SECURITY_OAUTH2_RESOURCESERVER_JWT_JWK_SET_URI: http://keycloak:8080/realms/audit-realm/protocol/openid-connect/certs
       AUDIT_CHAIN_HMAC_KEY: ${AUDIT_CHAIN_HMAC_KEY:?Set AUDIT_CHAIN_HMAC_KEY in .env}

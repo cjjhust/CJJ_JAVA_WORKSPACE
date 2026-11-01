@@ -62,7 +62,7 @@ public class AuditLog {
 
     /** 操作类型 */
     @Enumerated(EnumType.STRING)
-    @Column(nullable = false)
+    @Column(nullable = false, length = 32)
     private AuditAction action;
 
     /** 资源类型（如 User、Document、Report） */
@@ -74,11 +74,11 @@ public class AuditLog {
     private String resourceId;
 
     /** HTTP 方法（GET/POST/PUT/DELETE） */
-    @Column(name = "request_method")
+    @Column(name = "request_method", length = 16)
     private String requestMethod;
 
     /** 请求路径 */
-    @Column(name = "request_uri")
+    @Column(name = "request_uri", length = 512)
     private String requestUri;
 
     /** 请求体（已脱敏） */
@@ -90,11 +90,11 @@ public class AuditLog {
     private Integer responseStatus;
 
     /** 客户端 IP */
-    @Column(name = "client_ip")
+    @Column(name = "client_ip", length = 64)
     private String clientIp;
 
     /** 客户端 User-Agent */
-    @Column(name = "user_agent")
+    @Column(name = "user_agent", length = 512)
     private String userAgent;
 
     /** 方法执行耗时（毫秒） */

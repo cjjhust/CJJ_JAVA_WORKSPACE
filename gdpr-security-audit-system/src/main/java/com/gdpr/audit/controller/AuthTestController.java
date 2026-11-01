@@ -1,10 +1,16 @@
 package com.gdpr.audit.controller;
 
+import com.gdpr.audit.entity.AuditLog;
+import com.gdpr.audit.repository.AuditLogRepository;
+import lombok.RequiredArgsConstructor;
+import org.springframework.data.domain.PageRequest;
+import org.springframework.data.domain.Sort;
 import org.springframework.http.ResponseEntity;
 import org.springframework.security.access.prepost.PreAuthorize;
 import org.springframework.security.core.annotation.AuthenticationPrincipal;
 import org.springframework.security.oauth2.jwt.Jwt;
 import org.springframework.web.bind.annotation.GetMapping;
+import org.springframework.web.bind.annotation.RequestParam;
 import org.springframework.web.bind.annotation.RestController;
 
 import java.time.LocalDateTime;
@@ -15,14 +21,17 @@ import java.util.Map;
 /**
  * 认证与授权测试 Controller。
  *
- * 提供 4 个端点用于验证 OAuth2 + RBAC 是否正常工作：
+ * 端点：
  * - /api/public/health   → 无需认证
  * - /api/user/profile    → 需认证（任意角色）
  * - /api/admin/dashboard → 需 ROLE_ADMIN
- * - /api/audit/logs      → 需 ROLE_AUDITOR
+ * - /api/audit/logs      → 需 ROLE_AUDITOR，查询真实 audit_logs 表
  */
 @RestController
+@RequiredArgsConstructor
 public class AuthTestController {
+
+    private final AuditLogRepository auditLogRepository;
 
     // ========== 公开接口 ==========
 
@@ -51,8 +60,8 @@ public class AuthTestController {
                 "username", jwt.getClaimAsString("preferred_username"),
                 "email", getClaimOrDefault(jwt, "email", "N/A"),
                 "roles", extractRoles(jwt),
-                "tokenIssuedAt", jwt.getIssuedAt().toString(),
-                "tokenExpiresAt", jwt.getExpiresAt().toString()
+                "tokenIssuedAt", String.valueOf(jwt.getIssuedAt()),
+                "tokenExpiresAt", String.valueOf(jwt.getExpiresAt())
         ));
     }
 
@@ -82,52 +91,52 @@ public class AuthTestController {
 
     /**
      * 审计日志查询 — 需 ROLE_AUDITOR 角色。
-     * 当前返回模拟数据，后续会对接真实的 AuditLog 数据库查询。
+     * 查询真实 audit_logs 表，按时间倒序返回（内容已在写入前脱敏）。
+     * 默认 50 条，limit 上限 200。返回字段做了 null 安全处理。
      */
     @GetMapping("/api/audit/logs")
     @PreAuthorize("hasRole('AUDITOR')")
-    public ResponseEntity<Map<String, Object>> getAuditLogs(@AuthenticationPrincipal Jwt jwt) {
-        // 模拟审计日志数据 — 后续由 AuditLogRepository 替代
-        List<Map<String, String>> mockLogs = List.of(
-                Map.of(
-                        "timestamp", "2026-08-10T10:30:00",
-                        "userId", "user-001",
-                        "action", "VIEW",
-                        "resourceType", "User",
-                        "resourceId", "42",
-                        "success", "true"
-                ),
-                Map.of(
-                        "timestamp", "2026-08-10T10:31:00",
-                        "userId", "user-002",
-                        "action", "DELETE",
-                        "resourceType", "Document",
-                        "resourceId", "99",
-                        "success", "true"
-                ),
-                Map.of(
-                        "timestamp", "2026-08-10T10:32:00",
-                        "userId", "user-003",
-                        "action", "DOWNLOAD",
-                        "resourceType", "Report",
-                        "resourceId", "15",
-                        "success", "false"
-                )
-        );
+    public ResponseEntity<Map<String, Object>> getAuditLogs(@AuthenticationPrincipal Jwt jwt,
+                                                            @RequestParam(defaultValue = "50") int limit) {
+        List<AuditLog> logs = auditLogRepository.findAll(
+                PageRequest.of(0, Math.min(limit, 200), Sort.by("timestamp").descending())).getContent();
+
+        List<Map<String, Object>> records = logs.stream()
+                .map(this::toRecord)
+                .toList();
 
         return ResponseEntity.ok(Map.of(
                 "queriedBy", jwt.getClaimAsString("preferred_username"),
-                "totalRecords", mockLogs.size(),
-                "logs", mockLogs,
+                "totalRecords", records.size(),
+                "logs", records,
                 "timestamp", LocalDateTime.now().toString()
         ));
     }
 
+    private Map<String, Object> toRecord(AuditLog log) {
+        Map<String, Object> record = new java.util.LinkedHashMap<>();
+        record.put("timestamp", log.getTimestamp() == null ? "" : log.getTimestamp().toString());
+        record.put("userId", nvl(log.getUserId()));
+        record.put("username", nvl(log.getUsername()));
+        record.put("userRoles", nvl(log.getUserRoles()));
+        record.put("action", log.getAction() == null ? "" : log.getAction().name());
+        record.put("resourceType", nvl(log.getResourceType()));
+        record.put("resourceId", nvl(log.getResourceId()));
+        record.put("requestMethod", nvl(log.getRequestMethod()));
+        record.put("requestUri", nvl(log.getRequestUri()));
+        record.put("responseStatus", log.getResponseStatus());
+        record.put("success", log.getSuccess());
+        record.put("duration", log.getDuration());
+        record.put("chainSequence", log.getChainSequence());
+        return record;
+    }
+
+    private static String nvl(String value) {
+        return value == null ? "" : value;
+    }
+
     // ========== 辅助方法 ==========
 
-    /**
-     * 从 JWT 中提取 realm_access.roles 角色列表。
-     */
     /**
      * 从 JWT 中提取 realm_access.roles 角色列表。
      */

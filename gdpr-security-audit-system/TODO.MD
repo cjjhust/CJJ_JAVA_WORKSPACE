@@ -1,3 +1,13 @@
+## 双账号授权链路与 fail-open 修正（2026-11-01，覆盖下方旧快照）
+
+- **P0-1 授权链路断裂（已修）：**initdb 阶段表还不存在，原 `GRANT` 会静默失败，且 `audit_app` 无 `CREATE` 导致 Flyway 无法创建 `flyway_schema_history`。现改为：`docker/postgres-init/01-create-audit-app.sql` 只建角色 + `GRANT USAGE ON SCHEMA public`；新增 `V2__grant_audit_app.sql` 在建表之后授予 `users` 增删改查、`audit_logs` 仅 `SELECT, INSERT`、`audit_outbox_events` 增删改查、`audit_chain_heads` 仅 `SELECT, UPDATE`、序列 `USAGE, SELECT`，并用 `ALTER DEFAULT PRIVILEGES` 覆盖后续新表；Flyway 用独立 `FLYWAY_USER`/`FLYWAY_PASSWORD`（默认 `audit_user`）执行 DDL，App 与 app-secondary 用 `audit_app` 运行。
+- **P0-2 fail-open 返回 null（已修）：**`AuditAspect` 审计写失败且按策略放行时返回 `businessResult[0]`，不再吞掉已成功的业务返回值；`AuditAspectFailClosedTest` 的两处断言由 `isNull()` 改为 `isEqualTo("ok")`（原断言把 bug 固化成了预期）。
+- **P1 清理：**删除 `GlobalExceptionHandler` 中永远走不到的 `BusinessInvocationFailure` 分支；`AuditLog` 列长度对齐 V1 schema（`action` 32 / `requestMethod` 16 / `requestUri` 512 / `clientIp` 64 / `userAgent` 512）；`AuditChainReplicaService` 检查点按 `(序号, 哈希)` 去重、`CREATE+APPEND+SYNC` 落盘、校验改为全量重放（无法解析/序号回退/IO 异常一律判失败，原来会 `return true`）；`AuditLogRepositoryIT` 关闭 Flyway，避免与 `create-drop` 双写 schema。
+- **全量验证：**`mvn -B -Dapi.version=1.44 verify` → BUILD SUCCESS（exit 0）；Surefire 49/49、`SchemaPrivilegeIT` 3/3、`PostgresBackupRestoreIT` 1/1、`ElasticsearchAuditIT` 2/2（20.02 秒）、`AuditLogRepositoryIT` 10/10，共 65 项，JaCoCo 行覆盖率 90% 门槛通过。
+- **权限边界实测（一次性 PG16 容器，`SET ROLE audit_app`）：**业务写入、审计追加、Outbox 领取与回写、链头推进均成功；`UPDATE`/`DELETE`/`TRUNCATE audit_logs` 与 `CREATE TABLE` 均返回 `permission denied`。
+- **踩坑记录：**演示栈 6 个容器（ES/Kibana/Logstash/Keycloak/PG）全开时，Testcontainers 新容器会卡在 `Created`，`SchemaPrivilegeIT` 报 `Tests run: 0`；`docker compose stop`（保留数据卷）后恢复正常。另：在后台跑 `mvn` 的同一终端里再发命令会向它注入 SIGINT（`^Cexit=130`），必须等它跑完。
+- 本次追加前备份：`/tmp/TODO.MD.before-dual-account-closeout-20261101`。
+
 ## Fail-closed 审计事务进展（2026-11-01）
 
 - **已改变的策略：**`@Auditable` 成功路径不再 fail-open。`AuditAspect` 用 PostgreSQL `TransactionTemplate` 包住敏感数据库操作；目标方法成功后追加审计链并写 Outbox，再统一提交。Outbox/审计写失败会传播异常并回滚同一事务，不会返回业务成功。
@@ -15,7 +25,7 @@
 - **ES Testcontainers 2/2：**真实停止并重启 Elasticsearch 容器；1,000 条 backlog 按默认 100 条批次恢复投递，refresh 后查询 1,000/1,000；本次恢复用例 10.7 秒，低于 15 分钟项目目标。
 - **备份恢复：**PostgreSQL 16 `pg_dump` 恢复到独立容器和另一数据目录，恢复记录核验成功；用例 11.4 秒。此为单机逻辑备份恢复，不是异地灾备证明。
 - **全量验证：**`DOCKER_HOST=unix://$HOME/.docker/run/docker.sock mvn -Dapi.version=1.44 verify`：BUILD SUCCESS；PG 9/9、ES 2/2、备份恢复 1/1、Surefire 39/39，共 51 项测试，JaCoCo 90% 门槛通过。ES 停启/1,000 条补投 11.2 秒；PG 独立数据目录恢复 12.2 秒。默认与 `resilience` Compose 配置均解析通过；编辑器 Java 诊断清零。
-- **仍未完成：**现有 Compose App 尚未切换至 `audit_app`；双实例 Compose 长时间联跑与 App 自动重启未实测；PG 高可用/异地灾备、独立 KMS/WORM、独立 SIEM、Keycloak 管理事件及 DPO/法务决策仍不在本地容器测试可证明范围。
+- **仍未完成：**双实例 Compose 长时间联跑与 App 自动重启未实测；PG 高可用/异地灾备、独立 KMS/WORM、独立 SIEM、Keycloak 管理事件及 DPO/法务决策仍需外部条件或组织决策。
 - 本次追加前备份：`/tmp/TODO.MD.before-resilience-count-correction-20261101`；初始增量备份：`/tmp/TODO.MD.before-resilience-closeout-20261101`。
 
 ## 为什么当前版本还不能用于生产（2026-11-01）

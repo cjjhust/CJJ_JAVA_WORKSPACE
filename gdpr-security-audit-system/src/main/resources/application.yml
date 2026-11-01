@@ -5,6 +5,9 @@ audit:
   chain:
     hmac-key: ${AUDIT_CHAIN_HMAC_KEY:local-demo-hmac-key-change-before-production-2026}
     key-id: ${AUDIT_CHAIN_KEY_ID:local-dev-v1}
+    # 审计失败策略：true=写操作审计失败时业务回滚（fail-closed，合规默认）；
+    # false=全部 fail-open（仅开发/演示）。VIEW 类操作始终 fail-open。
+    fail-closed: ${AUDIT_CHAIN_FAIL_CLOSED:true}
   outbox:
     elasticsearch-url: ${AUDIT_OUTBOX_ELASTICSEARCH_URL:http://localhost:9200}
 
@@ -20,18 +23,25 @@ spring:
 
   jpa:
     hibernate:
-      ddl-auto: update
+      # Schema 由 Flyway 管理（db/migration/V1__init.sql），Hibernate 仅校验
+      ddl-auto: validate
     show-sql: true
     properties:
       hibernate:
         format_sql: true
-    # 让 data.sql 在 Hibernate 建表之后执行（否则表还不存在）
-    defer-datasource-initialization: true
 
-  # PostgreSQL 非嵌入式数据库，默认(嵌入式)模式不会执行 data.sql，需显式开启
+  flyway:
+    enabled: true
+    locations: classpath:db/migration
+    baseline-on-migrate: true
+    # DDL 由迁移账号执行；App 运行账号（audit_app）不持有 schema CREATE 权限
+    user: ${FLYWAY_USER:${POSTGRES_USER:audit_user}}
+    password: ${FLYWAY_PASSWORD:${POSTGRES_PASSWORD:audit_password}}
+
+  # data.sql 已并入 V1__init.sql 种子数据，不再使用 SQL init
   sql:
     init:
-      mode: always
+      mode: never
 
   security:
     oauth2:

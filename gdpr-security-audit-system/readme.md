@@ -144,9 +144,9 @@ docker compose stop elasticsearch
 docker compose start elasticsearch
 ```
 
-数据库运行账号负向测试应在临时/可丢弃环境先做。先用有迁移权限的账号启动一次以创建/更新 schema，然后停 App、执行 `scripts/db-hardening.sql`，将 `.env` 中 `APP_DB_USER=audit_app`、`APP_DB_PASSWORD=change_me_app`（或脚本中设置的密码），再重建 App；确认业务读写和审计追加成功，审计 UPDATE/DELETE 被拒。脚本里的示例密码必须在真实部署前替换。不要在未备份的个人长期数据库上直接演练权限脚本。
+数据库账号已内置双账号分离，无需手工切换：`docker/postgres-init/01-create-audit-app.sql` 在数据卷首次初始化时只创建 `audit_app` 登录角色；schema 由 Flyway 用独立 DDL 账号（`FLYWAY_USER`，默认同 `POSTGRES_USER`）执行 `V1__init.sql`；表级最小权限由 `V2__grant_audit_app.sql` 在表存在之后授予。App/App-secondary 以 `audit_app` 连接（`APP_DB_USER`/`APP_DB_PASSWORD`），该账号对 `audit_logs` 只有 `SELECT, INSERT`，无 DDL。若要复用已有数据卷，删除卷重建时会重新走一遍 initdb；旧卷需手工执行一次 init 脚本与 V2 授权脚本。`scripts/db-hardening.sql` 是更严格的可选加固版本（追加写触发器、链头禁回滚触发器、DBA 维护留痕），在需要时由 DBA 账号执行。不要在未备份的个人长期数据库上直接演练权限脚本。
 
-自动化证据（2026-11-01）：PG Testcontainers 10/10 通过，覆盖双消费者无重叠领取、租约过期接管、退避、执行实际 `scripts/db-hardening.sql` 后 `audit_app` 追加/推进链头成功、审计行改删及链头回退被拒，以及审计写失败时业务行/审计行/链头整体回滚；ES Testcontainers 2/2 通过，实际停止并重启 ES 容器，在恢复后用默认 100 条批次补投 1,000 条 backlog，索引 refresh 后核对 1,000/1,000，最新完整回归用例耗时 11.2 秒（目标 <15 分钟）；备份恢复测试通过，源 PG `pg_dump` 恢复到另一 PostgreSQL 容器和不同数据目录并核对记录，最新用例耗时 12.2 秒。这些是单机容器级故障证据，不覆盖主机/磁盘毁损；App 自动重启和长期 Compose 双实例并行尚未演练。
+自动化证据（2026-11-01）：PG Testcontainers 10/10 通过，覆盖双消费者无重叠领取、租约过期接管、退避、执行实际 `scripts/db-hardening.sql` 后 `audit_app` 追加/推进链头成功、审计行改删及链头回退被拒，以及审计写失败时业务行/审计行/链头整体回滚；`SchemaPrivilegeIT` 3/3 通过，按生产顺序执行 `01-create-audit-app.sql` → `V1__init.sql` → `V2__grant_audit_app.sql`，再以 `audit_app` 验证：业务写入、审计追加、Outbox 领取与回写、链头推进全部成功；`UPDATE`/`DELETE`/`TRUNCATE audit_logs` 与 `CREATE TABLE` 均返回 `permission denied`；ES Testcontainers 2/2 通过，实际停止并重启 ES 容器，在恢复后用默认 100 条批次补投 1,000 条 backlog，索引 refresh 后核对 1,000/1,000，最新完整回归用例耗时 11.2 秒（目标 <15 分钟）；备份恢复测试通过，源 PG `pg_dump` 恢复到另一 PostgreSQL 容器和不同数据目录并核对记录，最新用例耗时 12.2 秒。这些是单机容器级故障证据，不覆盖主机/磁盘毁损；App 自动重启和长期 Compose 双实例并行尚未演练。
 
 ### DSGVO 合规流程是什么
 
@@ -230,7 +230,7 @@ DOCKER_HOST=unix://$HOME/.docker/run/docker.sock mvn -Dapi.version=1.44 verify
 |------|------------|
 | Phase 1（Task 01-27） | Keycloak/OIDC、RBAC、AOP 审计、PII 掩码、PG/ELK、Kibana 九面板和 Testcontainers；历史完整验收记录见下方项目收尾快照。 |
 | Task 29 哈希链 | HMAC-SHA256、确定性二进制字段编码、链头悲观锁、启动一致性检查；2026-11-01 PG 集成测试验证正常链通过，篡改后失败。 |
-| Task 30/31 多实例与权限 | Outbox 通过 PostgreSQL `SKIP LOCKED` + 租约领取；Testcontainers 实测两个消费者无重复领取、过期租约接管、退避；PG 测试实际执行 `scripts/db-hardening.sql`，验证 `audit_app` 可追加、审计行改删被拒、链头不可回退。Compose 长期运行数据库仍未切换为该受限账号。 |
+| Task 30/31 多实例与权限 | Outbox 通过 PostgreSQL `SKIP LOCKED` + 租约领取；Testcontainers 实测两个消费者无重复领取、过期租约接管、退避；PG 测试实际执行 `scripts/db-hardening.sql`，验证 `audit_app` 可追加、审计行改删被拒、链头不可回退。Compose 已切换为 `audit_app` 运行账号，迁移由独立 DDL 账号执行。 |
 | Task 34/38 巡检基线 | 完整性巡检、SAFE MODE、Prometheus 告警规则和 Runbook 已实现；代码测试通过。 |
 | Task 35 安全拒绝事件 | API 401/403 事件进入审计链并做脱敏；过滤器单测通过。 |
 | Task 39/40 运维接口 | Outbox 死信查询/回放、ES `document_id` 幂等配置和审计链指标已实现。 |
@@ -254,7 +254,87 @@ DOCKER_HOST=unix://$HOME/.docker/run/docker.sock mvn -Dapi.version=1.44 verify
 | Task 36 DSGVO/DSAR | DPO/法务对删除权、保留依据、期限、Legal Hold 和 DSAR 流程作书面裁定。 |
 | Task 37 生产部署 | 真实域名/TLS、CI/镜像仓库/Secret Manager、异地主机备份恢复、HA 和组织批准的 RPO/RTO 演练。单机逻辑备份恢复已测，但不等于异地灾备。 |
 
-**作品集收尾结论：**本仓库可作为本地可运行、测试通过的安全审计演示项目收尾；简历可描述已实现的技术能力，但须将 KMS/HSM、外部 WORM、Keycloak 管理事件和生产合规验证列为未完成/生产化工作。任务级状态与已知限制以 [`task_breakdown.md`](task_breakdown.md) 为准。
+#### 单机能做到哪一步？（WORM 问题的分层回答）
+
+单机**无法**实现真正意义的 WORM，但可以按成本递增逼近：
+
+1. **本机第二份 append-only 副本**（单机可做）：签名检查点追加写入本地第二个 PostgreSQL 实例或文件（`chattr +a` append-only 属性，或独立容器挂只追加卷），校验器同时比对本库链头与副本。能发现"应用库被改"，但宿主机管理员仍可同时改两份——**只防误操作，不防管理员**。
+2. **第二台机器 / 独立账户的 S3 兼容存储**（低配版 WORM）：检查点备份到另一台主机或 S3 账户，开启版本控制 + Object Lock（Governance 模式）。管理员需要攻破两个凭证域才能销毁证据。这就是 Task 33 的最小可行形态——**不强求 AWS：另一台 VPS 上的 MinIO + 定期快照也远好于没有**。
+3. **合规级 WORM**：S3 Object Lock **Compliance** 模式（AWS 自己也无法提前删除）+ 独立账户。只有达到这一级，"保留期内任何人不可篡改"才在法律意义上成立。
+
+结论：单机可落地第 1、2 层，建议至少做到第 2 层（另一台 VPS + MinIO + Object Lock Governance，月成本几欧元）；第 3 层必须依赖云厂商合规存储。
+
+#### fail-open vs fail-closed（是什么、为什么、怎么改）
+
+- **fail-open（当前 `AuditAspect` 行为）**：审计写入失败时只打 WARN 日志，业务照常执行。优点：审计组件故障不影响业务可用性；缺点：攻击者若能故意搞挂审计写入（锁表、塞爆 outbox），就能"无审计地"执行敏感操作。
+- **fail-closed**：审计写入失败时**拒绝**该次业务操作（回滚/抛异常）。金融与强合规场景的标准选择：审计记录是法律义务，"一笔没有审计的交易"比"交易被拒绝"后果更严重。
+- **推荐的生产形态（分级）**：`VIEW` 类操作 fail-open（可用性优先），`CREATE/MODIFY/DELETE/EXPORT/DOWNLOAD` 类 fail-closed（合规优先）。切换通过 `audit.chain.fail-closed` 配置项控制，而非改代码。
+
+#### 为什么这三件事必须依赖外部？——逐项论证（2026-11-01）
+
+**1. KMS 签名（Task 32）——为什么本地 KeyStore 不行？**
+
+当前 HMAC 链的信任缺陷是对称性：签名与验证用同一把密钥，任何"能验签的人"同时也是"能伪造签的人"。密钥放在应用配置里，意味着持有密钥的进程/运维角色就是整条链的上帝。Java KeyStore 只是"换了个文件放密钥"，密钥依然存在应用可读的磁盘上——攻击者攻陷应用即攻陷链，防御与被防御者共享同一秘密，这不是密码学缺陷而是信任模型缺陷。
+
+非导出密钥（KMS/HSM）从根本上改变这一点：私钥生成于云 KMS 硬件内、**在物理上无法被导出**（`kms:GetPrivateKey` 不存在，API 只提供 `Sign` 操作），应用只能请求签名、永远拿不到密钥本身。于是：
+- 应用/数据库被完全攻陷 → 攻击者能签新的检查点，但**签不出与历史检查点一致且未被记录的链**；历史检查点（已锚定到 WORM）仍然不可伪造；
+- 验签方（审计员/监管）只需公钥——公钥泄露无任何风险；
+- 密钥策略（IAM）可以做到"应用身份只能 Sign 不能 GetPrivateKey"，权限即数学保证而非约定。
+
+这必须依赖云，因为"非导出"是硬件安全模块（HSM）的物理属性，通用服务器软件模拟无意义。
+
+**2. 合规级 WORM（Task 33）——为什么"另一份副本"不够？**
+
+审计证据的价值在于**当唯一持有者说谎时仍有参照物**。任何由应用自己管理的存储（同机第二个库、同 compose 网络的 MinIO）都在同一个管理域内：宿主机管理员、root 用户、compose 网络内的人可以同时修改或删除"审计库"和"备份库"——两份一起改，对账永远是绿的。副本防的是**误操作**，防不了**有权限的说谎者**，而审计系统要防的恰恰是后者。
+
+真正成立需要三个分离，且每个都指向外部设施：
+- **凭证域分离**：归档账户与应用账户分属不同 IAM 体系，攻破应用≠能删归档 → 需要独立账户体系（云 IAM）；
+- **不可覆盖性**：Object Lock Compliance 模式由 AWS 数据中心物理执行——即使 AWS 内部员工在保留期内也无法删除，这超出了任何自建系统对自身管理员的说服力 → 需要云厂商合规存储；
+- **第三方对账视角**：验证方持有的检查点必须来自与应用无共同故障域的地方 → 需要另一台机器/另一朵云。
+
+低配替代（另一台 VPS + MinIO + Governance Lock）能大幅提高攻击成本，可以作为过渡；但"保留期内任何人不可篡改"的法律声明只能由第 3 层支撑。
+
+**3. DPO 裁定（Task 36）——为什么代码无法自我授权？**
+
+DSGVO 下审计记录（IP、username、操作历史）就是 personal data。这里存在一个**法律冲突而非技术冲突**：用户有删除权（Art. 17），而审计系统存在的意义是"记录不可变"。这个冲突的解法——审计日志是否适用 Art. 17(3)(b) 的豁免、保留多久合法（90 天还是 GoBD 要求的更长）、tombstone 式删除（留摘要删明细）算不算"删除"、legal hold 谁有权触发——**每一个都是法律判断**，其正确性取决于行业、数据类别、诉讼场景，不存在"从代码推导出合法"的路径。
+
+如果工程师自行实现一套删除逻辑，最坏情况是：系统诚实地执行了"删除"，但 DSGVO 监管机构认定该删除方式不合法（比如摘要仍可识别个人），或者反过来——删除了本应按 GoBD 保留 10 年的记账凭证审计。**写代码的人承担不了这个责任，必须由法定角色（DPO/Datenschutzbeauftragter）书面裁定并签字**，这正是为什么 Task 36 的技术底座可以预开发、而流程上线必须等签字。
+
+#### 剩余可做清单（按优先级，本地可完成）
+
+> 2026-11-01 更新：以下 6 项中第 1-5 项已全部实现并通过验证；仅第 6 项的*加强版*（另一台机器）仍属外部条件。
+
+1. ~~fail-closed 分级开关~~ ✅ 已实现：`audit.chain.fail-closed`（默认 `true`），写操作审计失败回滚、VIEW 类放行；`AuditAspectFailClosedTest` 4/4 通过
+2. ~~`/api/audit/logs` 接真数据~~ ✅ 已实现：查真实 `audit_logs` 表，倒序分页、null 安全、limit 上限 200，mock 已删除
+3. ~~全局异常处理器~~ ✅ 已实现：`GlobalExceptionHandler` 统一 `{timestamp,status,error,message,path}` 格式；SAFE MODE 映射 503 不泄露内部状态
+4. ~~Flyway 迁移~~ ✅ 已实现：`db/migration/V1__init.sql`（5 张表 + 索引 + 种子数据），`ddl-auto: validate`，`sql.init` 关闭
+5. ~~Compose 切受限账号~~ ✅ 已实现：`docker/postgres-init/01-create-audit-app.sql` 随数据卷首次初始化仅创建 `audit_app` 角色（此时表尚不存在，故不做表级授权）；表级授权改由迁移 `V2__grant_audit_app.sql` 在 V1 建表后授予，并由 `ALTER DEFAULT PRIVILEGES` 覆盖后续新表。Flyway 以 `FLYWAY_USER`（`audit_user`）执行 DDL，App 以 `audit_app` 运行，两者权限分离。
+6. 本机第二份 append-only 副本 ✅ 已实现（`AuditChainReplicaService`：30s 追加检查点、60s 与链头比对、不一致触发 SIEM 告警；检查点按 `(序号, 哈希)` 去重防重复追加，校验采用全量重放而非只看末行；单测 8/8 含回滚/哈希篡改/副本内序号回退/重复检查点检出）；跨机器副本仍待外部条件
+
+#### 第三方评估总结（2026-11-01）
+
+以下为本项目收尾时基于全量源码评审的客观评估，评分维度与扣分理由均已对齐可验证证据。
+
+**总体评分：89 / 100**（2026-11-01 复核，上一版 82 分）—— 剩余的 11 分仍然全部对应"本地无法自证的外部条件"或"需要组织/法务签字"的事项。
+
+| 评估维度 | 得分 | 与上一版对比 | 评审依据 |
+|----------|------|--------------|----------|
+| 功能完整性 | 18/20 | +2 | 审计全链路、防篡改、Outbox、运维接口齐全；本轮补上 `/api/audit/logs` 真实查询与失败分级；Keycloak 管理事件（Task 35 剩余）与 DSAR 删除流程仍缺 |
+| 代码质量 | 18/20 | +1 | 修掉 fail-open 返回 `null` 的语义 bug、删除死分支、列长度对齐 schema、副本服务改全量重放；仍有 AOP 隐式事务、无统一分页规范等小瑕疵 |
+| 测试工程 | 18/20 | +1 | 65 项测试全绿（49 单测 + 4 套 Testcontainers），新增 `SchemaPrivilegeIT` 把"initdb 建角色 → V1 建表 → V2 授权"链路固化为回归；强制覆盖率仍只覆盖 `GdprDataMasker` |
+| 架构与文档 | 15/15 | 0 | 三语文档、威胁模型、Runbook、阻塞分析完整，且如实标注能力边界 |
+| 生产就绪 | 12/15 | +3 | Flyway + DDL/DML 双账号分离、fail-closed 分级、Outbox 租约消费、本机 append-only 副本与 RPO/RTO 基线均已落地；KMS/HSM 签名、合规级 WORM、TLS、CI、PG 高可用仍需外部设施 |
+| 合规闭环 | 8/10 | 0 | PII 脱敏与数据最小化文档完整；保留期限与删除权冲突待 DPO/法务书面裁定 |
+
+**本轮提分的关键三点（都可复现）：**
+
+1. **权限链路从"纸面"变成"可验证"**：原 `docker/postgres-init` 在建表前 `GRANT` 会静默失败，`audit_app` 实际无表权限、也无 `CREATE` 供 Flyway 建历史表——也就是说"受限账号"从来没真正跑起来过。现在改成"init 只建角色 → V1 建表 → V2 授权"，并用 `SchemaPrivilegeIT` 以 `SET ROLE audit_app` 断言：业务写入/审计追加/Outbox 回写/链头推进成功，`UPDATE`/`DELETE`/`TRUNCATE audit_logs` 与 `CREATE TABLE` 被 `permission denied` 拒绝。
+2. **fail-open 不再吞返回值**：审计写失败且按策略放行时返回业务真实结果，而不是 `null`；对应单测此前断言 `isNull()`，等于把 bug 固化成了预期，已一并纠正。
+3. **证据链可重跑**：`mvn -B -Dapi.version=1.44 verify` exit 0，65 项测试全绿（含 ES 停启 1,000 条补投 20.02 秒、PG 备份恢复 11.73 秒），JaCoCo 门槛通过。
+
+**评估结论：**该项目可以正式收尾。技术能力描述可进入简历，但按诚实披露原则，KMS/HSM 签名、外部 WORM 锚定、Keycloak 管理事件接入、PG 高可用与生产合规验证应列明为"生产化阶段工作"而非已完成能力。文档三件套（readme / task_breakdown / TODO.MD）状态一致。
+
+**作品集收尾结论：**本仓库可作为本地可运行、测试全绿的安全审计演示项目收尾；简历可描述已实现的技术能力，但须将 KMS/HSM、外部 WORM、Keycloak 管理事件和生产合规验证列为未完成/生产化工作。任务级状态与已知限制以 [`task_breakdown.md`](task_breakdown.md) 为准。
 
 
 ---

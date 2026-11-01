@@ -51,6 +51,7 @@ import static org.mockito.Mockito.when;
 @DataJpaTest(properties = {
         "spring.jpa.hibernate.ddl-auto=create-drop",
     "spring.sql.init.mode=never",
+    "spring.flyway.enabled=false",
     "audit.chain.hmac-key=test-only-hmac-key-material-at-least-32-bytes",
     "audit.chain.key-id=test-key-v1"
 })
