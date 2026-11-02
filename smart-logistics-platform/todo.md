@@ -796,6 +796,15 @@ curl -s http://localhost:8080/api/orders/AMZ-1001/documents -H "Authorization: B
 - 单体形态的端到端冒烟（`smoke-test.sh` 打 8090）未写；微服务形态的 124 项断言不适用于单进程拓扑。
 - Saga 仅纸面设计（现有状态机 + `OrderStateEventRecord` 事件表即骨架）；真拆库时才需要落地，届时还需 Outbox 模式配套。
 
+### CI 首跑追记（2026-11-02，缺陷 #57）
+
+**首跑红两处，均已修复并推送：**
+
+1. **工作流放错位置（CI 完全不触发）**：本仓库根是 `CJJ_JAVA_WORKSPACE`（多项目一仓），GitHub Actions **只识别仓库根的 `.github/workflows/`**——放在 `smart-logistics-platform/.github/workflows/` 下的 `ci.yml` 被静默忽略，`add CI` 推送零运行。修复：迁移到仓库根 `aslp-ci.yml`，加 `paths` 过滤（只本子目录变更才跑）+ `working-directory`。
+   → 教训：**monorepo 里子目录的 workflow 文件等于不存在**；Actions 的查找边界是仓库根，不是项目根。
+2. **`@DataJpaTest` 假绿 / 方言炸裂（缺陷 #57）**：`@DataJpaTest` 默认 `@AutoConfigureTestDatabase(replace=ANY)`，把 `@DynamicPropertySource` 注册的 PG 容器 URL **无条件替换成内嵌 H2**。order 的迁移用了 PG 方言（`TIMESTAMPTZ`/`BIGSERIAL`），H2 报 `Unknown data type` 直接红；**auth/inventory 反而"绿"了——因为它们的 SQL 恰好 H2 兼容，等于测试跑在错误的数据库上还通过了（假绿）**。修复：三个集成测试统一加 `@AutoConfigureTestDatabase(replace = NONE)`，强制 Flyway 跑在 Testcontainers 的真 PG 上。
+   → 教训：**"测试通过"≠"测到了想测的东西"**。方言炸裂是显式失败（好发现），H2 兼容是隐式假绿（更危险）；两者同根，一个注解修复。
+
 ---
 ## P1-11 文档分工（readme=三语介绍 / todo=全量复盘）+ 三个界面真实截图（2026-09-23 轮次 17）— 用户要求：readme 只留「做了什么、解决了什么问题」，开发过程全量剪切到 todo（顶部添加、不覆盖），并补上三个界面的截图
 

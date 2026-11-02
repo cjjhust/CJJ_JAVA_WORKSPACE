@@ -44,9 +44,13 @@
           P2-8：Testcontainers 版本覆盖。
           Boot 3.3.0 BOM 管理的 1.19.8 与新 Docker Engine API（29.x，
           Docker Desktop 2025+）握手失败（/v1.x/info 返回 400）。
-          1.20.6 起适配新 API；该属性是 Boot BOM 预留的覆盖点，改这里即可全模块生效。
+          1.20.6 修了第一轮，但其内置 docker-java 仍以 API 1.32 探测；
+          Docker Engine 29.x 已将最低 API 提到 1.40，握手再次失败
+          （"client version 1.32 is too old"，CI 首跑与本机同时复现，缺陷 #58）。
+          1.21.3 的 docker-java 使用新 API 版本协商，适配 Engine 29.x；
+          该属性是 Boot BOM 预留的覆盖点，改这里即可全模块生效。
         -->
-        <testcontainers.version>1.20.6</testcontainers.version>
+        <testcontainers.version>1.21.3</testcontainers.version>
         <!-- P1-4：契约测试用 WireMock（standalone 版，见 order-service 依赖注释） -->
         <wiremock.version>3.9.1</wiremock.version>
         <!-- P1-6：对象存储 SDK 与 PDF 生成（OpenPDF = LGPL，见 order-service 依赖注释） -->

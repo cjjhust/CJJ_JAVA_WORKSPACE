@@ -14,6 +14,8 @@ import org.springframework.boot.test.autoconfigure.orm.jpa.TestEntityManager;
 import org.springframework.context.annotation.Import;
 import org.springframework.test.context.DynamicPropertyRegistry;
 import org.springframework.test.context.DynamicPropertySource;
+import org.springframework.transaction.annotation.Propagation;
+import org.springframework.transaction.annotation.Transactional;
 import org.testcontainers.containers.PostgreSQLContainer;
 import org.testcontainers.junit.jupiter.Container;
 import org.testcontainers.junit.jupiter.Testcontainers;
@@ -82,27 +84,34 @@ class OrderRepositoryIntegrationTest {
 
     private OrderPullResult resultWith(String... orderIds) {
         List<OrderDto> dtos = java.util.Arrays.stream(orderIds)
-                .map(id -> new OrderDto(id, "Shipped", "奶粉一件代发",
-                        "Bruchsal", "ADDRESS_INVALID"))
+                // 注意参数顺序必须与 OrderDto(orderId, product, warehouse, status, errorTag) 一致：
+                // 缺陷 #58 修复前本测试从未真正跑在 PG 上（先炸在 H2 方言），
+                // 旧写法把 "Shipped" 放进 product 位、"Bruchsal" 放进 status 位，首次真跑即暴露
+                .map(id -> new OrderDto(id, "奶粉一件代发", "Bruchsal", "Shipped", "ADDRESS_INVALID"))
                 .toList();
         return new OrderPullResult("Amazon", dtos, true, null, false);
     }
 
     @BeforeEach
     void cleanUp() {
-        entityManager.flush();
-        repository.deleteAll();
-        entityManager.flush();
+        // 不用 TestEntityManager：NOT_SUPPORTED 的测试方法没有测试级事务，
+        // flush 会报 "No transactional EntityManager"。deleteAllInBatch 自带事务。
+        repository.deleteAllInBatch();
     }
 
     @Test
     @DisplayName("Flyway PG 方言迁移可执行，且 UNIQUE(order_id) 约束真实存在")
+    // PG 特有语义（缺陷 #58）：@DataJpaTest 默认把测试包进一个事务，
+    // 约束冲突会把该事务标记为 aborted，后续 count() 全部报
+    // "current transaction is aborted"。NOT_SUPPORTED 让每个仓储调用
+    // 各自运行在独立事务里，冲突不会污染断言路径（H2 对此宽容，真 PG 才暴露）。
+    @Transactional(propagation = Propagation.NOT_SUPPORTED)
     void uniqueConstraintIsEnforcedByDatabase() {
-        repository.save(new OrderRecord("AMZ-1", "Amazon", "x", "Bruchsal", "PAID"));
-        entityManager.flush();
-        entityManager.clear();
+        repository.saveAndFlush(new OrderRecord("AMZ-1", "Amazon", "x", "Bruchsal", "PAID"));
 
-        // 第二个同 orderId 的实体：数据库必须拒绝（而不是 JPA 层吞掉）
+        // 第二个同 orderId 的实体：数据库必须拒绝（而不是 JPA 层吞掉）。
+        // NOT_SUPPORTED 下每次仓储调用各自独立事务：冲突事务回滚即被隔离，
+        // 不会把 "transaction aborted" 污染到后续 count()（真 PG 才暴露的差异）
         assertThrows(Exception.class, () -> {
             repository.saveAndFlush(new OrderRecord("AMZ-1", "Amazon", "y", "Mönchengladbach", "PAID"));
         }, "UNIQUE(order_id) 必须由数据库强制 —— 这是并发竞态的最后兜底");

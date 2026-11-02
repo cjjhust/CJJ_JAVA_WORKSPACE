@@ -44,7 +44,10 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
  * CI 的 ubuntu runner 自带 Docker，开箱即用。
  */
 @Testcontainers
-@SpringBootTest(webEnvironment = SpringBootTest.WebEnvironment.NONE)
+// MOCK（而非 NONE）：auth 模块的 SecurityConfig 依赖 HttpSecurity，
+// 它由 Spring Security 的 Servlet 自动配置提供 —— NONE（非 Web 环境）下不存在，
+// 上下文直接装配失败。MOCK 提供模拟 Servlet 环境且不占端口。
+@SpringBootTest(webEnvironment = SpringBootTest.WebEnvironment.MOCK)
 class MonolithSmokeTest {
 
     @Container
