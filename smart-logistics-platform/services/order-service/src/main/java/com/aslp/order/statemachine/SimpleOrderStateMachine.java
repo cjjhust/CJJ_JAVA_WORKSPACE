@@ -40,6 +40,10 @@ public class SimpleOrderStateMachine {
         addTransition(OrderStates.FBA_RETURN_LABEL, OrderEvents.RELABEL, OrderStates.FBA_RELABELED);
         addTransition(OrderStates.FBA_RELABELED, OrderEvents.DELIVER, OrderStates.DELIVERED);
         addTransition(OrderStates.DELIVERED, OrderEvents.COMPLETE, OrderStates.COMPLETED);
+        // P1-4 Saga 补偿路径：CREATED/PAID 可补偿取消（此时库存锁是唯一已提交的本地步骤，
+        // 释放锁 = 补偿动作）；PICKED 之后实物已动，走 FBA_RETURN 逆向流程而不是 COMPENSATE
+        addTransition(OrderStates.CREATED, OrderEvents.COMPENSATE, OrderStates.CANCELLED);
+        addTransition(OrderStates.PAID, OrderEvents.COMPENSATE, OrderStates.CANCELLED);
     }
 
     private void addTransition(OrderStates from, OrderEvents event, OrderStates to) {

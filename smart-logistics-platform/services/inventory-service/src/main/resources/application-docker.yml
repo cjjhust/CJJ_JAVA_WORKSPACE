@@ -16,7 +16,7 @@ spring:
       host: aslp_redis
       port: 6379
   datasource:
-    url: jdbc:postgresql://aslp_postgres:5432/aslp
+    url: jdbc:postgresql://aslp_postgres:5432/aslp_inventory
     username: aslp
     password: aslp123
   flyway:
@@ -49,6 +49,10 @@ spring:
           writetimeout: 3000
 
 management:
+  # P0-1 安全基线：actuator 挪到独立管理端口（不向宿主机发布）。
+  # 宿主机访问只能走网关（JWT 鉴权）；Prometheus 经容器网络直抓 9091。
+  server:
+    port: 9091
   # P1-3：链路追踪（容器内指向 aslp_zipkin）
   tracing:
     sampling:

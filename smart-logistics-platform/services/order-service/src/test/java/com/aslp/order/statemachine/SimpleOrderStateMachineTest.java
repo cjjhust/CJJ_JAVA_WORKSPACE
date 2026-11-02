@@ -7,7 +7,7 @@ import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 /**
- * FBA 退货换标状态机单元测试（面试亮点：纯 Java 状态机 + 幂等/非法转换防护）。
+ * FBA 退货换标状态机单元测试（技术亮点：纯 Java 状态机 + 幂等/非法转换防护）。
  *
  * <p>状态流：CREATED → PAID → PICKED → SHIPPED → FBA_RETURN_LABEL → FBA_RELABELED → DELIVERED → COMPLETED
  */

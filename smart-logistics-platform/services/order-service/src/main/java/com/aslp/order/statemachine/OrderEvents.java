@@ -7,5 +7,6 @@ public enum OrderEvents {
     FBA_RETURN,       // FBA 退货触发
     RELABEL,          // 换标完成
     DELIVER,          // 送达
-    COMPLETE          // 完成
+    COMPLETE,         // 完成
+    COMPENSATE        // P1-4 Saga 补偿：前端本地步骤失败（如锁库存失败）时撤销订单
 }

@@ -2,6 +2,21 @@ server:
   port: 8083
 
 spring:
+  # P1-6：追踪事件表持久化（与 order/inventory 同库，独立 Flyway 历史表）
+  datasource:
+    url: jdbc:postgresql://aslp_postgres:5432/aslp_route
+    username: aslp
+    password: aslp123
+  flyway:
+    enabled: true
+    locations: classpath:db/migration/route
+    table: flyway_schema_history_route
+    baseline-on-migrate: true
+    baseline-version: 0
+  jpa:
+    hibernate:
+      ddl-auto: validate
+    open-in-view: false
   application:
     name: route-service
 
@@ -23,6 +38,10 @@ aslp:
     max-events: 30
 
 management:
+  # P0-1 安全基线：actuator 挪到独立管理端口（不向宿主机发布）。
+  # 宿主机访问只能走网关（JWT 鉴权）；Prometheus 经容器网络直抓 9091。
+  server:
+    port: 9091
   # P1-3：链路追踪（容器内指向 aslp_zipkin）
   tracing:
     sampling:

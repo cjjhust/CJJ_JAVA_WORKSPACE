@@ -70,8 +70,11 @@ class TrackingServiceTest {
     }
 
     private TrackingService service() {
+        // 快照仓储用 Mockito mock：本类是纯单测（无 Spring/DB 上下文），
+        // 落库行为由 route 侧的持久化测试与 StuckShipmentScanTask 测试覆盖
         return new TrackingService(props, List.of(dhl, dpd), new MockTrackingClient(props),
-                new SimpleMeterRegistry(), ObservationRegistry.create());
+                new SimpleMeterRegistry(), ObservationRegistry.create(),
+                org.mockito.Mockito.mock(com.aslp.route.tracking.TrackingSnapshotRepository.class));
     }
 
     // ─────────────── 承运商识别 ───────────────

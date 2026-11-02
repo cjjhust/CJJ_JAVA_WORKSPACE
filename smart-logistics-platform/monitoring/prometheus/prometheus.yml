@@ -19,12 +19,12 @@ scrape_configs:
       - targets:
           # 网关：Netty 不校验 Host 头，可直接用容器名（鉴权已单独放行，见 VpnSecurityConfig）
           - aslp_gateway:8080
-          # 以下 5 个是 Tomcat，必须用连字符别名（compose 里为它们声明的网络别名）
-          - aslp-order-service:8081
-          - aslp-inventory-service:8082
-          - aslp-route-service:8083
-          - aslp-auth-service:8084
-          - aslp-report-service:8085
+          # P0-1：5 个 Tomcat 服务的 actuator 已挪到独立管理端口 9091（业务端口不再发布宿主机）
+          - aslp-order-service:9091
+          - aslp-inventory-service:9091
+          - aslp-route-service:9091
+          - aslp-auth-service:9091
+          - aslp-report-service:9091
 
   # 自监控：能看到 Prometheus 自己的抓取耗时、样本数等
   - job_name: prometheus

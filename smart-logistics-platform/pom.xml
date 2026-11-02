@@ -41,16 +41,14 @@
         <spring-cloud.version>2023.0.3</spring-cloud.version>
         <maven.compiler.plugin.version>3.11.0</maven.compiler.plugin.version>
         <!--
-          P2-8：Testcontainers 版本覆盖。
-          Boot 3.3.0 BOM 管理的 1.19.8 与新 Docker Engine API（29.x，
-          Docker Desktop 2025+）握手失败（/v1.x/info 返回 400）。
-          1.20.6 修了第一轮，但其内置 docker-java 仍以 API 1.32 探测；
-          Docker Engine 29.x 已将最低 API 提到 1.40，握手再次失败
-          （"client version 1.32 is too old"，CI 首跑与本机同时复现，缺陷 #58）。
-          1.21.3 的 docker-java 使用新 API 版本协商，适配 Engine 29.x；
-          该属性是 Boot BOM 预留的覆盖点，改这里即可全模块生效。
+          P2-7：Testcontainers 2.x。缺陷 #58 的根治方案：1.x 的 docker-java
+          以 API 1.32 探测（Engine 29.x 最低 1.40），曾靠 docker-java.properties
+          止血；2.x 自动协商 API 版本，止血贴已删除。
+          注意 2.0 起构件名加 testcontainers- 前缀（junit-jupiter →
+          testcontainers-junit-jupiter 等），Boot 3.3 BOM 不管理新名，
+          因此这里直接导入 testcontainers-bom 管版本。
         -->
-        <testcontainers.version>1.21.3</testcontainers.version>
+        <testcontainers.version>2.0.5</testcontainers.version>
         <!-- P1-4：契约测试用 WireMock（standalone 版，见 order-service 依赖注释） -->
         <wiremock.version>3.9.1</wiremock.version>
         <!-- P1-6：对象存储 SDK 与 PDF 生成（OpenPDF = LGPL，见 order-service 依赖注释） -->
@@ -64,6 +62,14 @@
                 <groupId>org.springframework.cloud</groupId>
                 <artifactId>spring-cloud-dependencies</artifactId>
                 <version>${spring-cloud.version}</version>
+                <type>pom</type>
+                <scope>import</scope>
+            </dependency>
+            <!-- P2-7：Testcontainers 2.x BOM（Boot BOM 只管理 1.x 旧构件名，见上注释） -->
+            <dependency>
+                <groupId>org.testcontainers</groupId>
+                <artifactId>testcontainers-bom</artifactId>
+                <version>${testcontainers.version}</version>
                 <type>pom</type>
                 <scope>import</scope>
             </dependency>
@@ -119,14 +125,87 @@
                     <groupId>org.apache.maven.plugins</groupId>
                     <artifactId>maven-surefire-plugin</artifactId>
                     <configuration>
-                        <argLine>-Xshare:off</argLine>
+                        <!-- @{argLine} = JaCoCo prepare-agent 注入的 -javaagent（P0-3）；
+                             直接写死 argLine 会把它覆盖，导致 .exec 不生成、覆盖率恒 0 -->
+                        <argLine>@{argLine} -Xshare:off</argLine>
                     </configuration>
                 </plugin>
                 <plugin>
                     <groupId>org.springframework.boot</groupId>
                     <artifactId>spring-boot-maven-plugin</artifactId>
+                    <!--
+                      P0-3（verify 门禁引入后暴露）：repackage 默认把主构件替换成 fat jar
+                      （业务类藏进 BOOT-INF/classes），下游 app-monolith 依赖它时
+                      "程序包不存在"。classifier=exec 让 fat jar 变 *-exec.jar 副产物，
+                      主构件保持薄 jar —— compose 的 Dockerfile COPY *.jar 需同步
+                      改为 *-exec.jar（见根 Dockerfile）。
+                    -->
+                    <configuration>
+                        <classifier>exec</classifier>
+                    </configuration>
+                </plugin>
+                <!--
+                  P0-3：JaCoCo 覆盖率门禁。每个模块 test 阶段出报告，
+                  check 阶段执行门禁（LINE 60% / BRANCH 50%——对含大量 Testcontainers
+                  集成测试与 WebFlux 配置类的工程，70% 起步会把合理代码判死）。
+                  聚合报告由 report-aggregate 在最后一个模块出（见 app-monolith）。
+                -->
+                <plugin>
+                    <groupId>org.jacoco</groupId>
+                    <artifactId>jacoco-maven-plugin</artifactId>
+                    <version>0.8.12</version>
+                    <executions>
+                        <execution>
+                            <goals><goal>prepare-agent</goal></goals>
+                        </execution>
+                        <execution>
+                            <id>report</id>
+                            <phase>test</phase>
+                            <goals><goal>report</goal></goals>
+                        </execution>
+                        <execution>
+                            <id>check</id>
+                            <phase>verify</phase>
+                            <goals><goal>check</goal></goals>
+                            <configuration>
+                                <rules>
+                                    <rule>
+                                        <element>BUNDLE</element>
+                                        <limits>
+                                            <limit>
+                                                <counter>LINE</counter>
+                                                <value>COVEREDRATIO</value>
+                                                <minimum>0.60</minimum>
+                                            </limit>
+                                            <limit>
+                                                <counter>BRANCH</counter>
+                                                <value>COVEREDRATIO</value>
+                                                <minimum>0.50</minimum>
+                                            </limit>
+                                        </limits>
+                                    </rule>
+                                </rules>
+                                <!-- 纯配置类不计入门禁：安全链/WebFlux 装配的行为
+                                     由集成测试与端到端断言验证（真 PG / 打网关断言 401/200），
+                                     对它们做单测只是 mock 框架自身 -->
+                                <excludes>
+                                    <exclude>**/config/**</exclude>
+                                    <exclude>**/*Config.class</exclude>
+                                    <exclude>**/*Application.class</exclude>
+                                </excludes>
+                            </configuration>
+                        </execution>
+                    </executions>
                 </plugin>
             </plugins>
         </pluginManagement>
+
+        <!-- P0-3：激活 JaCoCo（版本与配置见 pluginManagement），全部模块统一继承 -->
+        <plugins>
+            <plugin>
+                <groupId>org.jacoco</groupId>
+                <artifactId>jacoco-maven-plugin</artifactId>
+            </plugin>
+        </plugins>
     </build>
 </project>

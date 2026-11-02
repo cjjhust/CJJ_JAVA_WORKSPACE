@@ -6,6 +6,8 @@ import com.aslp.route.tracking.MockTrackingClient;
 import com.aslp.route.tracking.TrackingClient;
 import com.aslp.route.tracking.TrackingClientException;
 import com.aslp.route.tracking.TrackingFetcher;
+import com.aslp.route.tracking.TrackingSnapshotRecord;
+import com.aslp.route.tracking.TrackingSnapshotRepository;
 import com.aslp.route.tracking.TrackingNotFoundException;
 import com.aslp.route.tracking.TrackingUnavailableException;
 import com.aslp.route.tracking.TrackingView;
@@ -67,6 +69,8 @@ public class TrackingService {
     private final Map<Carrier, TrackingClient> clients;
     private final TrackingFetcher mockFetcher;
     private final ObservationRegistry observationRegistry;
+    /** P1-6：轨迹快照仓储（每次成功查询 UPSERT 一行，供卡住扫描任务消费）。 */
+    private final TrackingSnapshotRepository snapshotRepository;
 
     /**
      * 有界 LRU 缓存（{@code accessOrder=true} + {@code removeEldestEntry}）。
@@ -84,10 +88,12 @@ public class TrackingService {
                            List<TrackingClient> trackingClients,
                            MockTrackingClient mockTrackingClient,
                            MeterRegistry meterRegistry,
-                           ObservationRegistry observationRegistry) {
+                           ObservationRegistry observationRegistry,
+                           TrackingSnapshotRepository snapshotRepository) {
         this.props = props;
         this.mockFetcher = mockTrackingClient;
         this.observationRegistry = observationRegistry;
+        this.snapshotRepository = snapshotRepository;
 
         // 按 carrier() 自动建立映射：新增承运商只需实现 TrackingClient 并注册为 bean
         Map<Carrier, TrackingClient> resolved = new LinkedHashMap<>();
@@ -157,6 +163,11 @@ public class TrackingService {
         observation.lowCardinalityKeyValue("state", view.state().name());
 
         putInCache(key, view);
+        // P1-6：UPSERT 轨迹快照（@Id = 单号，findById 即按单号查）
+        snapshotRepository.findById(number)
+                .ifPresentOrElse(
+                        record -> record.updateFrom(view),
+                        () -> snapshotRepository.save(TrackingSnapshotRecord.from(view)));
         return view;
     }
 

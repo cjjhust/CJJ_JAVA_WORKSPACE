@@ -8,5 +8,6 @@ public enum OrderStates {
     FBA_RETURN_LABEL, // FBA 退货换标（状态机核心状态）
     FBA_RELABELED,    // 换标完成
     DELIVERED,        // 已送达
-    COMPLETED         // 完成
+    COMPLETED,        // 完成
+    CANCELLED         // 已取消（P1-4 Saga 补偿终点：锁库存失败等前端步骤失败时回滚到此）
 }

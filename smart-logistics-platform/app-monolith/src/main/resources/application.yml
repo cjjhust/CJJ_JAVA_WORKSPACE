@@ -12,8 +12,8 @@ spring:
     password: aslp123
   flyway:
     enabled: true
-    # 合并 4 套迁移目录（auth/inventory/order 各自独立历史表，见各服务 application.yml）
-    locations: classpath:db/migration/auth,classpath:db/migration/inventory,classpath:db/migration/order
+    # 合并 5 套迁移目录（各目录版本段位已错开：auth=1xx / inventory=2xx / order=3xx / route=4xx，缺陷 #58）
+    locations: classpath:db/migration/auth,classpath:db/migration/inventory,classpath:db/migration/order,classpath:db/migration/route
     # 多历史表模式下主 history 表默认不用，但 Flyway 要求显式指定表名时才校验；
     # 这里保留各服务原配置的语义：主表仅作占位（实际历史写入各模块自己的表）。
     table: flyway_schema_history_monolith

@@ -36,6 +36,8 @@ services:
       - "5432:5432"
     volumes:
       - aslp_pg_data:/var/lib/postgresql/data
+      # P2-8：database per service —— 首次启动建 4 个独立库（同实例，不加容器）
+      - ./docker/init-sql:/docker-entrypoint-initdb.d:ro
       # 表结构与种子数据由各服务的 Flyway 迁移负责（见
       # services/*/src/main/resources/db/migration/），不再使用
       # /docker-entrypoint-initdb.d，避免出现两份真相源导致漂移。
@@ -159,8 +161,7 @@ services:
     environment:
       SPRING_PROFILES_ACTIVE: docker
       SERVER_PORT: 8080
-      # VPN 安全接入：与 auth-service 共享同一密钥用于校验 JWT（生产请外部注入强随机值）
-      ASLP_JWT_SECRET: ${ASLP_JWT_SECRET:-aslp-dev-secret-key-change-me-in-production-0123456789}
+      # P0-2：网关已改为 JWKS 验签（RS256），不再持有/注入任何 JWT 密钥
     ports:
       - "8080:8080"
     depends_on:
@@ -186,8 +187,12 @@ services:
     environment:
       SPRING_PROFILES_ACTIVE: docker
       SERVER_PORT: 8081
+      # P0-1：actuator 独立管理端口（见 application-docker.yml management.server.port）
+      MANAGEMENT_PORT: 9091
     ports:
-      - "8081:8081"
+      # P0-1：业务端口不再发布到宿主机（唯一入口 = 网关 JWT 鉴权）；
+      # 管理端口仅绑回环地址，供本机冒烟脚本/排查用，外部网络不可达
+      - "127.0.0.1:9091:9091"
     volumes:
       # P2-4：数据库备份落命名卷（容器重建不丢，配合 retention 轮转）
       - aslp_backup_data:/var/backups/aslp
@@ -216,8 +221,9 @@ services:
     environment:
       SPRING_PROFILES_ACTIVE: docker
       SERVER_PORT: 8082
+      MANAGEMENT_PORT: 9091
     ports:
-      - "8082:8082"
+      - "127.0.0.1:9092:9091"
     depends_on:
       aslp_postgres:
         condition: service_healthy
@@ -244,8 +250,9 @@ services:
     environment:
       SPRING_PROFILES_ACTIVE: docker
       SERVER_PORT: 8083
+      MANAGEMENT_PORT: 9091
     ports:
-      - "8083:8083"
+      - "127.0.0.1:9093:9091"
 
   aslp_auth_service:
     <<: *java-service
@@ -264,10 +271,9 @@ services:
     environment:
       SPRING_PROFILES_ACTIVE: docker
       SERVER_PORT: 8084
-      # 生产环境请改为外部注入的强随机密钥
-      ASLP_JWT_SECRET: ${ASLP_JWT_SECRET:-aslp-dev-secret-key-change-me-in-production-0123456789}
+      MANAGEMENT_PORT: 9091
     ports:
-      - "8084:8084"
+      - "127.0.0.1:9094:9091"
 
   aslp_report_service:
     <<: *java-service
@@ -286,6 +292,7 @@ services:
     environment:
       SPRING_PROFILES_ACTIVE: docker
       SERVER_PORT: 8085
+      MANAGEMENT_PORT: 9091
     # P1-7：报表看板真实聚合 order-service / inventory-service（HTTP，走连字符别名）。
     # 报表自身能降级（上游不可用时返回 200 + degraded），所以 depends_on 不是"可用性依赖"，
     # 而是让端到端断言可复现：否则冷启动瞬间抓到的看板会是 degraded 状态，断言随机失败。
@@ -295,7 +302,10 @@ services:
       aslp_inventory_service:
         condition: service_healthy
     ports:
+      # 看板页 dashboard.html 保留宿主机发布（静态资源，无敏感数据）；
+      # actuator 已挪到 9091（仅回环）
       - "8085:8085"
+      - "127.0.0.1:9095:9091"
 
   # ---------------------------- 可观测性（P1-1） ----------------------------
   # 所有 Java 服务已通过 micrometer-registry-prometheus 暴露 /actuator/prometheus；

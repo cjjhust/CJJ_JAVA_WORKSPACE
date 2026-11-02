@@ -2,6 +2,21 @@ server:
   port: 8083
 
 spring:
+  # P1-6：追踪事件表持久化（与 order/inventory 同库，独立 Flyway 历史表）
+  datasource:
+    url: jdbc:postgresql://localhost:5432/aslp
+    username: aslp
+    password: aslp123
+  flyway:
+    enabled: true
+    locations: classpath:db/migration/route
+    table: flyway_schema_history_route
+    baseline-on-migrate: true
+    baseline-version: 0
+  jpa:
+    hibernate:
+      ddl-auto: validate
+    open-in-view: false
   application:
     name: route-service
 

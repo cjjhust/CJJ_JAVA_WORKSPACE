@@ -3,11 +3,10 @@ package com.aslp.auth.service;
 import io.jsonwebtoken.Claims;
 import io.jsonwebtoken.Jws;
 import io.jsonwebtoken.Jwts;
-import io.jsonwebtoken.security.Keys;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
 
-import java.nio.charset.StandardCharsets;
+import java.security.interfaces.RSAPublicKey;
 import java.time.Duration;
 import java.util.List;
 
@@ -16,35 +15,29 @@ import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 /**
- * M1 JWT 签发测试：不启动 Spring 上下文，直接用 JJWT 回读校验。
+ * M1 JWT 签发测试：不启动 Spring 上下文，直接用 JJWT 回读校验（P0-2 起为 RS256）。
  *
- * <p>关键契约：网关侧的 {@code NimbusReactiveJwtDecoder} 固定使用 <b>HS384</b> 对称密钥
- * （见 {@code VpnSecurityConfig#jwtDecoder}）。因此这里显式断言签发算法为 HS384 ——
- * 一旦密钥长度或算法变化导致签发 HS512 等，网关会直接拒绝令牌，属跨服务契约，必须锁死。
+ * <p>关键契约：网关侧的 {@code NimbusReactiveJwtDecoder.withJwkSetUri} 从
+ * {@code /api/auth/jwks.json} 拉取公钥验签，固定期望 RS256。这里显式断言：
+ * 签发算法为 RS256、JWKS 三要素（kty/n/e）与签发公钥一致 ——
+ * 算法或公钥变更会导致网关直接拒绝令牌，属跨服务契约，必须锁死。
  */
 class JwtTokenServiceTest {
-
-    /**
-     * 测试密钥：长度 54 字节。
-     * JJWT 会按密钥长度自动选择 HMAC 算法：48–63 字节 → HS384，恰好与网关侧一致。
-     * 该值仅为测试用途，不含任何真实密钥。
-     */
-    private static final String TEST_SECRET = "aslp-unit-test-secret-0123456789-0123456789-0123456789";
 
     private static final String ISSUER = "aslp-auth-service";
     private static final long TTL_MINUTES = 120L;
 
-    private final JwtTokenService service = new JwtTokenService(TEST_SECRET, TTL_MINUTES, ISSUER);
+    private final JwtTokenService service = new JwtTokenService(TTL_MINUTES, ISSUER);
 
     private Jws<Claims> parse(String token) {
         return Jwts.parser()
-                .verifyWith(Keys.hmacShaKeyFor(TEST_SECRET.getBytes(StandardCharsets.UTF_8)))
+                .verifyWith(service.getPublicKey())
                 .build()
                 .parseSignedClaims(token);
     }
 
     @Test
-    @DisplayName("签发的令牌可用同一密钥验签，且声明完整（sub/roles/scope/iss）")
+    @DisplayName("签发的令牌可用发布出的公钥验签，且声明完整（sub/roles/scope/iss）")
     void issuedTokenCarriesExpectedClaims() {
         String token = service.issueToken("admin", List.of("ADMIN", "USER"));
 
@@ -58,11 +51,43 @@ class JwtTokenServiceTest {
     }
 
     @Test
-    @DisplayName("算法必须是 HS384：网关侧解码器固定 HS384，算法不符会被拒")
-    void tokenIsSignedWithHs384() {
+    @DisplayName("算法必须是 RS256：网关经 JWKS 以 RSA 公钥验签，算法不符会被拒")
+    void tokenIsSignedWithRs256() {
         String token = service.issueToken("admin", List.of("ADMIN"));
 
-        assertEquals("HS384", parse(token).getHeader().getAlgorithm());
+        assertEquals("RS256", parse(token).getHeader().getAlgorithm());
+    }
+
+    @Test
+    @DisplayName("JWKS 三要素与签发公钥一致（n/e 可还原出同一个公钥）")
+    void jwksElementsMatchSigningKey() {
+        String n = service.getPublicKeyModulusBase64Url();
+        String e = service.getPublicKeyExponentBase64Url();
+
+        RSAPublicKey key = service.getPublicKey();
+        assertEquals("RSA", key.getAlgorithm());
+        assertEquals(2048, key.getModulus().bitLength());
+        // n/e 是 Base64URL（无 padding）；e 恒为 65537 → "AQAB"
+        assertEquals("AQAB", e);
+        // 用 JWKS 里的 n/e 重建公钥并验签，证明端到端可行
+        byte[] modulus = java.util.Base64.getUrlDecoder().decode(n);
+        java.math.BigInteger m = new java.math.BigInteger(1, modulus);
+        java.math.BigInteger exp = new java.math.BigInteger(1, java.util.Base64.getUrlDecoder().decode(e));
+        java.security.KeyFactory factory;
+        try {
+            factory = java.security.KeyFactory.getInstance("RSA");
+        } catch (java.security.NoSuchAlgorithmException ex) {
+            throw new IllegalStateException(ex);
+        }
+        RSAPublicKey rebuilt;
+        try {
+            rebuilt = (RSAPublicKey) factory.generatePublic(new java.security.spec.RSAPublicKeySpec(m, exp));
+        } catch (java.security.spec.InvalidKeySpecException ex) {
+            throw new IllegalStateException(ex);
+        }
+        String token = service.issueToken("admin", List.of("USER"));
+        Claims claims = Jwts.parser().verifyWith(rebuilt).build().parseSignedClaims(token).getPayload();
+        assertEquals("admin", claims.getSubject());
     }
 
     @Test

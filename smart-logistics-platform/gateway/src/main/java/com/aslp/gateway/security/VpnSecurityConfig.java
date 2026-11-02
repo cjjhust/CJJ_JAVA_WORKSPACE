@@ -18,9 +18,6 @@ import org.springframework.security.oauth2.server.resource.authentication.Reacti
 import org.springframework.security.web.server.SecurityWebFilterChain;
 import reactor.core.publisher.Mono;
 
-import javax.crypto.spec.SecretKeySpec;
-import java.nio.charset.StandardCharsets;
-
 /**
  * M4 — 居家办公 VPN 安全接入（Spring Cloud Gateway 为 WebFlux 应用，必须使用响应式安全链）。
  *
@@ -33,9 +30,9 @@ import java.nio.charset.StandardCharsets;
  *   <li>docker（{@code SPRING_PROFILES_ACTIVE=docker}）：强制 JWT 鉴权 + 细粒度角色授权。</li>
  * </ul>
  *
- * <p><b>鉴权方案说明</b>：当前使用 HS384 对称密钥（与 auth-service 共享
- * {@code ASLP_JWT_SECRET}）。生产环境建议升级为 RS256 非对称密钥 + JWKS 端点，
- * 使网关仅持有公钥（见 {@code todo.md} P2-5）。
+ * <p><b>鉴权方案说明</b>（P0-2）：RS256 非对称签名——网关经 auth-service 的
+ * JWKS 端点（{@code /api/auth/jwks.json}）获取公钥验签，自身不持有任何密钥；
+ * 私钥仅存在于 auth-service，轮换 = 换 kid 发新公钥，网关零改动。
  */
 @Configuration
 @EnableWebFluxSecurity
@@ -92,17 +89,17 @@ public class VpnSecurityConfig {
     }
 
     /**
-     * JWT 解码器：与 auth-service 共享 HS384 对称密钥。
+     * JWT 解码器：经 auth-service 的 JWKS 端点获取 RS256 公钥（P0-2）。
      *
-     * <p>密钥通过 {@code ASLP_JWT_SECRET} 环境变量注入；解码为惰性执行，启动时不发起网络请求。
+     * <p>网关只持有<b>公钥</b>（只能验、不能签）——私钥不离开 auth-service，
+     * 密钥轮换 = auth 侧换 kid 发新公钥，网关零改动。
+     * {@code withJwkSetUri} 惰性拉取（首个令牌到达时），并按 kid 缓存；
+     * 走容器网络别名 {@code aslp-auth-service}（compose 内部 DNS）。
      */
     @Bean
     @Profile("docker")
-    public ReactiveJwtDecoder jwtDecoder(@Value("${aslp.security.jwt.secret}") String secret) {
-        return NimbusReactiveJwtDecoder
-                .withSecretKey(new SecretKeySpec(secret.getBytes(StandardCharsets.UTF_8), "HmacSHA384"))
-                .macAlgorithm(org.springframework.security.oauth2.jose.jws.MacAlgorithm.HS384)
-                .build();
+    public ReactiveJwtDecoder jwtDecoder(@Value("${aslp.security.jwt.jwks-uri}") String jwksUri) {
+        return NimbusReactiveJwtDecoder.withJwkSetUri(jwksUri).build();
     }
 
     /**

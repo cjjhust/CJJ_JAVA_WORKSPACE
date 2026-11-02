@@ -4,6 +4,7 @@ import com.aslp.route.config.TrackingProperties;
 import org.springframework.boot.SpringApplication;
 import org.springframework.boot.autoconfigure.SpringBootApplication;
 import org.springframework.boot.context.properties.EnableConfigurationProperties;
+import org.springframework.scheduling.annotation.EnableScheduling;
 
 /**
  * M3 路由与尾程服务入口。
@@ -16,6 +17,7 @@ import org.springframework.boot.context.properties.EnableConfigurationProperties
  */
 @SpringBootApplication
 @EnableConfigurationProperties(TrackingProperties.class)
+@EnableScheduling // P1-6：StuckShipmentScanTask（包裹卡住 N 天告警）的定时扫描
 public class RouteServiceApplication {
     public static void main(String[] args) {
         SpringApplication.run(RouteServiceApplication.class, args);

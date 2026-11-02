@@ -2,7 +2,7 @@ spring:
   application:
     name: order-service
   datasource:
-    url: jdbc:postgresql://aslp_postgres:5432/aslp
+    url: jdbc:postgresql://aslp_postgres:5432/aslp_order
     username: aslp
     password: aslp123
   flyway:
@@ -21,6 +21,10 @@ server:
   port: 8081
 
 management:
+  # P0-1 安全基线：actuator 挪到独立管理端口（不向宿主机发布）。
+  # 宿主机访问只能走网关（JWT 鉴权）；Prometheus 经容器网络直抓 9091。
+  server:
+    port: 9091
   # P1-3：链路追踪（容器内指向 aslp_zipkin）
   tracing:
     sampling:
@@ -127,7 +131,7 @@ aslp:
   backup:
     host: aslp_postgres
     port: 5432
-    database: aslp
+    database: aslp_order
     username: aslp
     # P2-4：TCP 认证必需（与 aslp_postgres 的 POSTGRES_PASSWORD 一致）
     password: ${ASLP_DB_PASSWORD:aslp123}

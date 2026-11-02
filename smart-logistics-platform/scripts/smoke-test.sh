@@ -178,14 +178,18 @@ check_status() {
 
 if [ "${EXTERNAL}" -eq 1 ]; then
     echo "=== 1-3/5 外部模式：跳过本地进程启动，直接等待既存服务就绪 ==="
+    # P0-1：compose 部署下业务端口不发布宿主机，actuator 走独立管理端口
+    # （order=9091 inventory=9092 route=9093 auth=9094 report=9095，见 docker-compose.yml）
+    declare -A MGMT_PORT=( [order-service]=9091 [inventory-service]=9092 [route-service]=9093 [auth-service]=9094 [report-service]=9095 )
     for entry in "${SERVICES[@]}"; do
         name="$(basename "${entry%%:*}")"
         port="${entry##*:}"
-        if wait_http "http://localhost:${port}/actuator/health" 120; then
-            echo "  ✅ ${name} 就绪 (${port})"
+        mgmt="${MGMT_PORT[${name}]:-${port}}"
+        if wait_http "http://localhost:${mgmt}/actuator/health" 120; then
+            echo "  ✅ ${name} 就绪 (mgmt ${mgmt})"
             PASS=$((PASS + 1))
         else
-            echo "  ❌ ${name} 超时未就绪 (${port})"
+            echo "  ❌ ${name} 超时未就绪 (mgmt ${mgmt})"
             FAIL=$((FAIL + 1))
         fi
     done
@@ -368,8 +372,8 @@ done
 # 验收：熔断打开后仍返回 200 + degraded=true（降级响应，而不是 500）
 check_post "平台故障返回降级响应  POST /api/orders/pull" \
     "http://localhost:8080/api/orders/pull" '"degraded":true'
-check "熔断状态已打开       GET  :8081/actuator/circuitbreakers" \
-    "http://localhost:8081/actuator/circuitbreakers" '"state":"OPEN"'
+check "熔断状态已打开       GET  :9091/actuator/circuitbreakers" \
+    "http://localhost:9091/actuator/circuitbreakers" '"state":"OPEN"'
 # 恢复：关闭故障开关 -> 等熔断自动转半开 -> 下一次调用应成功
 post_quiet "http://localhost:8080/api/orders/mock/failure-mode?mode=NONE"
 sleep 4
@@ -423,13 +427,13 @@ check "看板页面已打包      GET :8085/dashboard.html" \
     "http://localhost:8085/dashboard.html" 'ASLP 运营看板'
 
 echo "--- M5 可观测性（P1-1：Micrometer -> /actuator/prometheus -> Prometheus -> Grafana）---"
-# 1) 服务侧：Prometheus 抓取端点可用。这里直连 8081（不走网关），
+# 1) 服务侧：Prometheus 抓取端点可用。这里直连 9091（P0-1 管理端口，不走网关），
 #    这样失败时能立即区分「应用没暴露指标」还是「网关/鉴权挡住了」。
 #    用 here-string 而非管道：本脚本开了 pipefail，而 grep -q 命中即退出会让写端 SIGPIPE，
 #    200KB 级的响应体必定假失败（实测旧写法 exit code = 141）。
-METRICS_BODY="$(curl -s --max-time 25 http://localhost:8081/actuator/prometheus 2>/dev/null)"
+METRICS_BODY="$(curl -s --max-time 25 http://localhost:9091/actuator/prometheus 2>/dev/null)"
 if grep -qF -- 'aslp_order_pull_requests_total' <<< "${METRICS_BODY}"; then
-    echo "  ✅ 服务指标端点         GET  :8081/actuator/prometheus（$(( ${#METRICS_BODY} / 1024 ))KB，含业务指标）"
+    echo "  ✅ 服务指标端点         GET  :9091/actuator/prometheus（$(( ${#METRICS_BODY} / 1024 ))KB，含业务指标）"
     PASS=$((PASS + 1))
 else
     echo "  ❌ 服务指标端点未暴露业务指标（返回 $(( ${#METRICS_BODY} / 1024 ))KB）"
@@ -865,7 +869,7 @@ MAILHOG_API="http://localhost:8025"
 MAILHOG_READY="$(curl -fsS --max-time 10 "${MAILHOG_API}/api/v2/messages" 2>/dev/null)"
 check_body "MailHog 收件箱就绪（:8025 API 可读）" '"total"' "${MAILHOG_READY}"
 
-INVENTORY_HEALTH="$(curl -fsS --max-time 10 http://localhost:8082/actuator/health 2>/dev/null)"
+INVENTORY_HEALTH="$(curl -fsS --max-time 10 http://localhost:9092/actuator/health 2>/dev/null)"
 check_body "邮件健康探测已恢复：inventory /actuator/health 的 mail 组件为 UP" \
     '"mail":{"status":"UP"' "${INVENTORY_HEALTH}"
 
@@ -934,7 +938,7 @@ echo "--- M5 单据对象存储（P1-6：MinIO + 面单/报关单 PDF）---"
 MINIO_LIVE="$(curl -s -o /dev/null -w '%{http_code}' --max-time 10 http://localhost:9000/minio/health/live 2>/dev/null)"
 check_body "MinIO 存活探测（:9000 /minio/health/live）" '200' "${MINIO_LIVE}"
 
-ORDER_HEALTH="$(curl -fsS --max-time 10 http://localhost:8081/actuator/health 2>/dev/null)"
+ORDER_HEALTH="$(curl -fsS --max-time 10 http://localhost:9091/actuator/health 2>/dev/null)"
 check_body "对象存储健康：order /actuator/health 的 minio 组件为 UP" \
     '"minio":{"status":"UP"' "${ORDER_HEALTH}"
 check_body "健康详情带桶名（排查时第一个要确认的就是「在跟哪个桶说话」）" 'aslp-documents' "${ORDER_HEALTH}"

@@ -52,15 +52,17 @@ RUN apk add --no-cache postgresql16-client
 ARG MODULE=gateway
 WORKDIR /app
 
-COPY --from=build /app/${MODULE}/target/*.jar /app/app.jar
+COPY --from=build /app/${MODULE}/target/*-exec.jar /app/app.jar
 RUN chown -R aslp:aslp /app
 USER aslp
 
 # 容器内存感知 + 容器环境优化
 ENV JAVA_OPTS="-XX:MaxRAMPercentage=75.0 -XX:+UseG1GC -Djava.security.egd=file:/dev/./urandom"
 
+# 健康检查打管理端口（P0-1：docker profile 下 actuator 与业务端口分离）；
+# 未设置 MANAGEMENT_PORT 时回落 SERVER_PORT（本地/网关行为不变）
 HEALTHCHECK --interval=15s --timeout=3s --start-period=45s --retries=5 \
-    CMD wget -qO- http://localhost:${SERVER_PORT:-8080}/actuator/health | grep -q '"status":"UP"' || exit 1
+    CMD wget -qO- http://localhost:${MANAGEMENT_PORT:-${SERVER_PORT:-8080}}/actuator/health | grep -q '"status":"UP"' || exit 1
 
 ENTRYPOINT ["sh", "-c", "exec java $JAVA_OPTS -jar /app/app.jar"]
 

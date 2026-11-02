@@ -19,8 +19,8 @@ spring:
 # JWT 签发配置（M1 认证服务 / M4 网关 VPN 接入的令牌来源）
 aslp:
   jwt:
-    # 生产环境请通过环境变量 ASLP_JWT_SECRET 注入，切勿使用默认值
-    secret: ${ASLP_JWT_SECRET:aslp-dev-secret-key-change-me-in-production-0123456789}
+    # P0-2：RS256 非对称签名 —— 私钥由 JwtTokenService 启动时生成（演示定位），
+    # 公钥经 /api/auth/jwks.json 发布，网关经 JWKS 验签。不再使用对称密钥。
     ttl-minutes: 120
     issuer: aslp-auth-service
 

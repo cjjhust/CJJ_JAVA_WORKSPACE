@@ -68,12 +68,12 @@ spring:
 server:
   port: 8080
 
-# VPN 安全接入：与 auth-service 共享 HS384 对称密钥（由 compose 注入 ASLP_JWT_SECRET）
-# 生产环境建议升级为 RS256 + JWKS（见 todo.md P2-5）
+# VPN 安全接入（P0-2）：RS256 非对称密钥——网关经 JWKS 端点取公钥验签，
+# 不再持有任何密钥（旧 HS384 共享密钥方案已移除）。密钥轮换 = auth 侧换 kid，网关零改动。
 aslp:
   security:
     jwt:
-      secret: ${ASLP_JWT_SECRET:aslp-dev-secret-key-change-me-in-production-0123456789}
+      jwks-uri: http://aslp-auth-service:8084/api/auth/jwks.json
     # P2-3：可信代理清单（限流解析 XFF 的前提）。
     # 本地演示流量路径：浏览器/脚本 → Docker 端口转发（宿主侧 127.0.0.1）→ 网关容器；
     # 容器内网关看到的直接对端是宿主桥接口（192.168.65.1，Docker Desktop）或

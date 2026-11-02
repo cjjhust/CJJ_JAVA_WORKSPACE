@@ -7,6 +7,7 @@ import org.springframework.http.HttpStatus;
 import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.*;
 
+import java.util.List;
 import java.util.Map;
 
 /**
@@ -79,5 +80,23 @@ public class AuthController {
     @GetMapping("/me")
     public ResponseEntity<Map<String, String>> me(@RequestParam String username) {
         return ResponseEntity.ok(Map.of("username", username, "status", "authenticated"));
+    }
+
+    /**
+     * P0-2：JWKS 公钥发布端点（RFC 7517）。
+     *
+     * <p>网关用 {@code withJwkSetUri} 指向这里验签 RS256 令牌——
+     * 网关只持有公钥（只能验、不能签），私钥不离开本服务。
+     * 免鉴权：JWKS 本来就是公开的（公钥不含秘密）。
+     */
+    @GetMapping("/jwks.json")
+    public Map<String, Object> jwks() {
+        return Map.of("keys", List.of(Map.of(
+                "kty", "RSA",
+                "kid", JwtTokenService.KEY_ID,
+                "use", "sig",
+                "alg", "RS256",
+                "n", tokenService.getPublicKeyModulusBase64Url(),
+                "e", tokenService.getPublicKeyExponentBase64Url())));
     }
 }
