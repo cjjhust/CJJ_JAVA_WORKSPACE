@@ -805,6 +805,37 @@ curl -s http://localhost:8080/api/orders/AMZ-1001/documents -H "Authorization: B
 2. **`@DataJpaTest` 假绿 / 方言炸裂（缺陷 #57）**：`@DataJpaTest` 默认 `@AutoConfigureTestDatabase(replace=ANY)`，把 `@DynamicPropertySource` 注册的 PG 容器 URL **无条件替换成内嵌 H2**。order 的迁移用了 PG 方言（`TIMESTAMPTZ`/`BIGSERIAL`），H2 报 `Unknown data type` 直接红；**auth/inventory 反而"绿"了——因为它们的 SQL 恰好 H2 兼容，等于测试跑在错误的数据库上还通过了（假绿）**。修复：三个集成测试统一加 `@AutoConfigureTestDatabase(replace = NONE)`，强制 Flyway 跑在 Testcontainers 的真 PG 上。
    → 教训：**"测试通过"≠"测到了想测的东西"**。方言炸裂是显式失败（好发现），H2 兼容是隐式假绿（更危险）；两者同根，一个注解修复。
 
+### CI 二跑追记（2026-11-02，缺陷 #58）—— Testcontainers 1.x 遇上 Docker Engine 29
+
+**现象**：`replace=NONE` 修复推送后 CI 仍红。此时本机 Docker Desktop 已恢复，于是本地复现代替读远端日志（公开 API 只能看到红/绿，日志下载需 admin token）。
+
+**发现过程（值得学习的一条链）**：
+
+1. 本地跑 `OrderRepositoryIntegrationTest`，三种 Docker 探测策略全挂。用 `curl --unix-socket` 直连 Docker Desktop 的 raw socket——**通了**（引擎 29.7.2 正常响应 /info）。说明不是 Docker 没起来，是**客户端被拒**。
+2. 再看探测日志里被淹没的一行：`client version 1.32 is too old. Minimum supported API version is 1.40`——**根因实锤**：Testcontainers 1.21.3 内置的 docker-java 客户端默认以 API 1.32 握手，而 Docker Engine 29.x 把最低 API 提到了 1.40。GitHub runner 升级 Docker 后同样炸——本机与 CI 是**同一个根因**，不是巧合。
+3. 升级 Testcontainers 到 1.21.3 无效（仍回落 1.32）；`DOCKER_API_VERSION` 环境变量也无效（不传播到 surefire fork 的 JVM）。查证社区确认这是 1.x 全系的已知问题，两个修复档位：
+   - **止血**：test classpath 放 `docker-java.properties` 钉住 `api.version=1.44`（docker-java 类加载时读取）；
+   - **根治**：Testcontainers 2.x（自动协商 API 版本）。本项目取止血方案，注释中标注根治路径。
+
+**握手修通后，真 PG 首次执行暴露出两个"从未真正跑过"的测试缺陷**（此前先炸在 H2 方言上，测试体根本没执行到）：
+
+4. `resultWith` 里 `OrderDto` 构造参数**顺序写错**：`(id, "Shipped", "奶粉一件代发", "Bruchsal", …)`——把状态放进了 product 位、仓库放进了 status 位，断言 `expected: <Shipped> but was: <Bruchsal>`。**编译器管不了 String 参数的语义顺序**，只有真跑才暴露。
+5. UNIQUE 约束测试在真 PG 上把 `@DataJpaTest` 的默认事务标记为 **aborted**，后续 `count()` 全部报 "current transaction is aborted"——PG 严格执行、H2 宽容放行。修复：该测试改 `@Transactional(propagation = NOT_SUPPORTED)`（每次仓储调用独立事务，冲突事务回滚即被隔离），`@BeforeEach` 改 `deleteAllInBatch()`（NOT_SUPPORTED 下 TestEntityManager.flush 没有事务可用）。
+
+**单体冒烟测试随后暴露两个装配问题**：
+
+6. 合并 3 套 Flyway location 后，auth/inventory/order 各自的 `V1__`/`V2__` **版本号全局撞车**（Flyway 要求版本号在所有 location 内唯一）。修复：迁移文件按模块段位重命名（auth=V1xx / inventory=V2xx / order=V3xx）——"数据库未拆"时应有的纪律，顺带让每个迁移文件的归属一目了然。
+7. `WebEnvironment.NONE`（非 Web 环境）下 Spring Security 的 Servlet 自动配置不生效，auth 的 `SecurityConfig` 拿不到 `HttpSecurity` 直接装配失败。修复：改 `MOCK`（模拟 Servlet 环境，不占端口）。
+
+**提交**：`574009a`（13 文件，含全部修复）→ CI **success**，4 个容器测试类首次真正跑在真 PG 上全绿。
+
+**学习点（本次最值钱的部分）**：
+
+- **"Unknown data type" 这类方言错误是显式失败，反而是好事**；危险的是 auth/inventory 那种"恰好 H2 兼容"的假绿——测试在错误的数据库上通过，给你一种 Coverage 假象。集成测试要么跑真库，要么明说没跑，不要第三种状态。
+- **客户端-服务端 API 版本错配是 Docker 生态的慢性病**：docker-java 回落 1.32 是历史包袱，环境变量、testcontainers.properties、POM systemPropertyVariables 三条路都传播不进去，唯独 classpath 的 `docker-java.properties` 有效——因为它是**类加载期**读取，先于一切环境探测。
+- **测试参数顺序错误 + 全 String 构造器 = 编译器失明**。record 的具名访问器救得了读取救不了构造；要么用 builder，要么测试里用工厂方法给参数命名。
+- **事务边界理解**：`@DataJpaTest` 的事务包裹 + PG 的 aborted 语义 + `NOT_SUPPORTED` 传播的组合，是"同一个测试在 H2 绿、在 PG 红"的经典第三种来源（前两种是方言和约束时机）。
+
 ---
 ## P1-11 文档分工（readme=三语介绍 / todo=全量复盘）+ 三个界面真实截图（2026-09-23 轮次 17）— 用户要求：readme 只留「做了什么、解决了什么问题」，开发过程全量剪切到 todo（顶部添加、不覆盖），并补上三个界面的截图
 
