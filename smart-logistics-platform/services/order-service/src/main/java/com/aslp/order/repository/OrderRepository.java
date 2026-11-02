@@ -7,6 +7,7 @@ import org.springframework.data.jpa.repository.JpaRepository;
 import org.springframework.data.jpa.repository.Query;
 import org.springframework.stereotype.Repository;
 
+import java.util.Collection;
 import java.util.List;
 import java.util.Optional;
 
@@ -20,6 +21,12 @@ import java.util.Optional;
 public interface OrderRepository extends JpaRepository<OrderRecord, Long> {
 
     Optional<OrderRecord> findByOrderId(String orderId);
+
+    /**
+     * 批量查存量（幂等落库用）：一次 IN 查询替代逐单 SELECT，
+     * N 条订单从 N 次往返降为 1 次。
+     */
+    List<OrderRecord> findByOrderIdIn(Collection<String> orderIds);
 
     boolean existsByOrderId(String orderId);
 

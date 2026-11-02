@@ -27,6 +27,7 @@
         <module>services/order-service</module>
         <module>services/report-service</module>
         <module>services/route-service</module>
+        <module>app-monolith</module>
     </modules>
 
     <properties>
@@ -39,6 +40,13 @@
         -->
         <spring-cloud.version>2023.0.3</spring-cloud.version>
         <maven.compiler.plugin.version>3.11.0</maven.compiler.plugin.version>
+        <!--
+          P2-8：Testcontainers 版本覆盖。
+          Boot 3.3.0 BOM 管理的 1.19.8 与新 Docker Engine API（29.x，
+          Docker Desktop 2025+）握手失败（/v1.x/info 返回 400）。
+          1.20.6 起适配新 API；该属性是 Boot BOM 预留的覆盖点，改这里即可全模块生效。
+        -->
+        <testcontainers.version>1.20.6</testcontainers.version>
         <!-- P1-4：契约测试用 WireMock（standalone 版，见 order-service 依赖注释） -->
         <wiremock.version>3.9.1</wiremock.version>
         <!-- P1-6：对象存储 SDK 与 PDF 生成（OpenPDF = LGPL，见 order-service 依赖注释） -->

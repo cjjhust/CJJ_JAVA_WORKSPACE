@@ -12,7 +12,9 @@ import org.springframework.web.client.RestClient;
 import java.time.Instant;
 import java.time.temporal.ChronoUnit;
 import java.util.ArrayList;
+import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Map;
 
 /**
  * Amazon SP-API 订单接口客户端（P1-4）。
@@ -62,6 +64,29 @@ public final class SpApiOrderClient {
     private final SpApiProperties props;
     private final LwaTokenClient tokens;
     private final RestClient ordersClient;
+
+    /**
+     * P2-7：标题进程内缓存（orderId → (title, 写入时刻)）。
+     *
+     * <p>订单的商品名在履约期间几乎不变，而 5 分钟定时任务与手动补拉会反复
+     * 拉到同一批「已拉过明细」的订单 —— 不缓存意味着每 5 分钟对平台重复
+     * N 次 /orderItems 调用，纯粹烧配额。用 {@link LinkedHashMap} 的
+     * access-order + removeEldestEntry 做 LRU（十几行，不引 Caffeine），
+     * TTL 过期即失效（与 TrackingService 缓存同一思路：缓存放使用方而不是平台）。
+     */
+    private final Map<String, CachedTitle> titleCache =
+            new LinkedHashMap<>(64, 0.75f, true) {
+                private static final long serialVersionUID = 1L;
+
+                @Override
+                protected boolean removeEldestEntry(Map.Entry<String, CachedTitle> eldest) {
+                    // 容量与 TTL 取小：条目再多也只占这点内存，过旧即丢
+                    return size() > 512;
+                }
+            };
+
+    private record CachedTitle(String title, Instant writtenAt) {
+    }
 
     public SpApiOrderClient(SpApiProperties props, LwaTokenClient tokens, RestClient.Builder builder) {
         this.props = props;
@@ -165,13 +190,55 @@ public final class SpApiOrderClient {
         }
     }
 
-    /** 逐单补商品名（明细失败不影响主流程：商品名回退占位符）。 */
+    /**
+     * 补商品名（明细失败不影响主流程：商品名回退占位符）。
+     *
+     * <p><b>P2-7 两条护栏</b>：
+     * <ol>
+     *   <li><b>单轮上限</b>：一次拉取最多对 {@code title-enrich-max-orders}（默认 30）条订单
+     *       发起 /orderItems 调用。SP-API 配额按「每卖家每分钟」计量，明细调用是配额放大器
+     *       （5 页 × 50 条 = 250 次，比订单列表本身多 5 倍）—— 非关键调用把配额打满后
+     *       连订单列表都会被 429。超限的订单本轮回退占位符，<b>下一轮</b>再补
+     *       （订单会持续被重新拉取，商品名最终补齐，只是晚几轮）。</li>
+     *   <li><b>进程内 LRU 缓存</b>：TTL 内的订单不再重复请求平台
+     *       （定时任务与手动补拉之间的重叠不再烧配额）。</li>
+     * </ol>
+     */
     private List<SpApiOrder> enrichWithTitles(List<SpApiOrder> orders) {
+        int budget = Math.max(1, props.getTitleEnrichMaxOrders());
         List<SpApiOrder> enriched = new ArrayList<>(orders.size());
+        int fetched = 0;
+        int cached = 0;
         for (SpApiOrder order : orders) {
-            enriched.add(withTitle(order));
+            SpApiOrder next = order;
+
+            CachedTitle hit = titleCache.get(order.orderId());
+            if (hit != null && isFresh(hit)) {
+                next = order.withTitle(hit.title());
+                cached++;
+            } else if (fetched < budget) {
+                fetched++;
+                next = withTitle(order);
+                if (StringUtils.hasText(next.title())) {
+                    titleCache.put(order.orderId(), new CachedTitle(next.title(), Instant.now()));
+                }
+            } else {
+                log.debug("[SP-API][契约] 订单 {} 本轮超出标题富集上限（{}/{}），商品名回退占位符，下一轮再补",
+                        order.orderId(), fetched, budget);
+            }
+            enriched.add(next);
+        }
+        if (cached > 0 || fetched < orders.size()) {
+            log.info("[SP-API][契约] 标题富集：本批 {} 条，缓存命中 {} 条，实际请求 {} 条，上限 {}",
+                    orders.size(), cached, fetched, budget);
         }
         return enriched;
+    }
+
+    private boolean isFresh(CachedTitle entry) {
+        return entry.writtenAt()
+                .plus(props.getTitleCacheTtl())
+                .isAfter(Instant.now());
     }
 
     private SpApiOrder withTitle(SpApiOrder order) {

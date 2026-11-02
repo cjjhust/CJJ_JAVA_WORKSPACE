@@ -65,6 +65,23 @@ public class SpApiProperties {
      */
     private boolean fetchItemTitles = true;
 
+    /**
+     * P2-7：单轮富集上限 —— 一次拉取最多对多少条订单发起 /orderItems 调用。
+     *
+     * <p>明细是「锦上添花」，但 N+1 是配额放大器：50 条/页 × 5 页 = 250 次
+     * 明细调用，比订单列表本身还多 5 倍。SP-API 按「每卖家每分钟」计量配额，
+     * 明细调用打满配额后连订单列表都会被 429 —— 用「非关键调用饿死关键调用」
+     * 换商品名不值得。超限的订单商品名回退占位符，<b>下一轮</b>再补。
+     */
+    private int titleEnrichMaxOrders = 30;
+
+    /**
+     * P2-7：标题缓存 TTL（进程内 LRU，见 {@link SpApiOrderClient}）。
+     * 同一订单在 5 分钟定时任务与手动补拉之间重叠时，避免对平台重复请求
+     * 同一个「几乎不变」的商品名。
+     */
+    private Duration titleCacheTtl = Duration.ofMinutes(10);
+
     /** 目的地城市（小写）→ 履约仓展示名。未命中则用 {@link #defaultWarehouse}。 */
     private Map<String, String> warehouseByCity = new LinkedHashMap<>();
 
@@ -193,6 +210,22 @@ public class SpApiProperties {
 
     public void setFetchItemTitles(boolean fetchItemTitles) {
         this.fetchItemTitles = fetchItemTitles;
+    }
+
+    public int getTitleEnrichMaxOrders() {
+        return titleEnrichMaxOrders;
+    }
+
+    public void setTitleEnrichMaxOrders(int titleEnrichMaxOrders) {
+        this.titleEnrichMaxOrders = titleEnrichMaxOrders;
+    }
+
+    public Duration getTitleCacheTtl() {
+        return titleCacheTtl;
+    }
+
+    public void setTitleCacheTtl(Duration titleCacheTtl) {
+        this.titleCacheTtl = titleCacheTtl;
     }
 
     public Map<String, String> getWarehouseByCity() {

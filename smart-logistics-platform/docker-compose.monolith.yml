@@ -1,0 +1,126 @@
+# =============================================================================
+# Smart Logistics Platform (ASLP) — 单体形态编排（P2-7，架构对比用）
+#
+# 与主 docker-compose.yml（微服务形态，6 个 Java 服务 + 基础设施）互斥使用：
+#   单体形态：  docker compose -f docker-compose.monolith.yml up -d --build
+#   微服务形态：docker compose up -d --build
+#
+# 差异：5 个业务模块打包进一个进程（app-monolith，profile=monolith，
+# report 走进程内数据源 LocalXxxSource），基础设施只保留单体实际用到的 4 个。
+# Grafana/Prometheus/Loki/WireMock/Kafka 等不在单体演示范围，未包含。
+# 端口：单体应用 8090（避免与微服务形态的网关 8080 冲突）。
+# =============================================================================
+
+name: aslp-monolith
+
+services:
+  aslp_postgres:
+    image: postgres:16-alpine
+    container_name: aslp_postgres
+    environment:
+      POSTGRES_DB: aslp
+      POSTGRES_USER: aslp
+      POSTGRES_PASSWORD: aslp123
+      PGDATA: /var/lib/postgresql/data/pgdata
+    ports:
+      - "5432:5432"
+    volumes:
+      - aslp_pg_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U aslp -d aslp"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+    networks:
+      - aslp_net
+
+  aslp_redis:
+    image: redis:7-alpine
+    container_name: aslp_redis
+    command: ["redis-server", "--appendonly", "yes"]
+    ports:
+      - "6379:6379"
+    volumes:
+      - aslp_redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+    networks:
+      - aslp_net
+
+  aslp_mailhog:
+    image: mailhog/mailhog:v1.0.1
+    container_name: aslp_mailhog
+    ports:
+      - "8025:8025"
+      - "1025:1025"
+    networks:
+      - aslp_net
+
+  aslp_minio:
+    image: quay.io/minio/minio:RELEASE.2025-09-07T16-13-09Z
+    container_name: aslp_minio
+    command: server /data --console-address ":9001"
+    environment:
+      MINIO_ROOT_USER: aslp-minio-admin
+      MINIO_ROOT_PASSWORD: aslp-minio-secret
+    ports:
+      - "9000:9000"
+      - "9001:9001"
+    volumes:
+      - aslp_minio_data:/data
+    healthcheck:
+      test: ["CMD", "mc", "ready", "local"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+    networks:
+      - aslp_net
+
+  aslp_zipkin:
+    image: openzipkin/zipkin:latest
+    container_name: aslp_zipkin
+    ports:
+      - "9411:9411"
+    networks:
+      - aslp_net
+
+  aslp_monolith:
+    build:
+      context: .
+      args:
+        MODULE: app-monolith
+    image: aslp/app-monolith:1.0.0
+    container_name: aslp_monolith
+    environment:
+      SERVER_PORT: "8090"
+      # 单进程内 report 直接进程内取数，无下游 URL 需要；
+      # MinIO/JWT 等沿用镜像内 application.yml 的默认值（演示凭据）
+      ASLP_DB_PASSWORD: aslp123
+    ports:
+      - "8090:8090"
+    depends_on:
+      aslp_postgres:
+        condition: service_healthy
+      aslp_redis:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://localhost:8090/actuator/health | grep -q '\"status\":\"UP\"' || exit 1"]
+      interval: 15s
+      timeout: 3s
+      start-period: 60s
+      retries: 5
+    restart: unless-stopped
+    networks:
+      - aslp_net
+
+volumes:
+  aslp_pg_data:
+  aslp_redis_data:
+  aslp_minio_data:
+
+networks:
+  aslp_net:
+    driver: bridge

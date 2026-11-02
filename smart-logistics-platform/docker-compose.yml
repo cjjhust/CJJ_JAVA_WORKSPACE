@@ -188,6 +188,9 @@ services:
       SERVER_PORT: 8081
     ports:
       - "8081:8081"
+    volumes:
+      # P2-4：数据库备份落命名卷（容器重建不丢，配合 retention 轮转）
+      - aslp_backup_data:/var/backups/aslp
     depends_on:
       aslp_postgres:
         condition: service_healthy
@@ -461,6 +464,8 @@ volumes:
     name: aslp_loki_data
   aslp_minio_data:
     name: aslp_minio_data
+  aslp_backup_data:
+    name: aslp_backup_data
 
 networks:
   aslp_net:

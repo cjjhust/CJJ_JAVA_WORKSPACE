@@ -1,7 +1,9 @@
 package com.aslp.report.service;
 
 import com.aslp.report.client.InventoryWarningClient;
+import com.aslp.report.client.InventoryWarningSource;
 import com.aslp.report.client.OrderStatsClient;
+import com.aslp.report.client.OrderStatsSource;
 import com.aslp.report.client.ReportSourceUnavailableException;
 import com.aslp.report.config.ReportProperties;
 import com.aslp.report.dto.DashboardReport;
@@ -51,17 +53,17 @@ public class ReportAggregationService {
 
     private static final Logger log = LoggerFactory.getLogger(ReportAggregationService.class);
 
-    private final OrderStatsClient orderStatsClient;
-    private final InventoryWarningClient inventoryWarningClient;
+    private final OrderStatsSource orderStatsSource;
+    private final InventoryWarningSource inventoryWarningSource;
     private final ObservationRegistry observationRegistry;
     private final ReportProperties props;
 
-    public ReportAggregationService(OrderStatsClient orderStatsClient,
-                                    InventoryWarningClient inventoryWarningClient,
+    public ReportAggregationService(OrderStatsSource orderStatsSource,
+                                    InventoryWarningSource inventoryWarningSource,
                                     ObservationRegistry observationRegistry,
                                     ReportProperties props) {
-        this.orderStatsClient = orderStatsClient;
-        this.inventoryWarningClient = inventoryWarningClient;
+        this.orderStatsSource = orderStatsSource;
+        this.inventoryWarningSource = inventoryWarningSource;
         this.observationRegistry = observationRegistry;
         this.props = props;
     }
@@ -105,7 +107,7 @@ public class ReportAggregationService {
 
     private OrdersBlock fetchOrders(List<String> unavailable) {
         try {
-            OrderStatsSnapshot stats = orderStatsClient.fetch();
+            OrderStatsSnapshot stats = orderStatsSource.fetch();
             return new OrdersBlock(
                     true,
                     stats.total(),
@@ -132,12 +134,19 @@ public class ReportAggregationService {
 
     private InventoryBlock fetchInventory(List<String> unavailable) {
         try {
-            InventoryWarningSnapshot snapshot = inventoryWarningClient.fetch();
-            // 截断保护：低库存 SKU 可能有几百条，看板只需要「最紧急的前 N 条」
+            InventoryWarningSnapshot snapshot = inventoryWarningSource.fetch();
+            // 截断保护：低库存 SKU 可能有几百条，看板只需要「最紧急的前 N 条」。
+            // <b>P2-2：截断前必须先排序</b> —— 上游返回顺序是数据库自然序，
+            // 直接 subList 取到的「前 N 条」与「最紧急的 N 条」无关，
+            // 会让看板把不紧急的 SKU 当紧急项展示（注释语义与实现长期不符）。
+            // 紧急度口径：可用库存越少越紧急（与低库存阈值同一方向）。
+            List<InventoryWarningSnapshot.LowStockItem> sorted = snapshot.lowStock().stream()
+                    .sorted(java.util.Comparator.comparingInt(InventoryWarningSnapshot.LowStockItem::availableQty))
+                    .toList();
             List<InventoryWarningSnapshot.LowStockItem> items =
-                    snapshot.lowStock().size() > props.getLowStockLimit()
-                            ? snapshot.lowStock().subList(0, props.getLowStockLimit())
-                            : snapshot.lowStock();
+                    sorted.size() > props.getLowStockLimit()
+                            ? sorted.subList(0, props.getLowStockLimit())
+                            : sorted;
             return new InventoryBlock(
                     true,
                     snapshot.threshold(),

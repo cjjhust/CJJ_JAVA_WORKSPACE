@@ -746,6 +746,57 @@ curl -s http://localhost:8080/api/orders/AMZ-1001/documents -H "Authorization: B
 ---
 
 ---
+## P2-7 单体共存 + P2-8 仓储集成测试 + CI（2026-11-02 轮次 18）— 用户要求：做单体多模块与伪微服务共存 + GitHub Actions CI + Testcontainers 仓储测试，作为两种架构模式的对比产出
+
+> 结果：**同一套业务代码支持两种部署拓扑（6 服务微服务形态 ↔ 单进程单体形态，profile 切换，业务代码零改动）；inventory 侧补齐真 PG 仓储测试；GitHub Actions CI 上线。非容器测试 272 项全绿；4 个容器测试类因本机 Docker socket 异常转入 CI 验证**
+
+### 背景与架构决策
+
+复盘 "database per service" 原则时确认：6 服务共享一个 PG 实例的形态是"伪微服务"——承担分布式的全部运维成本，却没有数据自治与故障隔离。针对本项目规模（单团队、单业务域、演示级数据量），模块化单体是更优解。但直接重构成单体会让微服务拓扑下已实践的工程问题（跨服务追踪、契约测试、限流、熔断）失去载体，因此选择**共存**：一套代码、两种装配，作为架构权衡的可运行对比材料（详见 readme §9）。
+
+### 变更清单
+
+**单体共存（P2-7）**
+
+| 文件 | 变更 |
+|---|---|
+| `services/report-service/.../client/OrderStatsSource.java` | **新增**：订单统计数据源接口（契约：不可用必须抛 `ReportSourceUnavailableException`，两种拓扑失败语义一致） |
+| `services/report-service/.../client/InventoryWarningSource.java` | **新增**：库存预警数据源接口，同上 |
+| `services/report-service/.../client/OrderStatsClient.java` | 实现接口 + `@Profile("!monolith")`（仅微服务拓扑装配） |
+| `services/report-service/.../client/InventoryWarningClient.java` | 同上 |
+| `services/report-service/.../service/ReportAggregationService.java` | 依赖从具体客户端改为接口（业务逻辑零改动） |
+| `app-monolith/pom.xml` | **新增模块**：聚合 5 个业务模块依赖（进程内调用，无 HTTP 边界） |
+| `app-monolith/.../MonolithApplication.java` | **新增**：单体唯一入口，`scanBasePackages = "com.aslp"` |
+| `app-monolith/.../application.yml` | **新增**：合并 5 个服务的配置；`profiles.default: monolith`；端口 8090；Flyway 合并跑 auth/inventory/order 三套迁移（历史表仍分离） |
+| `app-monolith/.../local/LocalOrderStatsSource.java` | **新增**：进程内注入 `OrderRepository`，统计口径与 `OrderPullController#stats()` 对齐（分组排序 + null→UNKNOWN，javadoc 双向标注） |
+| `app-monolith/.../local/LocalInventoryWarningSource.java` | **新增**：进程内注入 `InventoryWarningTask` + `InventoryRepository` |
+| `pom.xml` | `<modules>` 挂载 `app-monolith` |
+| `docker-compose.monolith.yml` | **新增**：单体编排（1 应用 + PG/Redis/MailHog/MinIO/Zipkin，端口 8090，与微服务 compose 互斥使用） |
+| `Dockerfile` | 依赖预下载层补 `COPY app-monolith/pom.xml`，`MODULE=app-monolith` 可构建单体镜像 |
+| `services/report-service/.../ReportAggregationServiceTest.java` | mock 从具体客户端改为接口（构造签名随之更新） |
+
+**测试与 CI（P2-8 + CI）**
+
+| 文件 | 变更 |
+|---|---|
+| `app-monolith/src/test/.../MonolithSmokeTest.java` | **新增**：`@SpringBootTest` + Testcontainers（PG16 + Redis7）——验证 profile 切换正确（Local 装配 / HTTP 客户端不装配）、合并 Flyway 迁移在真 PG 跑通、进程内聚合 `degraded=false`、Local 与 HTTP 端点语义对齐 |
+| `services/inventory-service/src/test/.../InventoryRepositoryIntegrationTest.java` | **新增**：真 PG 仓储集成测试（V2 种子数据落地 / `findBySkuAndWarehouseCode` 唯一行 / 预警查询阈值语义 / 同 SKU 跨两仓）；order 侧已有 P2-8 同类测试 |
+| `services/inventory-service/pom.xml` | 补 `testcontainers-junit-jupiter` + `testcontainers-postgresql`（test scope） |
+| `.github/workflows/ci.yml` | **新增**：push(main)/PR 触发；JDK 21 (temurin) + Maven 缓存；`mvn -B test`（ubuntu runner 自带 Docker，Testcontainers 开箱即用）；失败上传 surefire 报告 |
+
+### 验证结果（2026-11-02 实测）
+
+- 非容器测试 **272 项全绿**（`mvn test` 排除 4 个容器测试类，MVN_EXIT=0）。
+- 4 个容器测试类（`AuthUserRepositoryIntegrationTest` / `OrderRepositoryIntegrationTest` / `InventoryRepositoryIntegrationTest` / `MonolithSmokeTest`）**本地未运行**：本机 Docker Desktop 的 socket 对 Testcontainers 三种探测策略全部失败（日志见轮次过程）。这是环境问题而非代码问题——此前 P2-8 的 order 侧测试在本机同样跑不起来；由 CI 的 ubuntu runner 完成运行时验证。
+- 全工程 `mvn compile` 通过；`app-monolith` 编译 + 测试代码编译通过。
+
+### 遗留 / 后续可选
+
+- 推送到远端后观察 CI 首跑（重点：4 个容器测试类在 ubuntu runner 是否全绿）。
+- 单体形态的端到端冒烟（`smoke-test.sh` 打 8090）未写；微服务形态的 124 项断言不适用于单进程拓扑。
+- Saga 仅纸面设计（现有状态机 + `OrderStateEventRecord` 事件表即骨架）；真拆库时才需要落地，届时还需 Outbox 模式配套。
+
+---
 ## P1-11 文档分工（readme=三语介绍 / todo=全量复盘）+ 三个界面真实截图（2026-09-23 轮次 17）— 用户要求：readme 只留「做了什么、解决了什么问题」，开发过程全量剪切到 todo（顶部添加、不覆盖），并补上三个界面的截图
 
 > 结果：**readme 858 行 → 192 行（中/EN/DE 三语）；todo 1535 → 2344 行（顶部附录 + P1-1…P1-10 原有轮次一字未改）；三个界面截图全部用本机真实运行抓取**

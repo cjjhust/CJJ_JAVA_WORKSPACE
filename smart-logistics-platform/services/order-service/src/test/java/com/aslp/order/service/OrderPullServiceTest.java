@@ -18,6 +18,7 @@ import org.mockito.Mock;
 import org.mockito.junit.jupiter.MockitoExtension;
 
 import java.util.ArrayList;
+import java.util.Collection;
 import java.util.List;
 import java.util.Optional;
 
@@ -26,6 +27,7 @@ import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.anyCollection;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.Mockito.lenient;
 import static org.mockito.Mockito.never;
@@ -89,16 +91,18 @@ class OrderPullServiceTest {
     @BeforeEach
     void setUp() {
         // P1-2：平台调用统一经容错网关（注解在纯单元测试中不生效，等价于直接调策略）
+        // P2-1：落库拆到独立 bean（@Transactional 需经 AOP 代理）；单测里直接 new 真实实例
         // P1-1：传入内存注册表，便于断言指标真实递增
         service = new OrderPullService(
-                new PlatformPullGateway(new StubStrategy(MOCK_RESULT)), repository, meterRegistry,
-                observationRegistry);
+                new PlatformPullGateway(new StubStrategy(MOCK_RESULT)),
+                new OrderPersistService(repository), repository, meterRegistry, observationRegistry);
+        // 默认：批量查存量命中空（全部为新订单）；需要「已存在」的用例单独覆盖
+        lenient().when(repository.findByOrderIdIn(anyCollection())).thenReturn(List.of());
     }
 
     @Test
     void firstPullCreatesRecordsAndFlagsAbnormalOnes() {
-        // 全部订单都尚不存在
-        lenient().when(repository.findByOrderId(anyString())).thenReturn(Optional.empty());
+        // 全部订单都尚不存在（setUp 已把 findByOrderIdIn 置空）
         lenient().when(repository.save(any(OrderRecord.class))).thenAnswer(inv -> inv.getArgument(0));
 
         OrderPullService.PullSummary summary = service.pullAndPersist();
@@ -113,9 +117,6 @@ class OrderPullServiceTest {
 
     @Test
     void warehouseAliasIsNormalizedToBusinessName() {
-        when(repository.findByOrderId("AMZ-1002")).thenReturn(Optional.empty());
-        when(repository.findByOrderId("AMZ-1001")).thenReturn(Optional.empty());
-        when(repository.findByOrderId("AMZ-1003")).thenReturn(Optional.empty());
         when(repository.save(any(OrderRecord.class))).thenAnswer(inv -> inv.getArgument(0));
 
         service.pullAndPersist();
@@ -127,9 +128,13 @@ class OrderPullServiceTest {
 
     @Test
     void repeatedPullIsIdempotentByOrderId() {
-        // 已存在：直接返回既有实体，模拟数据库命中
-        when(repository.findByOrderId(anyString())).thenAnswer(inv -> Optional.of(
-                new OrderRecord(inv.getArgument(0), "Amazon-Mock", "奶粉一件代发", "Bruchsal", "PAID")));
+        // 已存在：批量查存量返回全部三个实体，模拟数据库命中（P2-1：查存量从逐单改为一次 IN）
+        when(repository.findByOrderIdIn(anyCollection())).thenAnswer(inv -> {
+            Collection<String> ids = inv.getArgument(0);
+            return ids.stream()
+                    .map(id -> new OrderRecord(id, "Amazon-Mock", "奶粉一件代发", "Bruchsal", "PAID"))
+                    .toList();
+        });
         when(repository.save(any(OrderRecord.class))).thenAnswer(inv -> inv.getArgument(0));
 
         OrderPullService.PullSummary summary = service.pullAndPersist();
@@ -143,7 +148,7 @@ class OrderPullServiceTest {
         OrderPullService failing = new OrderPullService(
                 new PlatformPullGateway(new StubStrategy(
                         new OrderPullResult("Amazon", List.of(), false, "401 Unauthorized"))),
-                repository, meterRegistry, observationRegistry);
+                new OrderPersistService(repository), repository, meterRegistry, observationRegistry);
 
         OrderPullService.PullSummary summary = failing.pullAndPersist();
 
@@ -165,7 +170,7 @@ class OrderPullServiceTest {
         OrderPullService degradedService = new OrderPullService(
                 new PlatformPullGateway(new StubStrategy(OrderPullResult.degraded(
                         "Amazon-Mock", "平台调用失败已降级（CallNotPermittedException）"))),
-                repository, meterRegistry, observationRegistry);
+                new OrderPersistService(repository), repository, meterRegistry, observationRegistry);
 
         OrderPullService.PullSummary summary = degradedService.pullAndPersist();
 
@@ -231,11 +236,11 @@ class OrderPullServiceTest {
     void degradedAndFailedOutcomesAreTaggedDifferently() {
         OrderPullService degradedService = new OrderPullService(
                 new PlatformPullGateway(new StubStrategy(OrderPullResult.degraded("Amazon", "熔断已打开"))),
-                repository, meterRegistry, observationRegistry);
+                new OrderPersistService(repository), repository, meterRegistry, observationRegistry);
         OrderPullService failingService = new OrderPullService(
                 new PlatformPullGateway(new StubStrategy(
                         new OrderPullResult("Amazon", List.of(), false, "401 Unauthorized"))),
-                repository, meterRegistry, observationRegistry);
+                new OrderPersistService(repository), repository, meterRegistry, observationRegistry);
 
         degradedService.pullAndPersist();
         failingService.pullAndPersist();
@@ -275,10 +280,9 @@ class OrderPullServiceTest {
             }
         });
         OrderPullService traced = new OrderPullService(
-                new PlatformPullGateway(new StubStrategy(MOCK_RESULT)), repository,
+                new PlatformPullGateway(new StubStrategy(MOCK_RESULT)),
+                new OrderPersistService(repository), repository,
                 new SimpleMeterRegistry(), capturing);
-        lenient().when(repository.findByOrderId(anyString())).thenReturn(Optional.empty());
-        lenient().when(repository.save(any(OrderRecord.class))).thenAnswer(inv -> inv.getArgument(0));
 
         traced.pullAndPersist();
 

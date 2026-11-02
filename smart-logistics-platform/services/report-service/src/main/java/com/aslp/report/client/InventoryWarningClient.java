@@ -2,6 +2,7 @@ package com.aslp.report.client;
 
 import com.aslp.report.config.ReportProperties;
 import com.aslp.report.dto.InventoryWarningSnapshot;
+import org.springframework.context.annotation.Profile;
 import org.springframework.stereotype.Component;
 import org.springframework.web.client.RestClient;
 import org.springframework.web.client.RestClientException;
@@ -15,7 +16,8 @@ import org.springframework.web.client.RestClientException;
  * <p>边界同 {@link OrderStatsClient}：报表只读契约，不碰 inventory 表。
  */
 @Component
-public class InventoryWarningClient {
+@Profile("!monolith")
+public class InventoryWarningClient implements InventoryWarningSource {
 
     /** 数据源标识：会原样出现在报表响应的 {@code unavailable} 列表里。 */
     public static final String SOURCE = "inventory-service";
@@ -26,11 +28,17 @@ public class InventoryWarningClient {
         this.client = ReportHttp.build(builder, props.getInventoryBaseUrl(), props);
     }
 
+    @Override
+    public String getSource() {
+        return SOURCE;
+    }
+
     /**
      * 拉取库存预警状态。
      *
      * @throws ReportSourceUnavailableException 连接失败 / 超时 / 4xx / 5xx / 空响应体
      */
+    @Override
     public InventoryWarningSnapshot fetch() {
         try {
             InventoryWarningSnapshot snapshot = client.get()

@@ -4,6 +4,16 @@ server:
 spring:
   application:
     name: auth-service
+  # P2-6：容器内指向 aslp_postgres 服务名（独立 Flyway 历史表 flyway_schema_history_auth）
+  datasource:
+    url: jdbc:postgresql://aslp_postgres:5432/aslp
+    username: aslp
+    password: aslp123
+  flyway:
+    enabled: true
+    locations: classpath:db/migration/auth
+    table: flyway_schema_history_auth
+    baseline-on-migrate: true
 
 aslp:
   jwt:

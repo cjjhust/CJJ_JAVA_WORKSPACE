@@ -4,6 +4,17 @@ server:
 spring:
   application:
     name: auth-service
+  # P2-6：真实用户存储（auth_user 表，Flyway 版本化）。
+  # 与 order/inventory 共用同一 PostgreSQL，独立 Flyway 历史表避免互锁。
+  datasource:
+    url: jdbc:postgresql://localhost:5432/aslp
+    username: aslp
+    password: aslp123
+  flyway:
+    enabled: true
+    locations: classpath:db/migration/auth
+    table: flyway_schema_history_auth
+    baseline-on-migrate: true
 
 # JWT 签发配置（M1 认证服务 / M4 网关 VPN 接入的令牌来源）
 aslp:

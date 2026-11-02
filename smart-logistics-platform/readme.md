@@ -182,12 +182,29 @@ bash scripts/smoke-test.sh                      # 启 6 个服务 → 断言 →
 
 ---
 
-## 9. 已知限制 · Known limitations · Bekannte Einschränkungen
+## 9. 两种部署拓扑 · Two deployment topologies · Zwei Bereitstellungsformen（P2-7）
+
+> **架构决策记录**：项目初始按微服务拓扑搭建，目的是完整实践拆分后的工程问题（跨服务追踪、契约测试、限流、熔断降级）。复盘 "database per service" 原则时确认：当前 6 服务共享一个 PG 实例的形态是"伪微服务"——承担分布式的全部运维成本，却没有数据自治与故障隔离。针对本项目规模，**模块化单体是更优解**，因此同一套业务代码现在支持两种拓扑，供对比与讨论。
+
+| | 微服务形态（默认） | 单体形态（P2-7 新增） |
+|---|---|---|
+| 启动方式 | `docker compose up -d` | `docker compose -f docker-compose.monolith.yml up -d --build` |
+| 进程数 | 6 个 Java 服务 + 网关 | **1 个**（`app-monolith`，端口 8090） |
+| report 取数 | HTTP（`OrderStatsClient` 等，`@Profile("!monolith")`） | 进程内（`LocalOrderStatsSource` 等，`@Profile("monolith")`） |
+| 业务代码 | 同一套，零改动 | 同一套，零改动 |
+| Flyway | 各服务独立历史表 | 同库合并跑 4 套迁移（历史表仍分离，互不干扰） |
+| 适用 | 演示分布式工程实践 | 演示架构权衡理解；低运维成本运行 |
+
+**关键机制**：report-service 只依赖 `OrderStatsSource` / `InventoryWarningSource` 接口；HTTP 客户端与进程内实现是同一契约的两个实现，由 profile 互斥装配。两种拓扑的失败语义完全一致（数据源不可用 → 200 + `degraded:true`）。装配正确性由 `MonolithSmokeTest`（Testcontainers：PG + Redis）钉死。
+
+---
+
+## 10. 已知限制 · Known limitations · Bekannte Einschränkungen
 
 | 中文 | English | Deutsch |
 |---|---|---|
 | **数据库未拆**：所有服务共用一个 PostgreSQL 实例（各自独立 Flyway 历史表），更接近"分布式单体"；拆库需要先有服务注册/配置中心（见 P2 路线图）。 | **Database not split**: all services share one PostgreSQL instance (separate Flyway histories), which is closer to a "distributed monolith"; splitting requires service discovery / config management first (see P2 roadmap). | **Datenbank nicht getrennt**: alle Dienste teilen eine PostgreSQL-Instanz (getrennte Flyway-Historien) – eher ein „verteilter Monolith"; eine Trennung setzt Service Discovery/Config Management voraus (siehe P2-Roadmap). |
-| **生产化缺口**：观测端点未鉴权、Grafana 匿名只读、JWT 为对称密钥（RS256 + JWKS 在 P2）、无 CI/CD 与质量门禁、追踪未落地为事件表（因此做不了"包裹卡住 3 天"的主动告警）。 | **Production gaps**: actuator endpoints unauthenticated, Grafana anonymous read-only, symmetric JWT secret (RS256 + JWKS is P2), no CI/CD quality gates, tracking not persisted as an event table (so no proactive "parcel stuck for 3 days" alerts). | **Produktionslücken**: Actuator-Endpunkte ohne Authentifizierung, Grafana anonym lesbar, symmetrisches JWT-Secret (RS256 + JWKS in P2), keine CI/CD-Qualitätsgates, Tracking nicht als Ereignistabelle persistiert (daher keine proaktiven „Sendung hängt seit 3 Tagen"-Alarme). |
+| **生产化缺口**：观测端点未鉴权、Grafana 匿名只读、JWT 为对称密钥（RS256 + JWKS 在 P2）、CI 已建（GitHub Actions：构建 + 全量测试 + Testcontainers 集成测试，见 `.github/workflows/ci.yml`）但质量门禁（覆盖率阈值等）未设、追踪未落地为事件表（因此做不了"包裹卡住 3 天"的主动告警）。 | **Production gaps**: actuator endpoints unauthenticated, Grafana anonymous read-only, symmetric JWT secret (RS256 + JWKS is P2), CI in place (GitHub Actions: build + full test suite + Testcontainers integration tests, see `.github/workflows/ci.yml`) but quality gates (coverage thresholds etc.) not yet configured, tracking not persisted as an event table (so no proactive "parcel stuck for 3 days" alerts). | **Produktionslücken**: Actuator-Endpunkte ohne Authentifizierung, Grafana anonym lesbar, symmetrisches JWT-Secret (RS256 + JWKS in P2), keine CI/CD-Qualitätsgates, Tracking nicht als Ereignistabelle persistiert (daher keine proaktiven „Sendung hängt seit 3 Tagen"-Alarme). |
 | **外部契约未用生产凭据实战验证**：SP-API 与 DHL/DPD 均按公开文档建模并用契约桩锁定，真接入需凭据联调。 | **External contracts not verified with production credentials**: SP-API and DHL/DPD are modelled from public documentation and locked by contract stubs; real onboarding needs credential-based integration testing. | **Externe Verträge nicht mit Produktivzugangsdaten verifiziert**: SP-API und DHL/DPD sind nach öffentlicher Dokumentation modelliert und durch Contract-Stubs abgesichert; der Produktivbetrieb erfordert eine Integrationsabnahme mit echten Zugangsdaten. |
 | **人工修正会被平台同步覆盖**：`POST /api/orders/{id}/correct` 的本地修正，会在下一次平台同步（每 5 分钟）按平台侧数据覆盖回去——平台是权威源，本地修正只是临时视图；要让人工干预**持久生效**，需引入覆盖标记/优先级字段（已列 roadmap）。 | **Manual corrections are overwritten by platform sync**: a local `POST /api/orders/{id}/correct` is reverted by the next platform sync (every 5 minutes), because the platform stays the source of authority and the local correction is only a temporary view; making manual intervention **stick** needs an override flag / priority field (on the roadmap). | **Manuelle Korrekturen werden vom Plattform-Abgleich überschrieben**: eine lokale Korrektur (`POST /api/orders/{id}/correct`) wird beim nächsten Abgleich (alle 5 Minuten) zurückgesetzt, da die Plattform die autoritative Quelle bleibt; dauerhafte Eingriffe erfordern ein Override-Flag bzw. Prioritätsfeld (Roadmap). |
 
@@ -195,7 +212,7 @@ bash scripts/smoke-test.sh                      # 启 6 个服务 → 断言 →
 
 ---
 
-## 10. 文档地图 · Documentation map · Dokumentationsübersicht
+## 11. 文档地图 · Documentation map · Dokumentationsübersicht
 
 | 文件 File / Datei | 内容 Content / Inhalt |
 |---|---|
@@ -204,3 +221,4 @@ bash scripts/smoke-test.sh                      # 启 6 个服务 → 断言 →
 | [`todo.md`](todo.md) | **开发全过程复盘**：各轮次日志（P1-1 … P1-10）、56 项缺陷表、接口速查、配置对照、代码地图、故障速查 | Full development journal: round-by-round logs, 56 documented defects, API cheatsheet, config matrix, code map |
 | [`docs/images/`](docs/images) | **三个界面的真实截图**（Grafana / Zipkin / ECharts，本机运行抓取）｜ Real screenshots of the three dashboards |
 | [`scripts/demo-traffic.sh`](scripts/demo-traffic.sh) | **一键造演示数据**（幂等，37 项断言）｜ One-command demo data seeding |
+| `docker-compose.monolith.yml` | **单体形态编排（P2-7）**：同一套业务代码以单进程运行（`app-monolith`，端口 8090，report 走进程内数据源），与微服务形态互斥使用，用于架构对比 ｜ Modular-monolith deployment topology for architecture comparison |

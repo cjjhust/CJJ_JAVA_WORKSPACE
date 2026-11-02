@@ -77,6 +77,23 @@
             <scope>test</scope>
         </dependency>
         <!--
+          P2-8：仓储/迁移级集成测试（真实 PostgreSQL）。
+          H2 只能验证「实体与 JPA 的契约」，验证不了 Flyway 的 PG 方言 SQL、
+          UNIQUE(order_id) 约束的真实行为、以及 IN 查询语义 ——
+          这些恰好是幂等落库的三层保障所依赖的数据库行为。
+          Testcontainers 起一个一次性 PG 容器（CI 的 ubuntu runner 自带 Docker）。
+        -->
+        <dependency>
+            <groupId>org.testcontainers</groupId>
+            <artifactId>junit-jupiter</artifactId>
+            <scope>test</scope>
+        </dependency>
+        <dependency>
+            <groupId>org.testcontainers</groupId>
+            <artifactId>postgresql</artifactId>
+            <scope>test</scope>
+        </dependency>
+        <!--
           P1-4 契约测试：用 WireMock 模拟 Amazon SP-API（LWA 换令牌 / 订单列表分页 /
           429 限流 / 503 / 超时 / 4xx），锁住「我们理解的平台契约」。
           选 standalone（shaded）版而不是普通版：普通版会带一套自己的 Jetty，

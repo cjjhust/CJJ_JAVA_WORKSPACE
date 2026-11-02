@@ -33,7 +33,9 @@ expect_has() { # expect_has <子串> <响应体> <描述>
 
 # ---------------------------------------------------------------------------
 say "0. 登录拿 JWT"
-TOKEN=$(curl -s -X POST "${GATEWAY}/api/auth/login?username=admin" \
+TOKEN=$(curl -s -X POST "${GATEWAY}/api/auth/login" \
+        -H "Content-Type: application/json" \
+        -d '{"username":"admin","password":"admin123"}' \
         | sed -n 's/.*"token":"\([^"]*\)".*/\1/p')
 if [[ -z "${TOKEN}" ]]; then
     echo "  登录失败，网关是否已启动？(${GATEWAY})" >&2

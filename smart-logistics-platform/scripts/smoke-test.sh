@@ -233,7 +233,9 @@ echo ""
 echo "=== 4/5 端到端路由验证（经网关 8080）==="
 
 # 先取 JWT（docker profile 强制鉴权；dev profile 忽略该头）
-LOGIN_BODY="$(curl -fsS --max-time 5 -X POST "http://localhost:8080/api/auth/login?username=admin" 2>/dev/null)"
+LOGIN_BODY="$(curl -fsS --max-time 5 -X POST "http://localhost:8080/api/auth/login" \
+    -H "Content-Type: application/json" \
+    -d '{"username":"admin","password":"admin123"}' 2>/dev/null)"
 TOKEN="$(echo "${LOGIN_BODY}" | sed -n 's/.*"token":"\([^"]*\)".*/\1/p')"
 if [ -n "${TOKEN}" ]; then
     AUTH_ARGS=(-H "Authorization: Bearer ${TOKEN}")

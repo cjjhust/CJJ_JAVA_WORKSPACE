@@ -127,7 +127,9 @@ echo "=== 6/6 外部化状态验证（内存 → DB / Redis）：重启容器后
 # 先 reset 保证幂等，再推进到 FBA_RELABELED —— 于是重复运行本脚本不会相互干扰。
 # ---------------------------------------------------------------------------
 PERSIST_ORDER="SMOKE-PERSIST-001"
-TOKEN="$(curl -fsS --max-time 5 -X POST "http://localhost:8080/api/auth/login?username=admin" 2>/dev/null \
+TOKEN="$(curl -fsS --max-time 5 -X POST "http://localhost:8080/api/auth/login" \
+    -H "Content-Type: application/json" \
+    -d '{"username":"admin","password":"admin123"}' 2>/dev/null \
     | sed -n 's/.*"token":"\([^"]*\)".*/\1/p')"
 AUTH=()
 [ -n "${TOKEN}" ] && AUTH=(-H "Authorization: Bearer ${TOKEN}")

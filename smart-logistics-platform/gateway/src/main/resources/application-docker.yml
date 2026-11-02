@@ -74,6 +74,14 @@ aslp:
   security:
     jwt:
       secret: ${ASLP_JWT_SECRET:aslp-dev-secret-key-change-me-in-production-0123456789}
+    # P2-3：可信代理清单（限流解析 XFF 的前提）。
+    # 本地演示流量路径：浏览器/脚本 → Docker 端口转发（宿主侧 127.0.0.1）→ 网关容器；
+    # 容器内网关看到的直接对端是宿主桥接口（192.168.65.1，Docker Desktop）或
+    # bridge 网段地址。这里信任 172.16.0.0/12（Docker 默认 bridge 网段）+ 127.0.0.1，
+    # 使 XFF 在演示拓扑中仍然有效（与加固前的行为对齐），同时 XFF 伪造
+    # 只对「对端恰好落在可信网段内」的连接生效。
+    # 生产环境（前置 Nginx/云 LB）：把这一项改成 LB 的**精确**出口 IP 列表。
+    trusted-proxies: ${ASLP_TRUSTED_PROXIES:127.0.0.1, 172.16.0.0/12, 192.168.65.1}
 
 management:
   # P1-3：链路追踪（容器内指向 aslp_zipkin；全量采样仅适合演示）

@@ -2,6 +2,7 @@ package com.aslp.report.client;
 
 import com.aslp.report.config.ReportProperties;
 import com.aslp.report.dto.OrderStatsSnapshot;
+import org.springframework.context.annotation.Profile;
 import org.springframework.stereotype.Component;
 import org.springframework.web.client.RestClient;
 import org.springframework.web.client.RestClientException;
@@ -14,9 +15,14 @@ import org.springframework.web.client.RestClientException;
  * 见 readme §10），接口层也必须守住边界 —— 一旦报表直接查表，
  * 订单表任何一次结构调整都会变成报表服务的线上故障，而它甚至不知道自己耦合了。
  * 这条边界也是未来把数据库拆开时唯一不需要重写的部分。
+ *
+ * <p><b>单体共存（P2-7）</b>：仅微服务拓扑装配（{@code @Profile("!monolith")}）；
+ * 单体拓扑下由 app-monolith 的 {@code LocalOrderStatsSource} 实现同一接口
+ * {@link OrderStatsSource}，聚合服务代码两种拓扑完全一致。
  */
 @Component
-public class OrderStatsClient {
+@Profile("!monolith")
+public class OrderStatsClient implements OrderStatsSource {
 
     /** 数据源标识：会原样出现在报表响应的 {@code unavailable} 列表里。 */
     public static final String SOURCE = "order-service";
@@ -27,11 +33,17 @@ public class OrderStatsClient {
         this.client = ReportHttp.build(builder, props.getOrderBaseUrl(), props);
     }
 
+    @Override
+    public String getSource() {
+        return SOURCE;
+    }
+
     /**
      * 拉取订单统计。
      *
      * @throws ReportSourceUnavailableException 连接失败 / 超时 / 4xx / 5xx / 空响应体
      */
+    @Override
     public OrderStatsSnapshot fetch() {
         try {
             OrderStatsSnapshot snapshot = client.get()

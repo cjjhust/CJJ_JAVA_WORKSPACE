@@ -1,0 +1,161 @@
+spring:
+  application:
+    name: aslp-monolith
+  # ── 单体模式默认激活 monolith profile（LocalXxxSource 装配、HTTP 客户端不装配）──
+  profiles:
+    default: monolith
+  datasource:
+    # 与微服务形态同一个库（aslp）：各模块 Flyway 历史表本就分离
+    #（flyway_schema_history_{order,inventory,auth}），单进程跑多套迁移互不干扰。
+    url: jdbc:postgresql://localhost:5432/aslp
+    username: aslp
+    password: aslp123
+  flyway:
+    enabled: true
+    # 合并 4 套迁移目录（auth/inventory/order 各自独立历史表，见各服务 application.yml）
+    locations: classpath:db/migration/auth,classpath:db/migration/inventory,classpath:db/migration/order
+    # 多历史表模式下主 history 表默认不用，但 Flyway 要求显式指定表名时才校验；
+    # 这里保留各服务原配置的语义：主表仅作占位（实际历史写入各模块自己的表）。
+    table: flyway_schema_history_monolith
+    baseline-on-migrate: true
+    baseline-version: 0
+  jpa:
+    hibernate:
+      ddl-auto: validate
+    open-in-view: false
+  data:
+    redis:
+      host: localhost
+      port: 6379
+  mail:
+    host: localhost
+    port: 1025
+    properties:
+      mail:
+        smtp:
+          auth: false
+          starttls:
+            enable: false
+
+server:
+  # 单体只占一个端口；为减少与微服务形态的端口冲突，用 8090
+  port: 8090
+
+management:
+  tracing:
+    sampling:
+      probability: 1.0
+  zipkin:
+    tracing:
+      endpoint: http://localhost:9411/api/v2/spans
+  endpoints:
+    web:
+      exposure:
+        include: health,info,circuitbreakers,prometheus,metrics
+  metrics:
+    tags:
+      application: ${spring.application.name}
+    distribution:
+      percentiles-histogram:
+        http.server.requests: true
+        aslp.vrp.solve: true
+
+# ── 各业务模块的既有配置原样合并（与各服务 application.yml 对齐）──────────
+aslp:
+  jwt:
+    secret: ${ASLP_JWT_SECRET:aslp-dev-secret-key-change-me-in-production-0123456789}
+    ttl-minutes: 120
+    issuer: aslp-auth-service
+  order:
+    mock-enabled: true
+    amazon:
+      endpoint: https://sellingpartnerapi-eu.amazon.com
+      token-url: https://api.amazon.com/auth/o2/token
+      marketplace-id: A1PA6795UKMFR9
+      client-id: ${AMAZON_LWA_CLIENT_ID:}
+      client-secret: ${AMAZON_LWA_CLIENT_SECRET:}
+      refresh-token: ${AMAZON_LWA_REFRESH_TOKEN:}
+      connect-timeout: 2s
+      read-timeout: 5s
+      max-pages: 5
+      created-after-days: 3
+      fetch-item-titles: true
+      default-warehouse: Bruchsal
+      warehouse-by-city:
+        bruchsal: Bruchsal
+        moenchengladbach: Mönchengladbach
+        monchengladbach: Mönchengladbach
+    sync:
+      enabled: false
+      cron: "0 */5 * * * *"
+  backup:
+    host: localhost
+    port: 5432
+    database: aslp
+    username: aslp
+    password: ${ASLP_DB_PASSWORD:aslp123}
+    output-dir: /tmp
+    timeout-seconds: 300
+    retention: 7
+    enabled: false
+  minio:
+    endpoint: http://localhost:9000
+    access-key: ${MINIO_ROOT_USER:aslp-minio-admin}
+    secret-key: ${MINIO_ROOT_PASSWORD:aslp-minio-secret}
+    region: us-east-1
+    bucket: aslp-documents
+    presign-expiry: 15m
+    auto-create-bucket: true
+  document:
+    shipper-name: ASLP Fulfillment GmbH (DEMO)
+    shipper-address: Industriestrasse 12, 76646 Bruchsal, Germany
+    shipper-tax-id: DE000000000
+    destination-country: DE
+    declared-value-eur: "29.90"
+    hs-code: "9503.00.99"
+    currency: EUR
+  tracking:
+    mock-enabled: true
+    dhl-base-url: https://api-eu.dhl.com
+    dhl-api-key: ${DHL_API_KEY:}
+    dpd-base-url: https://api.dpd.com
+    dpd-api-key: ${DPD_API_KEY:}
+    connect-timeout: 2s
+    read-timeout: 5s
+    cache-ttl: 60s
+    max-cache-entries: 1000
+    max-events: 30
+  report:
+    # 单体模式下 HTTP 客户端不装配，这两个 URL 仅在显式去掉 monolith profile 时生效
+    order-base-url: http://localhost:8081
+    inventory-base-url: http://localhost:8082
+    connect-timeout: 2s
+    read-timeout: 3s
+    low-stock-limit: 20
+
+resilience4j:
+  retry:
+    instances:
+      platformPull:
+        max-attempts: 3
+        wait-duration: 200ms
+        enable-exponential-backoff: true
+        exponential-backoff-multiplier: 2
+        retry-exceptions:
+          - com.aslp.order.strategy.PlatformUnavailableException
+  circuitbreaker:
+    instances:
+      platformPull:
+        sliding-window-type: COUNT_BASED
+        sliding-window-size: 5
+        minimum-number-of-calls: 3
+        failure-rate-threshold: 50
+        wait-duration-in-open-state: 3s
+        permitted-number-of-calls-in-half-open-state: 2
+        automatic-transition-from-open-to-half-open-enabled: true
+        register-health-indicator: false
+  bulkhead:
+    instances:
+      platformPull:
+        max-concurrent-calls: 4
+        max-wait-duration: 200ms

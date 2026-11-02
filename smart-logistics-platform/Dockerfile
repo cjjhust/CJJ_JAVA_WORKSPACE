@@ -24,6 +24,7 @@ COPY services/inventory-service/pom.xml services/inventory-service/
 COPY services/order-service/pom.xml services/order-service/
 COPY services/report-service/pom.xml services/report-service/
 COPY services/route-service/pom.xml services/route-service/
+COPY app-monolith/pom.xml app-monolith/
 RUN mvn -B -q dependency:go-offline -DskipTests || true
 
 # 2) 复制源码（.dockerignore 已排除 target/、.git/、.gradle/ 等）
@@ -41,6 +42,12 @@ FROM eclipse-temurin:21-jre-alpine AS runtime
 
 # 非 root 运行，降低容器逃逸风险
 RUN addgroup -S aslp && adduser -S aslp -G aslp
+
+# P2-4：pg_dump 客户端（order-service 的定时数据库备份用）。
+# 只装客户端不装服务端，镜像增量很小；其他服务不需要但共享同一镜像，
+# 多出来的 ~20MB 换取"备份不再是假备份"（原镜像里没有 pg_dump，
+# 备份任务在容器内静默失败且无人知晓）。
+RUN apk add --no-cache postgresql16-client
 
 ARG MODULE=gateway
 WORKDIR /app

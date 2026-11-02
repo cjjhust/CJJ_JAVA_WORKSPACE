@@ -26,6 +26,7 @@ import static com.github.tomakehurst.wiremock.client.WireMock.post;
 import static com.github.tomakehurst.wiremock.client.WireMock.postRequestedFor;
 import static com.github.tomakehurst.wiremock.client.WireMock.urlEqualTo;
 import static com.github.tomakehurst.wiremock.client.WireMock.urlPathEqualTo;
+import static com.github.tomakehurst.wiremock.client.WireMock.urlPathMatching;
 import static com.github.tomakehurst.wiremock.stubbing.Scenario.STARTED;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
@@ -180,6 +181,46 @@ class SpApiOrderClientContractTest {
 
         assertEquals(1, result.orders().size(), "明细是锦上添花，不能让它把整批订单拉垮");
         assertEquals(SpApiOrderMapper.UNKNOWN_PRODUCT, mapper.toDto(result.orders().get(0)).product());
+    }
+
+    @Test
+    @DisplayName("P2-7 配额护栏：超出单轮上限的订单不请求 /orderItems（商品名回退占位符）")
+    void titleEnrichmentRespectsPerRoundBudget() {
+        stubToken();
+        props.setFetchItemTitles(true);
+        props.setTitleEnrichMaxOrders(2);
+        PLATFORM.stubFor(get(urlPathEqualTo("/orders/v0/orders"))
+                .willReturn(okJson(ordersPage(
+                        orderJson("AMZ-1", "Shipped", "Bruchsal", "DE"),
+                        orderJson("AMZ-2", "Shipped", "Bruchsal", "DE"),
+                        orderJson("AMZ-3", "Shipped", "Bruchsal", "DE")))));
+        PLATFORM.stubFor(get(urlPathMatching("/orders/v0/orders/AMZ-\\d+/orderItems"))
+                .willReturn(okJson("{\"payload\":{\"OrderItems\":[]}}")));
+
+        SpApiFetchResult result = client.fetchOrders();
+
+        // 3 条订单里只有前 2 条应触发明细调用 —— 配额不能随订单数线性增长
+        PLATFORM.verify(2, getRequestedFor(urlPathMatching("/orders/v0/orders/AMZ-\\d+/orderItems")));
+        assertEquals(3, result.orders().size(), "超限的订单照常返回，只是商品名晚几轮补齐");
+    }
+
+    @Test
+    @DisplayName("P2-7 配额护栏：TTL 内重复拉取同一订单不再请求 /orderItems（LRU 缓存命中）")
+    void titleCacheAvoidsRepeatItemLookups() {
+        stubToken();
+        props.setFetchItemTitles(true);
+        PLATFORM.stubFor(get(urlPathEqualTo("/orders/v0/orders"))
+                .willReturn(okJson(ordersPage(orderJson("AMZ-1001", "Shipped", "Bruchsal", "DE")))));
+        PLATFORM.stubFor(get(urlPathEqualTo("/orders/v0/orders/AMZ-1001/orderItems"))
+                .willReturn(okJson("{\"payload\":{\"OrderItems\":[{\"Title\":\"AeroSleep 婴儿床\"}]}}")));
+
+        client.fetchOrders();   // 第一轮：请求 1 次 /orderItems，标题入缓存
+        SpApiFetchResult second = client.fetchOrders();   // 第二轮（同一批订单）
+
+        assertEquals("AeroSleep 婴儿床", second.orders().get(0).title(),
+                "缓存命中的订单必须带出已知的商品名，而不是回退占位符");
+        // 5 分钟定时任务与手动补拉重叠时，重复的「几乎不变」明细调用不应再打到平台
+        PLATFORM.verify(1, getRequestedFor(urlPathEqualTo("/orders/v0/orders/AMZ-1001/orderItems")));
     }
 
     // ------------------------------------------------- 可重试：交给 Resilience4j

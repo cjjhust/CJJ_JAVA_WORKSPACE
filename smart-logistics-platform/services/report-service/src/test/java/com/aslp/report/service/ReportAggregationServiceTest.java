@@ -1,7 +1,9 @@
 package com.aslp.report.service;
 
 import com.aslp.report.client.InventoryWarningClient;
+import com.aslp.report.client.InventoryWarningSource;
 import com.aslp.report.client.OrderStatsClient;
+import com.aslp.report.client.OrderStatsSource;
 import com.aslp.report.client.ReportSourceUnavailableException;
 import com.aslp.report.config.ReportProperties;
 import com.aslp.report.dto.DashboardReport;
@@ -30,15 +32,15 @@ import static org.mockito.Mockito.when;
  */
 class ReportAggregationServiceTest {
 
-    private OrderStatsClient orderStatsClient;
-    private InventoryWarningClient inventoryWarningClient;
+    private OrderStatsSource orderStatsClient;
+    private InventoryWarningSource inventoryWarningClient;
     private ReportProperties props;
     private ReportAggregationService service;
 
     @BeforeEach
     void setUp() {
-        orderStatsClient = Mockito.mock(OrderStatsClient.class);
-        inventoryWarningClient = Mockito.mock(InventoryWarningClient.class);
+        orderStatsClient = Mockito.mock(OrderStatsSource.class);
+        inventoryWarningClient = Mockito.mock(InventoryWarningSource.class);
         props = new ReportProperties();
         props.setLowStockLimit(2);
         service = new ReportAggregationService(orderStatsClient, inventoryWarningClient,
@@ -144,6 +146,22 @@ class ReportAggregationServiceTest {
         assertEquals(3, report.inventory().lowStockCount());
         assertEquals(List.of("SKU-A@Mönchengladbach", "SKU-B@Mönchengladbach"),
                 report.inventory().lowStockChart().labels());
+    }
+
+    @Test
+    void lowStockDetailIsSortedByUrgencyBeforeTruncation() {
+        // P2-2 回归：截断前必须按可用库存升序（越少越紧急），
+        // 否则「前 N 条」只是数据库自然序，会把不紧急的 SKU 当紧急项展示
+        when(orderStatsClient.fetch()).thenReturn(orders(3));
+        when(inventoryWarningClient.fetch()).thenReturn(warning(List.of(
+                item("SKU-LOOSE", 9), item("SKU-TIGHT", 1), item("SKU-MID", 4))));
+
+        DashboardReport report = service.dashboard();
+
+        assertEquals(2, report.inventory().lowStock().size());
+        assertEquals(List.of("SKU-TIGHT@Mönchengladbach", "SKU-MID@Mönchengladbach"),
+                report.inventory().lowStockChart().labels(),
+                "截断必须保留最紧急的 N 条，而不是输入顺序的前 N 条");
     }
 
     @Test

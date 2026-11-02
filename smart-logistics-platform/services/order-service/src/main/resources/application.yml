@@ -114,7 +114,13 @@ aslp:
     port: 5432
     database: aslp
     username: aslp
+    # P2-4：pg_dump 走 TCP 需要认证；密码走环境变量（compose 注入），避免明文入库
+    password: ${ASLP_DB_PASSWORD:aslp123}
     output-dir: /tmp
+    # P2-4：waitFor 超时（秒）—— 原实现无超时，pg_dump 挂住会占死调度线程
+    timeout-seconds: 300
+    # P2-4：轮转保留份数（约一周），防止备份无限增长撑爆目录
+    retention: 7
     enabled: false
   # P1-6：单据对象存储（本地默认指向 compose 映射出来的 9000 端口）
   minio:

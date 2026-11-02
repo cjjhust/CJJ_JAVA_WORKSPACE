@@ -2,7 +2,6 @@ package com.aslp.order.service;
 
 import com.aslp.order.entity.OrderRecord;
 import com.aslp.order.repository.OrderRepository;
-import com.aslp.order.strategy.OrderDto;
 import com.aslp.order.strategy.OrderPullResult;
 import io.micrometer.core.instrument.MeterRegistry;
 import io.micrometer.observation.Observation;
@@ -12,14 +11,15 @@ import org.slf4j.LoggerFactory;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
-import java.util.Map;
-import java.util.Optional;
-
 /**
  * 订单统一接入服务（M1）—— 策略拉取 → DTO 标准化 → 幂等落库 → 异常打标。
  *
- * <p>幂等保障：以平台单号 {@code orderId} 为唯一键，重复拉取只更新不新增，
- * 从而支撑「定时轮询 + 手动补拉」并存而不会产生重复订单。
+ * <p><b>P2-1：拉取与落库分离</b>。原实现整条链路（含平台远程调用）标 {@code @Transactional}：
+ * 重试 3 次 × 读超时 5s 期间，一个 DB 连接被「什么都没写」的事务占住，高并发下连接池会被
+ * 这类空事务耗尽。现在 {@link #pullAndPersist()} 不再开事务 ——
+ * 远程调用在事务外执行，落库交给 {@link OrderPersistService}（独立 bean，
+ * {@code @Transactional} 才能经 AOP 代理生效）。幂等语义不变，见
+ * {@link OrderPersistService} 的三层保障。
  *
  * <p>P1-1：同时把拉取结果写成 Micrometer 指标（Prometheus 端可见）：
  * <ul>
@@ -46,22 +46,17 @@ public class OrderPullService {
      */
     public static final String OBSERVATION_PULL = "aslp.order.pull";
 
-    /** 仓库编码归一化：兼容 API 返回的无变音符写法，统一为业务展示口径。 */
-    private static final Map<String, String> WAREHOUSE_ALIASES = Map.of(
-            "bruchsal", "Bruchsal",
-            "moenchengladbach", "Mönchengladbach",
-            "monchengladbach", "Mönchengladbach",
-            "mönchengladbach", "Mönchengladbach"
-    );
-
     private final PlatformPullGateway platformPull;
+    private final OrderPersistService persistService;
     private final OrderRepository repository;
     private final MeterRegistry meterRegistry;
     private final ObservationRegistry observationRegistry;
 
-    public OrderPullService(PlatformPullGateway platformPull, OrderRepository repository,
-                            MeterRegistry meterRegistry, ObservationRegistry observationRegistry) {
+    public OrderPullService(PlatformPullGateway platformPull, OrderPersistService persistService,
+                            OrderRepository repository, MeterRegistry meterRegistry,
+                            ObservationRegistry observationRegistry) {
         this.platformPull = platformPull;
+        this.persistService = persistService;
         this.repository = repository;
         this.meterRegistry = meterRegistry;
         this.observationRegistry = observationRegistry;
@@ -88,9 +83,9 @@ public class OrderPullService {
     /**
      * 执行一次拉取并落库。
      *
-     * <p>整体在一个事务内完成，避免「部分订单入库」的中间态。
+     * <p><b>本方法不开事务</b>：远程调用（最坏数十秒）在事务外执行，
+     * 落库事务由 {@link OrderPersistService#persist} 自管（秒级）。
      */
-    @Transactional
     public PullSummary pullAndPersist() {
         Observation observation = Observation.createNotStarted(OBSERVATION_PULL, observationRegistry).start();
         // openScope 会把 traceId/spanId 放进 MDC：日志里能直接搜到同一条链路
@@ -131,46 +126,22 @@ public class OrderPullService {
             return new PullSummary(result.platform(), false, 0, 0, 0, 0, result.errorMsg(), result.degraded());
         }
 
-        int created = 0;
-        int updated = 0;
-        int flagged = 0;
-
-        for (OrderDto dto : result.orders()) {
-            String warehouse = normalizeWarehouse(dto.warehouse());
-            Optional<OrderRecord> existing = repository.findByOrderId(dto.orderId());
-
-            if (existing.isPresent()) {
-                // 已存在：仅同步状态与异常标签（保留客服手工修正过的仓库编码）
-                OrderRecord record = existing.get();
-                record.setStatus(dto.status());
-                record.setErrorTag(dto.errorTag());
-                repository.save(record);
-                updated++;
-            } else {
-                OrderRecord record = new OrderRecord(
-                        dto.orderId(), result.platform(), dto.product(), warehouse, dto.status());
-                record.setErrorTag(dto.errorTag());
-                repository.save(record);
-                created++;
-            }
-
-            if (!dto.isNormal()) {
-                flagged++;
-            }
-        }
+        // P2-1：落库走独立 bean（@Transactional 生效）；幂等三层保障见 OrderPersistService
+        OrderPersistService.PersistCounts counts = persistService.persist(result);
 
         log.info("[订单接入] 平台 {}：拉取 {} 条，新增 {}，更新 {}，异常打标 {}",
-                result.platform(), result.orders().size(), created, updated, flagged);
+                result.platform(), result.orders().size(),
+                counts.created(), counts.updated(), counts.flagged());
 
         // P1-1：一次拉取只记 1 次请求结局；条目级计数用 increment(amount) 一次性上报，
         // 避免在大循环里反复查表（每次 counter(...) 都是一次带锁的查表）
         countPullRequests(result.platform(), "success");
-        countPullOrders(result.platform(), "created", created);
-        countPullOrders(result.platform(), "updated", updated);
-        countPullOrders(result.platform(), "flagged", flagged);
+        countPullOrders(result.platform(), "created", counts.created());
+        countPullOrders(result.platform(), "updated", counts.updated());
+        countPullOrders(result.platform(), "flagged", counts.flagged());
 
         return new PullSummary(result.platform(), true,
-                result.orders().size(), created, updated, flagged, null, false);
+                result.orders().size(), counts.created(), counts.updated(), counts.flagged(), null, false);
     }
 
     /** P1-1：拉取请求结局计数。 */
@@ -206,7 +177,7 @@ public class OrderPullService {
         return repository.findByOrderId(orderId)
                 .map(record -> {
                     if (warehouseCode != null && !warehouseCode.isBlank()) {
-                        record.setWarehouseCode(normalizeWarehouse(warehouseCode));
+                        record.setWarehouseCode(OrderPersistService.normalizeWarehouse(warehouseCode));
                     }
                     if (status != null && !status.isBlank()) {
                         record.setStatus(status);
@@ -218,12 +189,5 @@ public class OrderPullService {
                     return true;
                 })
                 .orElse(false);
-    }
-
-    private String normalizeWarehouse(String raw) {
-        if (raw == null) {
-            return null;
-        }
-        return WAREHOUSE_ALIASES.getOrDefault(raw.trim().toLowerCase(), raw.trim());
     }
 }
