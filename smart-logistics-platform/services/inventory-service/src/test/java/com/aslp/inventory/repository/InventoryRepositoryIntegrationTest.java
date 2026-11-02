@@ -4,6 +4,7 @@ import com.aslp.inventory.entity.InventoryItem;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.boot.test.autoconfigure.jdbc.AutoConfigureTestDatabase;
 import org.springframework.boot.test.autoconfigure.orm.jpa.DataJpaTest;
 import org.springframework.test.context.DynamicPropertyRegistry;
 import org.springframework.test.context.DynamicPropertySource;
@@ -30,6 +31,9 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
  * </ul>
  */
 @Testcontainers
+// 同 OrderRepositoryIntegrationTest：禁用 @DataJpaTest 的 H2 替换，
+// 让迁移真的跑在 Testcontainers 的 PostgreSQL 上（H2 兼容 ≠ 测到了生产库行为）
+@AutoConfigureTestDatabase(replace = AutoConfigureTestDatabase.Replace.NONE)
 @DataJpaTest(properties = {
         "spring.flyway.enabled=true",
         "spring.flyway.locations=classpath:db/migration/inventory",

@@ -8,6 +8,7 @@ import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.boot.test.autoconfigure.jdbc.AutoConfigureTestDatabase;
 import org.springframework.boot.test.autoconfigure.orm.jpa.DataJpaTest;
 import org.springframework.boot.test.autoconfigure.orm.jpa.TestEntityManager;
 import org.springframework.context.annotation.Import;
@@ -40,6 +41,11 @@ import static org.junit.jupiter.api.Assertions.assertThrows;
  * 本地无 Docker 时可用 {@code mvn test -DskipITs} 之类的跳过策略（本项目暂不区分）。
  */
 @Testcontainers
+// CI 首跑缺陷：@DataJpaTest 默认 @AutoConfigureTestDatabase(replace=ANY) 会把
+// DynamicPropertySource 注册的 PG 容器 URL 无条件替换成内嵌 H2 —— PG 方言迁移
+// （TIMESTAMPTZ/BIGSERIAL）在 H2 上直接报 Unknown data type。必须显式 replace=NONE
+// 才能让测试真的跑在 Testcontainers 的 PostgreSQL 上。
+@AutoConfigureTestDatabase(replace = AutoConfigureTestDatabase.Replace.NONE)
 @DataJpaTest(properties = {
         // 与 application.yml 一致的迁移位置；这里必须跑真迁移（不关 Flyway），
         // 否则测的就不是生产库结构

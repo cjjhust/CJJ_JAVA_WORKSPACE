@@ -4,6 +4,7 @@ import com.aslp.auth.entity.AuthUser;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.boot.test.autoconfigure.jdbc.AutoConfigureTestDatabase;
 import org.springframework.boot.test.autoconfigure.orm.jpa.DataJpaTest;
 import org.springframework.security.crypto.bcrypt.BCryptPasswordEncoder;
 import org.springframework.test.context.DynamicPropertyRegistry;
@@ -26,6 +27,9 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
  * 任何人改了种子密码而不更新脚本，CI 就会红。
  */
 @Testcontainers
+// 同 OrderRepositoryIntegrationTest：禁用 @DataJpaTest 的 H2 替换，
+// 否则 DynamicPropertySource 的 PG 容器 URL 被覆盖，迁移跑在 H2 上（假绿或炸方言）
+@AutoConfigureTestDatabase(replace = AutoConfigureTestDatabase.Replace.NONE)
 @DataJpaTest(properties = {
         "spring.flyway.enabled=true",
         "spring.flyway.locations=classpath:db/migration/auth",
