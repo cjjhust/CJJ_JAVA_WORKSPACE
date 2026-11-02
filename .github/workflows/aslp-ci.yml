@@ -1,0 +1,51 @@
+name: ASLP CI
+
+# 注意：本仓库根是 CJJ_JAVA_WORKSPACE（多项目共用一个 git 仓库），
+# GitHub Actions 只识别**仓库根**的 .github/workflows/ —— 放在
+# smart-logistics-platform/.github/workflows/ 下的工作流会被静默忽略（历史教训，
+# 见 smart-logistics-platform/todo.md 轮次 18）。因此本文件必须位于仓库根，
+# 用 paths 过滤保证只有 smart-logistics-platform 变更时才触发，
+# 用 working-directory 把 Maven 构建限制在项目子目录内。
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'smart-logistics-platform/**'
+      - '.github/workflows/aslp-ci.yml'
+  pull_request:
+    paths:
+      - 'smart-logistics-platform/**'
+      - '.github/workflows/aslp-ci.yml'
+
+jobs:
+  build-test:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: smart-logistics-platform
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up JDK 21
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '21'
+          # 缓存以 pom.xml 为键；working-directory 下的 pom 变更同样能命中/失效
+          cache: maven
+          cache-dependency-path: smart-logistics-platform/pom.xml
+
+      # Testcontainers 需要 Docker：ubuntu-latest runner 自带，无需额外安装。
+      # 涵盖：全部单元测试 + P2-8 仓储集成测试（真 PG）+ P2-7 单体装配冒烟测试（PG + Redis）。
+      - name: Build & Test
+        run: mvn -B test
+
+      - name: Upload test reports (on failure)
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: aslp-surefire-reports
+          path: 'smart-logistics-platform/**/target/surefire-reports/**'
+          retention-days: 7
