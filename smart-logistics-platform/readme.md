@@ -210,6 +210,15 @@ bash scripts/smoke-test.sh                      # 启 6 个服务 → 断言 →
 
 > 完整限制清单（含逐条处置建议）见 [`todo.md`](todo.md) 顶部附录的 §10。
 
+### 未来计划 · Future roadmap · Künftige Planung（详见 [`todo.md`](todo.md) P3 区）
+
+| 事项 | 内容 | 预估 |
+|---|---|---|
+| **SonarCloud 静态扫描接入 CI** | SonarCloud 导入仓库（公开仓库免费）→ `SONAR_TOKEN` 入 Secrets → `aslp-ci.yml` 加 `sonar` job（`fetch-depth: 0` + `sonar-maven-plugin:sonar`）→ 配置 New Code 质量门禁；与既有 JaCoCo 覆盖率门禁（LINE 60%/BRANCH 50%）组成三维门禁 | ~1 小时 |
+| **外部 API 真实凭据联调（DHL 优先）** | developer.dhl.com 个人注册（无需公司主体）→ Sandbox 拿 `DHL-API-Key` → 环境变量注入 `DhlTrackingClient`（代码零改动）→ 示例单号实测修 `dto/DhlTrackingResponse` 差异 → WireMock 桩注释记录已验证契约；SP-API 次选、DPD 最后 | ~1 天 |
+
+> 明确**不立项**：Saga 补偿扩展到 SHIPPED 后场景——SHIPPED 后本就不支持取消，客户收货后走独立退货流程；状态机现有 `CANCELLED`（仅 CREATED/PAID）即正确的业务边界。
+
 ---
 
 ## 11. 文档地图 · Documentation map · Dokumentationsübersicht
