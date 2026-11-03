@@ -84,8 +84,10 @@ docker compose ps --format "table {{.Name}}\t{{.Status}}" | head -20
 # ① 匿名访问 BFF → 401（docker profile 强制 JWT）
 curl -s -o /dev/null -w "匿名: %{http_code}\n" "http://localhost:8080/bff/orders/search?status=PAID"
 
-# ② 登录拿 JWT，再访问 → 200
-TOKEN=$(curl -s -X POST "http://localhost:8080/api/auth/login?username=admin" | sed -n 's/.*"token":"\([^"]*\)".*/\1/p')
+# ② 登录拿 JWT（P2-6 起为 JSON body + 真实密码校验），再访问 → 200
+TOKEN=$(curl -s -X POST "http://localhost:8080/api/auth/login" \
+  -H "Content-Type: application/json" \
+  -d '{"username":"admin","password":"admin123"}' | sed -n 's/.*"token":"\([^"]*\)".*/\1/p')
 curl -s -o /dev/null -w "带 JWT: %{http_code}\n" -H "Authorization: Bearer $TOKEN" \
   "http://localhost:8080/bff/orders/search?status=PAID"
 ```
@@ -349,9 +351,9 @@ MinIO 控制台 <http://localhost:9001>（`aslp-minio-admin` / `aslp-minio-secre
 订单号 `DEMO-001` 或任意自定义；事件 `PAY → PICK → SHIP → FBA_RETURN → RELABEL → DELIVER → COMPLETE`
 
 ### 账号与端口
-- JWT：`curl -X POST "http://localhost:8080/api/auth/login?username=admin"`（拿 `token` 字段；docker profile 下所有接口都要带）
+- JWT：`curl -X POST "http://localhost:8080/api/auth/login" -H "Content-Type: application/json" -d '{"username":"admin","password":"admin123"}'`（拿 `token` 字段；docker profile 下所有接口都要带；种子账号 `admin/admin123`、`operator/operator123`）
 - 网关 8080 / order 8081 / inventory 8082 / route 8083 / auth 8084 / report 8085
-- Grafana 3000（匿名只读，admin 密码 `aslp-admin`）· Prometheus 9090 · Zipkin 9411 · MailHog 8025 · MinIO 9001 · WireMock 管理 8099
+- Grafana 3000（登录 admin / `aslp-admin`，匿名访问已关闭；密码可经 `GF_SECURITY_ADMIN_PASSWORD` 覆盖）· Prometheus 9090 · Zipkin 9411 · MailHog 8025 · MinIO 9001 · WireMock 管理 8099
 
 ---
 
@@ -399,8 +401,8 @@ MinIO 控制台 <http://localhost:9001>（`aslp-minio-admin` / `aslp-minio-secre
 **Q9：如果让你上线，还差什么？**
 > "`todo.md` 附录 §10 列了完整清单，我最在意这四条：
 > ① 数据库还没拆（现在是共享库，属分布式单体）；
-> ② 观测端点没鉴权、Grafana 是匿名只读，生产要独立 management 端口 + 来源限制；
-> ③ 没有 CI/CD 与质量门禁（SonarQube/JaCoCo 门槛）；
+> ② Grafana 匿名访问已关闭（admin 登录，密码经环境变量注入）；其余观测端点生产部署时仍应加独立 management 端口 + 来源限制；
+> ③ CI/CD 与质量门禁已建（GitHub Actions + JaCoCo LINE 60%/BRANCH 50%）；后续可加 SonarQube 静态扫描；
 > ④ 追踪没有落地成事件表，所以做不了『包裹卡住 3 天』的主动告警。
 > 另外 JWT 是对称密钥、auth-service 还没接用户表，这两条在 P2 路线图里。"
 
