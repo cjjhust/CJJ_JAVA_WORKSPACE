@@ -226,7 +226,7 @@ bash scripts/smoke-test.sh                      # 启 6 个服务 → 断言 →
 | 文件 File / Datei | 内容 Content / Inhalt |
 |---|---|
 | `readme.md`（本文件） | **这个项目做了什么、解决了什么问题**（中 / EN / DE 三语）｜ What was built and which problems it solves |
-| [`DEMO.md`](DEMO.md) | **15 分钟现场演示脚本**：8 站动线、每站命令与台词、测试数据速查、10 条追问对答、现场排障 | Live demo script: 8 stops with commands and talking points, test data, 10 Q&A, troubleshooting |
+| [`DEMO.md`](DEMO.md) | **15 分钟现场演示脚本**：8 站动线、每站命令与讲解要点、测试数据速查、10 条延伸说明、现场排障 | Live demo script: 8 stops with commands and explanations, test data, 10 deep-dive notes, troubleshooting |
 | [`todo.md`](todo.md) | **开发全过程复盘**：各轮次日志（P1-1 … P1-10）、56 项缺陷表、接口速查、配置对照、代码地图、故障速查 | Full development journal: round-by-round logs, 56 documented defects, API cheatsheet, config matrix, code map |
 | [`docs/images/`](docs/images) | **三个界面的真实截图**（Grafana / Zipkin / ECharts，本机运行抓取）｜ Real screenshots of the three dashboards |
 | [`scripts/demo-traffic.sh`](scripts/demo-traffic.sh) | **一键造演示数据**（幂等，37 项断言）｜ One-command demo data seeding |

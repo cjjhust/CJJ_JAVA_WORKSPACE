@@ -1,21 +1,21 @@
-# ASLP 演示手册（面试 / 评审现场用）
+# ASLP 演示手册（评审 / 现场演示用）
 
-> **目标**：15 分钟内让面试官相信「这是一个真的跑起来、并且有工程纪律的系统」。
-> **原则**：每一条演示都配一条**可复制的命令**，用输出说话，而不是用嘴说"我做了限流/熔断/持久化"。
+> **目标**：15 分钟内完整展示「这是一个真的跑起来、并且有工程纪律的系统」。
+> **原则**：每一条演示都配一条**可复制的命令**，用输出说话，而不是空口描述"做了限流/熔断/持久化"。
 >
 > 配套文档：`readme.md`（项目做了什么、解决了什么问题，中英德三语）、`todo.md`（附录＝接口/配置/代码地图/56 项缺陷；
 > 下方＝各轮次开发日志，可完整复盘整个过程）。
 
 ---
 
-## 0. 一句话开场（背下来）
+## 0. 一句话介绍
 
-> "这是给一家德国海外仓公司做的**智能物流平台**：Bruchsal 总仓 + Mönchengladbach 分仓，
+> "本项目是一个**智能物流平台**：Bruchsal 总仓 + Mönchengladbach 分仓，
 > 对接 Amazon/eBay 订单、Redis 分布式锁防超卖、jsprit 算配送路径、DHL/DPD 做一单到底追踪，
 > 并且是**微服务 + 完整可观测性**（Prometheus / Grafana / Zipkin / Loki）。
-> 6 个服务 + 12 个基础设施容器，一条命令冷启动，**124 项端到端断言全绿**。"
+> 6 个服务 + 11 个基础设施容器，一条命令冷启动，**124 项端到端断言全绿**。"
 
-一句话里给三个"钩子"（业务、算法、工程），面试官会顺着问下去。
+一句话覆盖三个层面：业务、算法、工程。
 
 ---
 
@@ -72,9 +72,9 @@ bash scripts/demo-traffic.sh   # 幂等，可重复跑；37 项断言
 docker compose ps --format "table {{.Name}}\t{{.Status}}" | head -20
 ```
 
-**台词**："6 个 Java 服务 + 11 个基础设施（PG/Redis/Kafka(KRaft 模式，无 ZooKeeper)/Prometheus/Grafana/Zipkin/Loki/Promtail/WireMock/MailHog/MinIO），全部容器化，一条命令冷启动。"
+**讲解要点**："6 个 Java 服务 + 11 个基础设施（PG/Redis/Kafka(KRaft 模式，无 ZooKeeper)/Prometheus/Grafana/Zipkin/Loki/Promtail/WireMock/MailHog/MinIO），全部容器化，一条命令冷启动。"
 
-**追问预案**：为什么 6 个服务而不是单体？→ 见 §4-Q1。
+**延伸说明**：为什么 6 个服务而不是单体？→ 见 §4-Q1。
 
 ---
 
@@ -92,7 +92,7 @@ curl -s -o /dev/null -w "带 JWT: %{http_code}\n" -H "Authorization: Bearer $TOK
   "http://localhost:8080/bff/orders/search?status=PAID"
 ```
 
-**台词**："网关是 WebFlux 的 `ServerHttpSecurity`；开发 profile 放行、容器 profile 强制 JWT + 角色（`/bff/**` 要 USER，`POST /api/inventory/**` 要 ADMIN）。"
+**讲解要点**："网关是 WebFlux 的 `ServerHttpSecurity`；开发 profile 放行、容器 profile 强制 JWT + 角色（`/bff/**` 要 USER，`POST /api/inventory/**` 要 ADMIN）。"
 **顺口说的坑**（加分项）："这里踩过一个坑——原来注入的是 Servlet 的 `HttpSecurity` 且漏了 `@Bean`，配置**从未生效**，表现为全站 401。"
 
 ---
@@ -120,8 +120,8 @@ for i in 1 2 3 4; do curl -s -o /dev/null -w "%{http_code} " -X POST \
 # → 429 429 429 200
 ```
 
-**台词**："`created:0 / updated:3` 就是幂等——以平台单号为唯一键，重复拉取只更新不新增。限流不是全局的，只挂在会放大成平台调用的入口上。"
-**追问预案**：为什么不用全局限流？→ §4-Q2。
+**讲解要点**："`created:0 / updated:3` 就是幂等——以平台单号为唯一键，重复拉取只更新不新增。限流不是全局的，只挂在会放大成平台调用的入口上。"
+**延伸说明**：为什么不用全局限流？→ §4-Q2。
 
 ---
 
@@ -155,7 +155,7 @@ curl -s -H "Authorization: Bearer $TOKEN" "http://localhost:8080/api/inventory/w
 **然后打开浏览器看真实邮件**：<http://localhost:8025>（MailHog 收件箱）
 主题：`[库存补货建议] AMZ-9999@Mönchengladbach 剩余 5（阈值 10）`，HTML 表格 + 建议补货量 15。
 
-**台词**（这一段信息量最大，挑 3 点讲）：
+**讲解要点**（这一段信息量最大，挑 3 点讲）：
 1. **锁粒度是 `sku + warehouse`**（`inventory:lock:{sku}:{warehouse}`）——两仓操作互不阻塞，需求里问的正是"两仓库存不冲突"。
 2. **双层防护**：Redisson 分布式锁 + JPA `@Version` 乐观锁；释放路径也走同一把锁，避免"扣减/释放并发互相覆盖"。
 3. **邮件节流在 Redis 里**（`inventory:warning:last-mail-at`，TTL 30 分钟）——否则每 60 秒扫一次就发一封，收件人一天上千封。
@@ -187,7 +187,7 @@ curl -s -X POST -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/
   http://localhost:8080/api/routes/optimize
 ```
 
-**台词**（这里能讲出"踩过坑并修好"的深度）：
+**讲解要点**（这里能讲出"踩过坑并修好"的深度）：
 > "jsprit 默认用**坐标单位的欧氏距离** —— 经纬度下算出来的单位是『度』，Bruchsal→Karlsruhe 得到 0.19。我换成了自带的 Haversine 成本模型，单位才是 km；`38.6 km` 这个数字就是几何锁定的回归证据。
 > 另外原来 `new SearchStrategyManager()` 是空策略注册表，算法必抛 `no search-strategy found`——改成官方高层入口 `Jsprit.Builder` 才真正跑起来。"
 
@@ -222,7 +222,7 @@ curl -s -H "Authorization: Bearer $TOKEN" "http://localhost:8080/api/routes/trac
 # → 400（无法识别就要求显式指定，不猜）
 ```
 
-**台词**：
+**讲解要点**：
 > "两家承运商状态码体系完全不同（DHL 的 `pre-transit/transit/delivered/failure`，DPD 的 `PICKUP/IN_TRANSIT/...` 还大小写不统一）。**归一化只做一次、做在服务端**，前端不用为每家写一套判断。
 > 失败分四类：查无此单 404（让用户核对单号）、不可用 503（稍后重试，限流带 `retryAfterSeconds`）、上游拒绝 502（我们自己看日志）、识别不出 400（要求显式指定）——**分错了，前端只能写一句『操作失败』**。"
 
@@ -250,7 +250,7 @@ curl -s -H "Authorization: Bearer $TOKEN" http://localhost:8080/api/orders/state
 # → "currentState":"FBA_RELABELED"   ← 内存实现会回到 CREATED
 ```
 
-**台词**：
+**讲解要点**：
 > "状态机的状态原来放在进程内的 `ConcurrentHashMap` 里——**服务一重启就回到起点**，多副本还各看一套。现在 DB 是唯一真相源：`order_state`（当前状态 + `@Version` 乐观锁）+ `order_state_event`（只追加的事件轨迹）。
 > 每个请求都是『读库 → 纯逻辑判定 → 同事务写回 + 追加事件』，进程内不存任何状态。"
 
@@ -298,7 +298,7 @@ curl -s "http://localhost:8085/api/reports/dashboard" | head -c 400
 docker compose start aslp_order_service
 ```
 
-**台词**："只读聚合方的依赖故障不该让整页 500，也不该返回一个『看起来正常的全 0 看板』——那会被读成『今天真的没有订单』。所以是 200 + `degraded:true` + `unavailable` 列表，**分块标注**。"
+**讲解要点**："只读聚合方的依赖故障不该让整页 500，也不该返回一个『看起来正常的全 0 看板』——那会被读成『今天真的没有订单』。所以是 200 + `degraded:true` + `unavailable` 列表，**分块标注**。"
 
 **如果想再压一个亮点**——单据对象存储（MinIO + 面单 PDF）：
 

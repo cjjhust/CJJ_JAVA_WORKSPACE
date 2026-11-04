@@ -502,7 +502,7 @@ CJJ_JAVA_WORKSPACE/            <- git 仓库根（.git 在这里）
 | `.vscode/settings.json` | `java.autobuild.enabled=false` —— 避免 JDT 语言服务器与 Maven 抢占 `target/classes` |
 | `scripts/container-verify.sh` | P0-3 容器全量验证：构建镜像 → 启动 → 等 healthy → 跑断言 |
 | `scripts/smoke-test.sh` | 端到端冒烟（124 项断言）；`--external` 可直接打已运行的容器 |
-| `DEMO.md` | **演示手册**：8 站动线 + 每站命令与台词 + 测试数据速查 + 追问对答 + 现场排障 |
+| `DEMO.md` | **演示手册**：8 站动线 + 每站命令与讲解要点 + 测试数据速查 + 延伸说明 + 现场排障 |
 | `wiremock/mappings/*.json` | P1-4 平台契约桩（11 个）：LWA 换令牌 / 订单列表两页 / 商品明细（含一个 500）/ 限流 / 5xx / 超时 / 4xx / 空结果。靠 `MarketplaceIds` 查询参数分流 |
 | `services/inventory-service/src/main/resources/templates/email/replenishment.html` | P1-5 补货邮件模板（Thymeleaf）：行内样式 + 表格布局 |
 | `services/order-service/src/main/java/com/aslp/order/document/` | P1-6 单据层：`DocumentType`（白名单枚举）/ `PdfDocumentWriter`（OpenPDF 生成）/ `DocumentNotFoundException`·`DocumentStorageException`（404 vs 503 语义） |
@@ -746,7 +746,7 @@ curl -s http://localhost:8080/api/orders/AMZ-1001/documents -H "Authorization: B
 ---
 
 ---
-## P2-7 单体共存 + P2-8 仓储集成测试 + CI（2026-11-02 轮次 18）— 用户要求：做单体多模块与伪微服务共存 + GitHub Actions CI + Testcontainers 仓储测试，作为两种架构模式的对比产出
+## P2-7 单体共存 + P2-8 仓储集成测试 + CI（2026-11-02 轮次 18）— 需求：做单体多模块与伪微服务共存 + GitHub Actions CI + Testcontainers 仓储测试，作为两种架构模式的对比产出
 
 > 结果：**同一套业务代码支持两种部署拓扑（6 服务微服务形态 ↔ 单进程单体形态，profile 切换，业务代码零改动）；inventory 侧补齐真 PG 仓储测试；GitHub Actions CI 上线。非容器测试 272 项全绿；4 个容器测试类因本机 Docker socket 异常转入 CI 验证**
 
@@ -837,7 +837,7 @@ curl -s http://localhost:8080/api/orders/AMZ-1001/documents -H "Authorization: B
 - **事务边界理解**：`@DataJpaTest` 的事务包裹 + PG 的 aborted 语义 + `NOT_SUPPORTED` 传播的组合，是"同一个测试在 H2 绿、在 PG 红"的经典第三种来源（前两种是方言和约束时机）。
 
 ---
-## P1-11 文档分工（readme=三语介绍 / todo=全量复盘）+ 三个界面真实截图（2026-09-23 轮次 17）— 用户要求：readme 只留「做了什么、解决了什么问题」，开发过程全量剪切到 todo（顶部添加、不覆盖），并补上三个界面的截图
+## P1-11 文档分工（readme=三语介绍 / todo=全量复盘）+ 三个界面真实截图（2026-09-23 轮次 17）— 需求：readme 只留「做了什么、解决了什么问题」，开发过程全量剪切到 todo（顶部添加、不覆盖），并补上三个界面的截图
 
 > 结果：**readme 858 行 → 192 行（中/EN/DE 三语）；todo 1535 → 2344 行（顶部附录 + P1-1…P1-10 原有轮次一字未改）；三个界面截图全部用本机真实运行抓取**
 
@@ -866,7 +866,7 @@ curl -s http://localhost:8080/api/orders/AMZ-1001/documents -H "Authorization: B
       先做「摊平分布」再截图就会发现数据自己变回去了。根因不是 bug 而是**数据所有权**：平台是权威源，本地修正只是临时视图。要做「人工干预不被覆盖」就必须引入**覆盖标记 / 优先级字段**或在平台侧发起变更 —— 已列入 roadmap。
 
 ---
-## P1-10 邮件节流外置（进程内 → Redis）+ 演示手册（2026-09-23 轮次 16）— 用户要求：把最后一项也做完，并教怎么演示
+## P1-10 邮件节流外置（进程内 → Redis）+ 演示手册（2026-09-23 轮次 16）— 需求：把最后一项也做完，并教怎么演示
 
 > 结果：**`mvn clean package -T 1C` BUILD SUCCESS（256 个单测全通过，+9）｜ `container-verify.sh` EXIT=0（18/18 容器就绪，端到端断言 124/124，含 6a 状态机 + 6b 节流双重启验证）**
 
@@ -897,7 +897,7 @@ curl -s http://localhost:8080/api/orders/AMZ-1001/documents -H "Authorization: B
 
 **A3. 演示手册 `DEMO.md`（用户直接要的「教我怎么展示」）**
 
-- [x] 8 站演示动线，每站配**可复制命令 + 台词 + 期望输出**：系统全景 → 网关鉴权(401/200) →
+- [x] 8 站演示动线，每站配**可复制命令 + 讲解要点 + 期望输出**：系统全景 → 网关鉴权(401/200) →
       M1 订单流水线(幂等/异常打标/限流 429) → M2 防超卖(双状态/超量拒绝/邮件+节流) →
       M3 VRP(38.6km 几何锁定/无解降级) → M3 追踪(识别/归一化/缓存硬证据/四类失败) →
       M4 状态机+审计+**现场重启不丢** → M5 可观测性(Prometheus/Grafana/Zipkin/Loki/看板/单据PDF)
@@ -927,7 +927,7 @@ curl -s http://localhost:8080/api/orders/AMZ-1001/documents -H "Authorization: B
    凡是写不出命令的，基本上就是没真正验证过的。
 
 ---
-## P1-9 尾程追踪真实化（DHL/DPD 一单到底）（2026-09-23 轮次 15）— 用户要求：把追踪也做实，能搭一个初步演示成果
+## P1-9 尾程追踪真实化（DHL/DPD 一单到底）（2026-09-23 轮次 15）— 需求：把追踪也做实，能搭一个初步演示成果
 
 > 结果：**`mvn clean package -T 1C` BUILD SUCCESS（247 个单测全通过，+45）｜ `container-verify.sh` EXIT=0（18/18 容器就绪，端到端断言 123/123，含 6/6 重启持久化验证）**
 
@@ -936,7 +936,7 @@ curl -s http://localhost:8080/api/orders/AMZ-1001/documents -H "Authorization: B
 盘点后剩下的唯一"写了但没做实"的功能：M3 任务 3.2「包裹一单到底追踪」。
 原 `TrackingService` 是 12 行骨架 —— `new RestTemplate()` + 两个硬编码 URL、
 返回原始 `String`、**没有任何调用方**（连 Controller 都没接）、零单测。
-面试被问到「追踪怎么做的」只能答「封装了 RestTemplate」。
+追踪能力只是「封装了 RestTemplate」，没有归一化与失败分类。
 
 ### B. 交付内容
 
@@ -1008,7 +1008,7 @@ curl -s http://localhost:8080/api/orders/AMZ-1001/documents -H "Authorization: B
    本项目是按公开的 `parcelLifeCycle` 结构建模；写清楚"这是我们的理解"比事后解释便宜得多。
 
 ---
-## P1-8 状态机持久化（内存 → DB 唯一真相源）（2026-09-23 轮次 14）— 用户要求：把没完成的全部完成
+## P1-8 状态机持久化（内存 → DB 唯一真相源）（2026-09-23 轮次 14）— 需求：把没完成的全部完成
 
 > 结果：**`mvn clean package -T 1C` BUILD SUCCESS（202 个单测全通过，+8）｜ `container-verify.sh` EXIT=0（18/18 容器就绪，端到端断言 104/104，含 6/6 重启持久化验证）**
 
@@ -1074,7 +1074,7 @@ curl -s http://localhost:8080/api/orders/AMZ-1001/documents -H "Authorization: B
    （早期版本静默忽略），凡「可能不存在的删除」都用 `findById(...).ifPresent(delete)`。
 
 ---
-## P1-7 报表看板真实化（M1/M5 收尾）（2026-09-23 轮次 13）— 用户要求：把没完成的全部完成
+## P1-7 报表看板真实化（M1/M5 收尾）（2026-09-23 轮次 13）— 需求：把没完成的全部完成
 
 > 结果：**`mvn clean package -T 1C` BUILD SUCCESS（194 个单测全通过，+16）｜ `container-verify.sh` EXIT=0（18/18 容器就绪，端到端断言 102/102）**
 
@@ -1160,7 +1160,7 @@ todo.md 的 M1/M5 里它也是被反复勾不掉的那一条。本轮把它做�
    也顺手消掉了"前端遍历 map 时顺序随机导致颜色跳变"这类难查的问题。
 
 ---
-## P1-5 邮件真实化 + P1-6 对象存储（2026-09-17 轮次 12）— 用户要求：P1-5 与 P1-6 一起做
+## P1-5 邮件真实化 + P1-6 对象存储（2026-09-17 轮次 12）— 需求：P1-5 与 P1-6 一起做
 
 > 结果：**`mvn clean package -T 1C` BUILD SUCCESS（178 个单测全通过）｜ `container-verify.sh` EXIT=0（18/18 容器就绪，端到端断言 96/96）**
 
@@ -1226,7 +1226,7 @@ todo.md 的 M1/M5 里它也是被反复勾不掉的那一条。本轮把它做�
 5. **邮件现在真的会“发出去”了，所以“邮件轰炸”这类被掩盖的缺陷会立刻暴露**：旧实现扫一次发 N 封、且失败被吞 —— SMTP 不可用时完全看不出来。**修复一个“静默失效”的链路时，要顺带检查它原本承担的业务责任是否也需要重新设计**（本轮因此加了汇总邮件 + 30 分钟节流）。
 
 ---
-## P1-4 平台契约测试（真实 SP-API 客户端 + WireMock 契约桩）（2026-09-17 轮次 11）— 用户要求：P1-4 WireMock 契约测试
+## P1-4 平台契约测试（真实 SP-API 客户端 + WireMock 契约桩）（2026-09-17 轮次 11）— 需求：P1-4 WireMock 契约测试
 
 > 结果：**`mvn clean package -T 1C` BUILD SUCCESS（147 个单测全通过）｜ `container-verify.sh` EXIT=0（16/16 容器就绪，端到端断言 74/74）**
 
@@ -1309,7 +1309,7 @@ todo.md 的 M1/M5 里它也是被反复勾不掉的那一条。本轮把它做�
    这类错误静态解析就能拦住，而执行一次全量容器验证要几分钟。
 
 ---
-## P1-1b 日志聚合（Promtail → Loki → Grafana）（2026-09-17 轮次 10）— 用户要求：开始 P1-1b Loki 日志聚合
+## P1-1b 日志聚合（Promtail → Loki → Grafana）（2026-09-17 轮次 10）— 需求：开始 P1-1b Loki 日志聚合
 
 > 结果：**`mvn clean package -T 1C` BUILD SUCCESS（119 个单测全通过，本轮未改业务代码）｜ `container-verify.sh` EXIT=0（15/15 容器就绪，端到端断言 56/56）**
 
@@ -1360,7 +1360,7 @@ todo.md 的 M1/M5 里它也是被反复勾不掉的那一条。本轮把它做�
    —— 断言失败时先想「我查的维度是否会被无关流量污染」，而不是先加长超时。
 
 ---
-## P1-3 链路追踪（Micrometer Tracing + Brave + Zipkin）（2026-09-17 轮次 9）— 用户要求：P1-1 / P1-3 / P1-4 中选一，本轮做 P1-3
+## P1-3 链路追踪（Micrometer Tracing + Brave + Zipkin）（2026-09-17 轮次 9）— 需求：P1-1 / P1-3 / P1-4 中选一，本轮做 P1-3
 
 > 结果：**`mvn clean package -T 1C` BUILD SUCCESS（119 个单测全部通过）｜ `container-verify.sh` EXIT=0（13/13 容器就绪，端到端断言 51/51）**
 
@@ -1408,7 +1408,7 @@ todo.md 的 M1/M5 里它也是被反复勾不掉的那一条。本轮把它做�
    新写的断言又踩了一次（#36）。**规则要一次性全量扫描**（`grep -n "| grep -q" scripts/`），而不是遇到一处改一处。
 
 ---
-## P1-1 可观测性（Micrometer + Prometheus + Grafana）（2026-09-17 轮次 8）— 用户要求：做 P1-1 / P1-3 / P1-4 中选一
+## P1-1 可观测性（Micrometer + Prometheus + Grafana）（2026-09-17 轮次 8）— 需求：做 P1-1 / P1-3 / P1-4 中选一
 
 > 选 P1-1 的依据：它是路线图第一项；且先探测了镜像可用性（`prom/prometheus` / `grafana/grafana` / `openzipkin/zipkin` 本地已存在或可拉取），确认没有此前 MinIO 那类「镜像源不可达」的阻塞风险。
 > 结果：**`mvn clean package -T 1C` BUILD SUCCESS（117 个单测全部通过）｜ `container-verify.sh` EXIT=0（12/12 容器就绪，端到端断言 46/46）**
@@ -1469,7 +1469,7 @@ todo.md 的 M1/M5 里它也是被反复勾不掉的那一条。本轮把它做�
    不能写成「立刻可见」。
 
 ---
-## P1-2b 修复 M3 VRP 引擎（2026-09-16 轮次 7）— 用户要求：P1-2b 修 VRP 引擎
+## P1-2b 修复 M3 VRP 引擎（2026-09-16 轮次 7）— 需求：P1-2b 修 VRP 引擎
 
 > 结果：**`mvn clean package -T 1C` BUILD SUCCESS（110 个单测全部通过，0 跳过）｜ `container-verify.sh` EXIT=0（10/10 healthy，端到端断言 41/41）**
 
@@ -1519,7 +1519,7 @@ todo.md 的 M1/M5 里它也是被反复勾不掉的那一条。本轮把它做�
 **断言依赖“前一个请求足够快”就是不稳定断言**；要验证 burst 行为，必须让并发请求落在同一瞬间。
 
 ---
-## P1-2 限流与容错 + 低覆盖单测补齐（2026-09-16 轮次 6）— 用户要求：接下来做 P1 / 为低覆盖类生成单测
+## P1-2 限流与容错 + 低覆盖单测补齐（2026-09-16 轮次 6）— 需求：接下来做 P1 / 为低覆盖类生成单测
 
 > 结果：**`mvn test -T 1C` BUILD SUCCESS（75 测试：73 通过 / 2 跳过）｜ `container-verify.sh` EXIT=0（10/10 healthy，端到端断言 36/36）**
 
@@ -1563,7 +1563,7 @@ todo.md 的 M1/M5 里它也是被反复勾不掉的那一条。本轮把它做�
 | P1-2 端到端四项 | ✅ 限流 429（连续第二次 /pull）；平台故障 → `degraded:true`（200 而非 500）；`/actuator/circuitbreakers` state=**OPEN**；关闭故障后自动恢复 `success:true` |
 
 ---
-## P0-5 库存 CRUD 闭环（2026-09-16 轮次 5）— 用户要求：接着做 P0-5 + 把「代码地图」沉淀进 readme
+## P0-5 库存 CRUD 闭环（2026-09-16 轮次 5）— 需求：接着做 P0-5 + 把「代码地图」沉淀进 readme
 
 > 结果：**`mvn clean package -T 1C` BUILD SUCCESS（33 单测全绿）｜ `container-verify.sh` EXIT=0（10/10 healthy，端到端断言 32/32）**
 
@@ -1598,7 +1598,7 @@ todo.md 的 M1/M5 里它也是被反复勾不掉的那一条。本轮把它做�
 - [x] `readme.md` 新增 **§13 新人阅读指引（代码地图）**：仓库分层、顶层文件、逐文件职责、profile 读法、测试布局、建议阅读顺序
 
 ---
-## P0-3 容器全量验证（2026-09-16 轮次 4）— 用户要求：跑完 P0-3 → 更新 todo → 提交变更
+## P0-3 容器全量验证（2026-09-16 轮次 4）— 需求：跑完 P0-3 → 更新 todo → 提交变更
 
 > 结果：**`bash scripts/container-verify.sh` EXIT=0 ｜ 10/10 容器 `healthy` ｜ 端到端断言 30/30 通过**
 > 过程中定位并修复 **3 个真实缺陷**：2 个容器启动阻塞项 + 1 个接口 500。
@@ -1621,7 +1621,7 @@ todo.md 的 M1/M5 里它也是被反复勾不掉的那一条。本轮把它做�
 | Flyway 迁移 | ✅ 库内 `flyway_schema_history_order` / `flyway_schema_history_inventory` / `orders` / `inventory` 四张表均由迁移脚本创建，`ddl-auto: validate` 校验通过 |
 
 ---
-## 🔒 脱敏重构 + P0 基线补齐（2026-09-16 轮次 3）— 用户要求：去除全部具体公司字样 / 启动 P0 任务
+## 🔒 脱敏重构 + P0 基线补齐（2026-09-16 轮次 3）— 需求：去除全部具体公司字样 / 启动 P0 任务
 
 ### A. 信息安全脱敏（全量，含代码/配置/文档）
 
@@ -1699,7 +1699,7 @@ todo.md 的 M1/M5 里它也是被反复勾不掉的那一条。本轮把它做�
 
 ---
 
-## 🩺 系统审计与启动 Bug 修复（2026-09-15 轮次 2）— 用户要求：审核项目状态 / 规划路线 / 更新 readme / 排查启动 Bug
+## 🩺 系统审计与启动 Bug 修复（2026-09-15 轮次 2）— 需求：审核项目状态 / 规划路线 / 更新 readme / 排查启动 Bug
 
 > 全量扫描 84 个文件后定位并修复 **14 个阻塞性问题**，系统从「无法启动」变为「全绿可运行」。
 
@@ -1836,13 +1836,13 @@ todo.md 的 M1/M5 里它也是被反复勾不掉的那一条。本轮把它做�
 **一句话本质**：ZK 模式是"借别的系统管自己"，KRaft 是"用自身核心抽象（日志 + 选举）管自己"——架构自洽后，双系统一致性、watch 风暴、扩容天花板一并消解。
 **决策记录**：本项目 cp-kafka 7.6，选 KRaft 是明确方向下的务实落地；P2-3 流水线立项时直接在 KRaft 上开发，无迁移债。
 
-### 🟢 P3 — M7 生产化（预计 1-2 月）
+### 🟢 P3 — M7 生产化
 
-> 以下为**未来计划**（增量更新于 2026-11-03）：P3-1（CI/CD）、P3-4（JaCoCo 覆盖率门禁）、P3-5（Testcontainers 集成测试）已提前完成；Grafana 匿名访问已关闭（P0-3）。
+> **状态整理（2026-11-04）**：P3-1（CI/CD）、P3-4（JaCoCo 门禁）、P3-5（Testcontainers）已完成；Grafana 匿名访问已关闭（P0-3）。其余为未来计划——其中 **P3-2 / P3-3 属生产侧部署条件，当前不具备，明确暂缓**（暂不推进，条件具备时再启动）。
 
 - [x] **P3-1 CI/CD** ✅ GitHub Actions（仓库根 `.github/workflows/aslp-ci.yml`）：全模块构建 + 全量测试 + Testcontainers 真实 PG 集成测试，已有绿色运行记录
-- [ ] **P3-2 K8s 清单**：Deployment / Service / Ingress / HPA（CPU 70%）/ ConfigMap / Secret / Probe，替换 compose 用于生产
-- [ ] **P3-3 IaC**：Terraform 或 Bicep 描述云上 PG / Redis / Kafka 托管实例
+- [ ] **P3-2 K8s 清单** ⏸ **暂缓（生产侧条件不具备）**：Deployment / Service / Ingress / HPA / ConfigMap / Secret / Probe，用于生产部署。暂缓原因：当前无生产集群、无云账号与运行环境，K8s 清单写出来只能停留在"纸面 YAML"，无法验证运行行为（Probe/HPA/滚动更新均需真实集群）；compose 拓扑已覆盖本地与演示形态。启动条件：有可用的集群环境（云托管或自建）。
+- [ ] **P3-3 IaC** ⏸ **暂缓（同上，依赖 P3-2 的云环境）**：Terraform 或 Bicep 描述云上 PG / Redis / Kafka 托管实例。暂缓原因：无云订阅与生产部署目标；托管实例的选型（Azure/AWS/GCP）本身依赖部署区域与成本决策。启动条件：与 P3-2 同步评估。
 - [ ] **P3-4 质量门禁** ✅ 部分完成：JaCoCo 覆盖率门禁已接入（LINE 60% / BRANCH 50%，config 类豁免）；剩余：
   - [ ] **SonarCloud 静态扫描接入 CI**（公开仓库免费、零运维）：① sonarcloud.io 用 GitHub 账号登录并导入本仓库；② 拿 `SONAR_TOKEN` 存入仓库 Secrets；③ 在 `aslp-ci.yml` 增加 `sonar` job——`actions/checkout@v4`（`fetch-depth: 0`，完整历史供新代码分析）→ `mvn -B verify org.sonarsource.scanner.maven:sonar-maven-plugin:sonar`（env 注入 `SONAR_TOKEN`，`sonar.projectKey` 用 SonarCloud 生成的键）；④ 在 SonarCloud 质量门禁页配置 New Code 阈值（如新代码覆盖率 ≥ 60%）。预计 1 小时
 - [x] **P3-5 集成测试** ✅ Testcontainers（真实 PostgreSQL 16）：order 幂等落库三层保障（Flyway PG 方言 / `UNIQUE(order_id)` 约束 / IN 批量查存）+ auth 种子账号 BCrypt 契约；`testcontainers.properties` 固定 `api.version=1.44` 兼容 Docker Engine 29
@@ -1851,7 +1851,7 @@ todo.md 的 M1/M5 里它也是被反复勾不掉的那一条。本轮把它做�
 - [ ] **P3-8 外部 API 真实凭据联调（DHL 优先）**：把「契约桩验证」升级为「生产凭据（Sandbox）验证」。步骤：① developer.dhl.com 个人邮箱注册（无需公司主体）；② My Apps → 勾选 Tracking Unified API（Sandbox）→ 拿 `DHL-API-Key`；③ 经环境变量注入 `DhlTrackingClient`（代码零改动，凭据本就配置化）；④ 用官方示例单号（如 `7777777777`）打 `GET /api/routes/tracking/{number}`，对照真实报文修 `dto/DhlTrackingResponse` 字段差异；⑤ 把验证过的契约结构记进 WireMock 桩注释，readme 限制表划掉 DHL。SP-API 次选（开发者审核周期不可控），DPD 最后（人工审核几天）。预计 1 天
 - [ ] ~~Saga 补偿扩展到 SHIPPED 后场景~~ **不立项（业务判断）**：SHIPPED 后本就不支持取消，客户收货后走独立退货流程；状态机现有 `CANCELLED`（仅 CREATED/PAID）即正确的业务边界，无需在订单模块内铺开全量逆向链
 
-### 🎤 面试叙事线（技术亮点沉淀）
+### 🌟 技术亮点沉淀
 
 - [ ] **并发扣减**：Redisson `RLock` + `@Version` 乐观锁双层防护，讲清「两仓库存不冲突」的锁粒度选择（`sku + warehouse`）
 - [ ] **可靠性**：Maven 静态可重复构建 vs Gradle 动态脚本 —— 供应链安全优先于编译速度的取舍
@@ -1861,19 +1861,19 @@ todo.md 的 M1/M5 里它也是被反复勾不掉的那一条。本轮把它做�
 ---
 
 
-## 🔄 历史增量（2026-09-15 轮次 1）— 用户要求：增量追加，保留历史
+## 🔄 历史增量（2026-09-15 轮次 1）— 需求：增量追加，保留历史
 
 - [x] **备份执行** → `/tmp/todo.md.backup.20260915161106`（规则：动前先 cp）
 - [x] **模式确认** → 用户选「增量追加」（非重写收敛版），已在顶部追加本轮次
 - [x] **建议交付** → 基于技术栈（Java 21 / Spring Boot 3 / Spring Cloud / PG / Redis / Kafka / Docker）给出初始化建议：先做骨架（parent + gateway + order-service + docker-compose），避免一开始 5 模块全开；强调多项目并存时 `container_name` 冲突风险（已加 `aslp_*` 前缀）
 - [x] **项目初始化（骨架 + 代码 + Docker）** → 已创建：`pom.xml`（parent）、`gateway/`（Spring Cloud Gateway，端口 8080）、`services/order-service/`（端口 8081，含 Controller + application.yml）、`docker-compose.yml`（PG/Redis/Kafka/MinIO，网络 `aslp_net`，容器名固定 `aslp_*`）、`readme.md`
-- [ ] **待做（下轮）** → `inventory-service`（库存 + Redisson 分布式锁）、`route-service`（VRP 路径优化）、`auth-service`（Spring Security + JWT）、状态机代码示例（FBA 退货换标 / 一件代发）、面试标准对答（Bruchsal + Mönchengladbach 两仓库存一致性）
+- [ ] **待做（下轮）** → `inventory-service`（库存 + Redisson 分布式锁）、`route-service`（VRP 路径优化）、`auth-service`（Spring Security + JWT）、状态机代码示例（FBA 退货换标 / 一件代发）、两仓库存一致性技术说明（Bruchsal + Mönchengladbach）
 - [ ] **验证清单** → `docker compose config` 通过？`mvnw clean compile -pl gateway` 通过？（待执行）
 
 ---
 
 
-## 📋 详细开发计划（写入 todo.md — 用户要求查看）
+## 📋 详细开发计划
 
 ### 当前已实现模块（已交付）
 | 模块 | 功能 | 技术实现 | 状态 |
@@ -1906,7 +1906,7 @@ todo.md 的 M1/M5 里它也是被反复勾不掉的那一条。本轮把它做�
 - [x] 数据库定时备份（`Runtime.exec()` 触发 `pg_dump`，PostgreSQL 16）✅ 已完成（`DatabaseBackupTask`，每日 02:00）
 - [x] 居家办公 VPN 安全接入（Spring Security JWT 细粒度权限）✅ 已完成（WebFlux 安全链 + HS384 JWT + `roles` → `ROLE_*`；RS256/JWKS 见 P2-5）
 
-### 技术亮点（面试准备）
+### 技术亮点
 - [x] **状态机代码**：FBA 退货换标 / 一件代发 → 已实现为**纯 Java 状态机**（`SimpleOrderStateMachine`，8 状态 / 7 事件），**状态持久化在 DB**（`order_state` + `order_state_event`，P1-8：重启后状态仍在、事件轨迹可审计），未用 Spring StateMachine（`spring-statemachine-core:1.2.14` 在 Maven Central 不存在，见 §9 #5）
 - [x] **标准技术对答**：高并发下用 Redis 锁（Redisson）保证 Bruchsal + Mönchengladbach 两仓库存不冲突 → `InventoryLockService` 把锁粒度定为 `sku + warehouse`（两仓互不阻塞），并叠加 `@Version` 乐观锁
 
@@ -1961,7 +1961,7 @@ todo.md 的 M1/M5 里它也是被反复勾不掉的那一条。本轮把它做�
 
 ---
 
-## 🔄 最新工程进度增量（2026-09-15）— 用户要求：增量追加，保留历史
+## 🔄 最新工程进度增量（2026-09-15）— 需求：增量追加，保留历史
 
 ### 已完成（本轮次）
 - [x] **构建系统回归 Maven** — 已删除 `build.gradle` / `settings.gradle`，恢复全部 7 个 `pom.xml`（根 + gateway + auth/inventory/order/report/route-service）
@@ -2145,7 +2145,7 @@ todo.md 的 M1/M5 里它也是被反复勾不掉的那一条。本轮把它做�
   - [ ] 系统集成 **Spring Security + JWT**，对远程通过 VPN 接入的 IT 及管理人员实现精细到按钮级别的权限校验（RBAC 模式）。
   - [ ] 基于 Java 原生编写一个备份服务组件，利用 **Runtime.getRuntime().exec()** 远程触发 PostgreSQL `pg_dump` 备份命令，每周定期对物流核心数据进行加密备份，保障业务连续性。
 
-针对“FBA 退货换标”或“一件代发”这两个最赚钱的业务，用 Spring 状态机（StateMachine）写一段核心的包裹状态流转代码，作为你的技术亮点。模拟一下当德国面试官问你：“高并发下，你是怎么用 Redis 锁保证 Bruchsal 和 门兴 两边仓库库存不冲突的？” 准备一套完美的标准技术对答。
+针对“FBA 退货换标”与“一件代发”这两个核心业务，用状态机实现包裹状态流转（本项目已落地为纯 Java 状态机，见 `SimpleOrderStateMachine`）；并发场景下用 Redis 锁（Redisson）保证 Bruchsal 与 Mönchengladbach 两仓库存不冲突，实现见 `InventoryLockService`。
 
 
 海外仓智能物流系统 — 项目 TODO
