@@ -45,16 +45,13 @@ jobs:
 
       # P3-6（部分落地）：依赖漏洞扫描（Trivy filesystem 模式，扫 pom.xml 依赖树）。
       # HIGH/CRITICAL 即失败——依赖带洞上线不如直接拦下。
+      # 用官方镜像直跑而非第三方 action（action 引用解析问题会让 job 在 Set up 阶段直接挂）。
       # 密钥外置（Vault）与审计日志留存仍属 P3-6 未做部分（需生产侧设施）。
       - name: Dependency vulnerability scan (Trivy)
-        uses: aquasecurity/trivy-action@0.24.0
-        with:
-          scan-type: fs
-          scan-ref: 'smart-logistics-platform'
-          scanners: vuln
-          severity: HIGH,CRITICAL
-          exit-code: '1'
-          ignore-unfixed: true
+        run: |
+          docker run --rm -v "$PWD:/workdir" aquasec/trivy:latest \
+            fs --scanners vuln --severity HIGH,CRITICAL \
+            --exit-code 1 --ignore-unfixed /workdir
 
       - name: Upload test reports (on failure)
         if: failure()
