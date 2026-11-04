@@ -33,7 +33,9 @@ services:
       POSTGRES_PASSWORD: aslp123
       PGDATA: /var/lib/postgresql/data/pgdata
     ports:
-      - "5432:5432"
+      # 宿主 5432 被其他项目容器（audit-postgres）占用 → 映射到 5433。
+      # 容器网络内服务间仍走 aslp_postgres:5432，不受影响。
+      - "5433:5432"
     volumes:
       - aslp_pg_data:/var/lib/postgresql/data
       # P2-8：database per service —— 首次启动建 4 个独立库（同实例，不加容器）
@@ -183,7 +185,8 @@ services:
         aliases:
           - aslp-eureka-server
     healthcheck:
-      test: ["CMD-SHELL", "curl -fsS http://localhost:8761/actuator/health || exit 1"]
+      # JRE-alpine 镜像无 curl（eureka-server 同），用 wget；/actuator/health 不需认证
+      test: ["CMD-SHELL", "wget -q -O- http://localhost:8761/actuator/health || exit 1"]
       interval: 15s
       timeout: 5s
       retries: 10
@@ -199,7 +202,9 @@ services:
     image: aslp/config-server:1.0.0
     container_name: aslp_config_server
     environment:
-      SPRING_PROFILES_ACTIVE: docker
+      # docker + native 并存：docker 是部署 profile，native 是 Config Server 的后端类型；
+      # 只写 docker 会覆盖基础 yml 的 native，导致「no search-locations」启动失败
+      SPRING_PROFILES_ACTIVE: docker,native
       SERVER_PORT: 8888
     ports:
       - "8888:8888"
@@ -208,7 +213,8 @@ services:
         aliases:
           - aslp-config-server
     healthcheck:
-      test: ["CMD-SHELL", "curl -fsS http://localhost:8888/actuator/health || exit 1"]
+      # JRE-alpine 镜像无 curl（eureka-server 同），用 wget
+      test: ["CMD-SHELL", "wget -q -O- http://localhost:8888/actuator/health || exit 1"]
       interval: 15s
       timeout: 5s
       retries: 10
@@ -287,7 +293,8 @@ services:
       SERVER_PORT: 8082
       MANAGEMENT_PORT: 9091
     ports:
-      - "127.0.0.1:9092:9091"
+      # 9092 与 Kafka 宿主端口冲突（P0-2 管理端口仅回环，改 9192）
+      - "127.0.0.1:9192:9091"
     depends_on:
       aslp_postgres:
         condition: service_healthy

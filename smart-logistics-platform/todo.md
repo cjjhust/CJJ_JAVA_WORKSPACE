@@ -1846,8 +1846,8 @@ todo.md 的 M1/M5 里它也是被反复勾不掉的那一条。本轮把它做�
 - [ ] **P3-4 质量门禁** ✅ 部分完成：JaCoCo 覆盖率门禁已接入（LINE 60% / BRANCH 50%，config 类豁免）；剩余：
   - [ ] **SonarCloud 静态扫描接入 CI**（公开仓库免费、零运维）：① sonarcloud.io 用 GitHub 账号登录并导入本仓库；② 拿 `SONAR_TOKEN` 存入仓库 Secrets；③ 在 `aslp-ci.yml` 增加 `sonar` job——`actions/checkout@v4`（`fetch-depth: 0`，完整历史供新代码分析）→ `mvn -B verify org.sonarsource.scanner.maven:sonar-maven-plugin:sonar`（env 注入 `SONAR_TOKEN`，`sonar.projectKey` 用 SonarCloud 生成的键）；④ 在 SonarCloud 质量门禁页配置 New Code 阈值（如新代码覆盖率 ≥ 60%）。预计 1 小时
 - [x] **P3-5 集成测试** ✅ Testcontainers（真实 PostgreSQL 16）：order 幂等落库三层保障（Flyway PG 方言 / `UNIQUE(order_id)` 约束 / IN 批量查存）+ auth 种子账号 BCrypt 契约；`testcontainers.properties` 固定 `api.version=1.44` 兼容 Docker Engine 29
-- [ ] **P3-6 安全基线**：依赖漏洞扫描（OWASP Dependency-Check / Trivy）、密钥外置（Vault / Key Vault）、审计日志留存
-- [ ] **P3-7 备份容灾演练**：`pg_dump` 定时备份已落地（P2-4：超时 + 密码 + 命名卷 + 轮转 + 指标）；剩余恢复演练脚本，验证 RPO/RTO
+- [x] **P3-6 安全基线** ✅ 部分完成（2026-11-04）：Trivy 依赖漏洞扫描已接入 CI（filesystem 模式，HIGH/CRITICAL 即失败，`ignore-unfixed` 减少噪音）；未做部分：密钥外置（Vault / Key Vault）、审计日志留存——两者需要生产侧设施，随 P3-2/P3-3 暂缓
+- [x] **P3-7 备份容灾演练** ✅ **2026-11-04 完成**：`scripts/backup-restore-drill.sh`——pg_dump 新鲜备份 → 一次性演练库 pg_restore → 表/行数一致性断言 → 记录 RTO（实测 1s）与 RPO 口径（备份周期 24h，生产建议 6h 或 WAL 归档）→ 清理演练库；定时备份本体（P2-4：超时 + 密码 + 命名卷 + 轮转 + 指标）此前已落地
 - [ ] **P3-8 外部 API 真实凭据联调（DHL 优先）**：把「契约桩验证」升级为「生产凭据（Sandbox）验证」。步骤：① developer.dhl.com 个人邮箱注册（无需公司主体）；② My Apps → 勾选 Tracking Unified API（Sandbox）→ 拿 `DHL-API-Key`；③ 经环境变量注入 `DhlTrackingClient`（代码零改动，凭据本就配置化）；④ 用官方示例单号（如 `7777777777`）打 `GET /api/routes/tracking/{number}`，对照真实报文修 `dto/DhlTrackingResponse` 字段差异；⑤ 把验证过的契约结构记进 WireMock 桩注释，readme 限制表划掉 DHL。SP-API 次选（开发者审核周期不可控），DPD 最后（人工审核几天）。预计 1 天
 - [ ] ~~Saga 补偿扩展到 SHIPPED 后场景~~ **不立项（业务判断）**：SHIPPED 后本就不支持取消，客户收货后走独立退货流程；状态机现有 `CANCELLED`（仅 CREATED/PAID）即正确的业务边界，无需在订单模块内铺开全量逆向链
 

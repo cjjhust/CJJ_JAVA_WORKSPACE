@@ -4,13 +4,14 @@ server:
 spring:
   application:
     name: config-server
+  # 注意：spring.profiles.active 只能放在基础 application.yml（Boot 禁止在
+  # profile 专属文件里再声明 active profile，否则启动即抛 InvalidConfigDataPropertyException）。
+  # native 后端与 search-locations 已在基础文件里声明，docker profile 无需覆盖。
   cloud:
     config:
       server:
         native:
           search-locations: classpath:config-repo
-  profiles:
-    active: native
 
 management:
   endpoints:

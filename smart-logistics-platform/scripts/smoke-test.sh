@@ -179,12 +179,20 @@ check_status() {
 if [ "${EXTERNAL}" -eq 1 ]; then
     echo "=== 1-3/5 外部模式：跳过本地进程启动，直接等待既存服务就绪 ==="
     # P0-1：compose 部署下业务端口不发布宿主机，actuator 走独立管理端口
-    # （order=9091 inventory=9092 route=9093 auth=9094 report=9095，见 docker-compose.yml）
-    declare -A MGMT_PORT=( [order-service]=9091 [inventory-service]=9092 [route-service]=9093 [auth-service]=9094 [report-service]=9095 )
+    # （order=9091 inventory=9192 route=9093 auth=9094 report=9095，见 docker-compose.yml；
+    #  inventory 原映射 9092 与 Kafka 宿主端口冲突，已改 9192）
+    # 注：用 case 而非 declare -A —— macOS 自带 bash 3.2 不支持关联数组（实测）
     for entry in "${SERVICES[@]}"; do
         name="$(basename "${entry%%:*}")"
         port="${entry##*:}"
-        mgmt="${MGMT_PORT[${name}]:-${port}}"
+        case "${name}" in
+            order-service)     mgmt=9091 ;;
+            inventory-service) mgmt=9192 ;;
+            route-service)     mgmt=9093 ;;
+            auth-service)      mgmt=9094 ;;
+            report-service)    mgmt=9095 ;;
+            *)                 mgmt="${port}" ;;
+        esac
         if wait_http "http://localhost:${mgmt}/actuator/health" 120; then
             echo "  ✅ ${name} 就绪 (mgmt ${mgmt})"
             PASS=$((PASS + 1))
@@ -372,8 +380,19 @@ done
 # 验收：熔断打开后仍返回 200 + degraded=true（降级响应，而不是 500）
 check_post "平台故障返回降级响应  POST /api/orders/pull" \
     "http://localhost:8080/api/orders/pull" '"degraded":true'
-check "熔断状态已打开       GET  :9091/actuator/circuitbreakers" \
-    "http://localhost:9091/actuator/circuitbreakers" '"state":"OPEN"'
+# 熔断状态断言走 Micrometer 指标而非 /actuator/circuitbreakers：
+# 该端点依赖 resilience4j-spring-boot3 的端点自动配置，实测 404（不注册）；
+# 指标 gauge 恒可用（open=1.0 即熔断打开）
+CB_METRICS="$(curl -fsS --max-time 5 \
+    "http://localhost:9091/actuator/metrics/resilience4j.circuitbreaker.state?tag=state:open" 2>/dev/null)"
+CB_OPEN="$(echo "${CB_METRICS}" | python3 -c 'import json,sys; d=json.load(sys.stdin); print([m["value"] for m in d.get("measurements",[]) if m["statistic"]=="VALUE"][0])' 2>/dev/null || echo 0)"
+if [ "${CB_OPEN}" = "1.0" ]; then
+    echo "  ✅ 熔断状态已打开（metrics: state=open = 1.0）"
+    PASS=$((PASS + 1))
+else
+    echo "  ❌ 熔断状态未打开（metrics: state=open = ${CB_OPEN:-无数据}）"
+    FAIL=$((FAIL + 1))
+fi
 # 恢复：关闭故障开关 -> 等熔断自动转半开 -> 下一次调用应成功
 post_quiet "http://localhost:8080/api/orders/mock/failure-mode?mode=NONE"
 sleep 4
@@ -869,7 +888,7 @@ MAILHOG_API="http://localhost:8025"
 MAILHOG_READY="$(curl -fsS --max-time 10 "${MAILHOG_API}/api/v2/messages" 2>/dev/null)"
 check_body "MailHog 收件箱就绪（:8025 API 可读）" '"total"' "${MAILHOG_READY}"
 
-INVENTORY_HEALTH="$(curl -fsS --max-time 10 http://localhost:9092/actuator/health 2>/dev/null)"
+INVENTORY_HEALTH="$(curl -fsS --max-time 10 http://localhost:9192/actuator/health 2>/dev/null)"
 check_body "邮件健康探测已恢复：inventory /actuator/health 的 mail 组件为 UP" \
     '"mail":{"status":"UP"' "${INVENTORY_HEALTH}"
 

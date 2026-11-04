@@ -42,6 +42,20 @@ jobs:
       - name: Build & Test
         run: mvn -B test
 
+
+      # P3-6（部分落地）：依赖漏洞扫描（Trivy filesystem 模式，扫 pom.xml 依赖树）。
+      # HIGH/CRITICAL 即失败——依赖带洞上线不如直接拦下。
+      # 密钥外置（Vault）与审计日志留存仍属 P3-6 未做部分（需生产侧设施）。
+      - name: Dependency vulnerability scan (Trivy)
+        uses: aquasecurity/trivy-action@0.24.0
+        with:
+          scan-type: fs
+          scan-ref: 'smart-logistics-platform'
+          scanners: vuln
+          severity: HIGH,CRITICAL
+          exit-code: '1'
+          ignore-unfixed: true
+
       - name: Upload test reports (on failure)
         if: failure()
         uses: actions/upload-artifact@v4
