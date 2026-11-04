@@ -65,32 +65,44 @@ services:
     networks:
       - aslp_net
 
-  aslp_zookeeper:
-    image: confluentinc/cp-zookeeper:7.6.0
-    container_name: aslp_zookeeper
-    environment:
-      ZOOKEEPER_CLIENT_PORT: 2181
-      ZOOKEEPER_TICK_TIME: 2000
-    networks:
-      - aslp_net
-
+  # ---------------------------- Kafka（P2-8：KRaft 模式） ----------------------------
+  # 历史：原为 ZK 模式（cp-kafka 7.6 + cp-zookeeper），Kafka 尚无业务代码使用，
+  # 属"预置而未用"。P2-8 迁移 KRaft 的理由见 todo.md「KRaft vs ZooKeeper 对比」存档：
+  # Kafka 4.0 起彻底移除 ZK 模式；KRaft 元数据自管理（Raft 选举 + 元数据日志化），
+  # 少一个容器、少一套运维面。迁移发生在"真正使用之前"，不是"使用之后"。
+  # KRaft 单节点要点：CONTROLLER 与 PLAINTEXT 双 listener；CLUSTER_ID 任意合法 base64 UUID；
+  # 复位因子为 1（单 broker）；kafka-storage.sh 预格式化（KRaft 必须）。
   aslp_kafka:
     image: confluentinc/cp-kafka:7.6.0
     container_name: aslp_kafka
-    depends_on:
-      aslp_zookeeper:
-        condition: service_started
     ports:
       - "9092:9092"
     environment:
-      KAFKA_BROKER_ID: 1
-      KAFKA_ZOOKEEPER_CONNECT: aslp_zookeeper:2181
-      KAFKA_LISTENERS: PLAINTEXT://0.0.0.0:9092
+      KAFKA_NODE_ID: 1
+      KAFKA_PROCESS_ROLES: broker,controller
+      KAFKA_CONTROLLER_QUORUM_VOTERS: 1@aslp_kafka:29093
+      KAFKA_LISTENERS: PLAINTEXT://0.0.0.0:9092,CONTROLLER://0.0.0.0:29093
       KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://aslp_kafka:9092
+      KAFKA_CONTROLLER_LISTENER_NAMES: CONTROLLER
+      KAFKA_INTER_BROKER_LISTENER_NAME: PLAINTEXT
       KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
       KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: 1
       KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: 1
       KAFKA_AUTO_CREATE_TOPICS_ENABLE: "true"
+      CLUSTER_ID: "MkU3OEVBNTcwNTJENDM2Qk"
+    volumes:
+      # KRaft 必须：存储目录预格式化（ZK 模式不需要这一步）
+      - aslp_kafka_data:/var/lib/kafka/data
+    entrypoint:
+      - sh
+      - -c
+      - |
+        if [ ! -f /var/lib/kafka/data/meta.properties ]; then
+          kafka-storage format --ignore-formatted \
+            --cluster-id "$$CLUSTER_ID" \
+            --config /etc/kafka/kafka.properties
+        fi
+        exec /etc/confluent/docker/run
     healthcheck:
       test: ["CMD-SHELL", "kafka-topics --bootstrap-server localhost:9092 --list || exit 1"]
       interval: 15s
@@ -469,6 +481,8 @@ volumes:
     name: aslp_redis_data
   aslp_prometheus_data:
     name: aslp_prometheus_data
+  aslp_kafka_data:
+    name: aslp_kafka_data
   aslp_grafana_data:
     name: aslp_grafana_data
   aslp_loki_data:

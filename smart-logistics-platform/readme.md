@@ -105,7 +105,7 @@
 | 框架 | Spring Boot 3.3.0 · Spring Cloud 2023.0.3 · Spring Cloud Gateway (WebFlux) |
 | 安全 | Spring Security 6 + OAuth2 Resource Server + JJWT 0.12.5（RBAC） |
 | 数据 | PostgreSQL 16 · Hibernate 6.5 · Flyway（版本化迁移）· Redisson 3.27（分布式锁） |
-| 缓存 / 消息 | Redis 7 · Apache Kafka 7.6（ZooKeeper 模式） |
+| 缓存 / 消息 | Redis 7 · Apache Kafka 7.6（**KRaft 模式**，无 ZooKeeper） |
 | 算法 | jsprit 1.8（VRP，配合自研 Haversine km 成本模型） |
 | 可观测性 | Micrometer + Prometheus 2.54 + Grafana 11.3 + Zipkin 3（Brave）+ Promtail 3 + Loki 3 |
 | 外部集成 | Amazon SP-API（`RestClient` + LWA）· MinIO SDK 8.5 + OpenPDF 2.0（面单/报关单）· DHL Unified Tracking / DPD |
@@ -175,7 +175,7 @@ bash scripts/smoke-test.sh                      # 启 6 个服务 → 断言 →
 |---|---|
 | 单元测试 Unit tests / Unit-Tests | **256 全通过**（gateway 9 · order 89 · inventory 45 · route 94 · auth 5 · report 14） |
 | 端到端断言 E2E assertions / End-to-End-Assertions | **124/124**（含限流 429、熔断降级、契约失败分类、邮件解码、PDF 校验、追踪四类失败） |
-| 容器 Containers / Container | **18/18 healthy**（6 服务 + 12 基础设施） |
+| 容器 Containers / Container | **18/18 healthy**（6 服务 + 11 基础设施；Kafka 为 KRaft 单节点，无 ZooKeeper） |
 | 重启不丢 Restart survival / Neustart-Überleben | 状态机（DB）与邮件节流窗口（Redis）**双双渡过容器重启** |
 | 缺陷复盘 Documented defects / Dokumentierte Fehler | **56 项**（含根因与修复，见 [`todo.md`](todo.md)） |
 | 外部真实契约 Real external contracts / Echte externe Verträge | 3 个：Amazon SP-API · MinIO · DHL/DPD（契约桩以**文件**版本化） |

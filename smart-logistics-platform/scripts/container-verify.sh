@@ -35,7 +35,7 @@ HEALTH_TIMEOUT="${HEALTH_TIMEOUT:-600}"
 # 注：aslp_grafana 镜像内没有 curl/wget（已实测），因此它没有容器内健康检查，
 # 就绪与否由冒烟脚本访问 :3000/api/health 断言。
 EXPECTED_SERVICES=(
-    aslp_postgres aslp_redis aslp_zookeeper aslp_kafka
+    aslp_postgres aslp_redis aslp_kafka
     aslp_gateway aslp_order_service aslp_inventory_service
     aslp_route_service aslp_auth_service aslp_report_service
     aslp_prometheus aslp_grafana aslp_zipkin

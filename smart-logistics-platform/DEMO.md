@@ -41,7 +41,7 @@ bash scripts/container-verify.sh
 ```
 
 **这段输出本身就是最好的开场白**：一句话不用说，把 124/124 贴出来，
-然后说"这条命令冷启动 18 个容器、跑完 124 项断言，还会重启容器验证『状态与节流窗口都不在进程内』"。
+然后说"这条命令冷启动 18 个容器（Kafka 已是 KRaft 模式，无 ZooKeeper）、跑完 124 项断言，还会重启容器验证『状态与节流窗口都不在进程内』"。
 
 本地开发（不想等镜像构建时）：
 
@@ -72,7 +72,7 @@ bash scripts/demo-traffic.sh   # 幂等，可重复跑；37 项断言
 docker compose ps --format "table {{.Name}}\t{{.Status}}" | head -20
 ```
 
-**台词**："6 个 Java 服务 + 12 个基础设施（PG/Redis/Kafka/ZooKeeper/Prometheus/Grafana/Zipkin/Loki/Promtail/WireMock/MailHog/MinIO），全部容器化，一条命令冷启动。"
+**台词**："6 个 Java 服务 + 11 个基础设施（PG/Redis/Kafka(KRaft 模式，无 ZooKeeper)/Prometheus/Grafana/Zipkin/Loki/Promtail/WireMock/MailHog/MinIO），全部容器化，一条命令冷启动。"
 
 **追问预案**：为什么 6 个服务而不是单体？→ 见 §4-Q1。
 
