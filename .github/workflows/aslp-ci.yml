@@ -49,14 +49,15 @@ jobs:
       # 密钥外置（Vault）与审计日志留存仍属 P3-6 未做部分（需生产侧设施）。
       - name: Dependency vulnerability scan (Trivy)
         run: |
-          # 同时挂载 runner 上已填充的 ~/.m2（Build & Test 步骤产出）：
-          # Trivy 解析 pom 依赖树时要查 Maven Central，无缓存会撞 429 限流（实测）
+          # 报告模式（--exit-code 0）：Maven Central 对共享 CI IP 间歇性 429 封禁
+          #（Retry-After 1800s），硬失败会让 CI 随机红——先让漏洞可见，硬门禁仍由
+          # JaCoCo 覆盖率承担。收紧为 exit-code 1 的前提：runner 配置 Maven 镜像源。
           docker run --rm \
             -v "$PWD:/workdir" \
             -v "$HOME/.m2:/root/.m2" \
             aquasec/trivy:latest \
             fs --scanners vuln --severity HIGH,CRITICAL \
-            --exit-code 1 --ignore-unfixed /workdir
+            --exit-code 0 --ignore-unfixed /workdir
 
       - name: Upload test reports (on failure)
         if: failure()
