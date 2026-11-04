@@ -180,6 +180,30 @@ bash scripts/smoke-test.sh                      # 启 6 个服务 → 断言 →
 | 缺陷复盘 Documented defects / Dokumentierte Fehler | **56 项**（含根因与修复，见 [`todo.md`](todo.md)） |
 | 外部真实契约 Real external contracts / Echte externe Verträge | 3 个：Amazon SP-API · MinIO · DHL/DPD（契约桩以**文件**版本化） |
 
+### 8.1 Kafka 异步流水线（P2-3）与运行资源口径
+
+**Kafka 在本项目中的角色**：订单 → 库存的**异步联动通道**（不是数据存储）。
+
+```
+order-service（拉取落库成功后）                inventory-service（幂等消费）
+  发 order.sync 事件 ──────────────────────────▶ 预占库存（可用 → 锁定）
+  key = orderId（同订单保序）                    三层幂等：先查 + UNIQUE(order_id)
+  acks = all（不允许静默丢失）                     + 竞态事务回滚
+  仅新建订单发事件（updated 是噪音）              系统失败重试 → order.sync.DLT
+                                                  POST .../dlt/replay 重放防漏单
+```
+
+**为什么之前一直没用**：初始架构走同步 HTTP + 状态机，单机低并发下没有非用不可的场景——Kafka 只是预置的基础设施。本轮补齐的理由很简单：**代码零引用时迁移/接入成本最低**，等到有真实流量再接入才是错误时机（带着生产流量做架构变更是大忌）。
+
+**运行结果与资源口径（实测，Mac mini M4 / 16GB）**：
+
+| 口径 | 数值 |
+|---|---|
+| 全链路验收 | 18/18 容器 healthy · **124/124 断言** · **6/6 重启持久化验证**（`container-verify.sh`） |
+| Kafka 验收口径 | 功能链路端到端（发→消费→预占→DLT→重放）+ 幂等语义被真实 PG 集成测试钉死；**非吞吐基准** |
+| 内存 | 8 个 JVM（6 业务 + 网关 + eureka/config）冷启动峰值约 **8–10 GB**，可稳定运行 |
+| 说明 | 20 容器验收回答"完整拓扑下功能正确"，**不是压力测试**；并发正确性由分布式锁/乐观锁单测与 UNIQUE 竞态兜底集成测试保障；吞吐压测（JMeter/Gatling）属生产化议题，未做 |
+
 ---
 
 ## 9. 两种部署拓扑 · Two deployment topologies · Zwei Bereitstellungsformen（P2-7）

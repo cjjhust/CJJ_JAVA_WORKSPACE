@@ -1838,6 +1838,49 @@ todo.md 的 M1/M5 里它也是被反复勾不掉的那一条。本轮把它做�
 
 ### 🟢 P3 — M7 生产化
 
+## 🔄 最新工程进度增量（2026-11-04，轮次 20）— 需求：P2 全量落地 + 20 容器全链路验收 + 收尾
+
+### A. 本轮交付
+
+- [x] **P2-1~P2-4 全量落地**（此前批注"未来计划"的判断被推翻，全部实现）：
+  - **P2-1 注册中心**：`eureka-server` 模块（:8761，单节点、演示态关自我保护）；5 服务 + 网关接入；网关路由 `http://host:port` → **`lb://service-name`**
+  - **P2-2 配置中心**：`config-server` 模块（:8888，native 后端，`config-repo/` 随代码仓版本化；Git 后端列为升级路径）；5 服务经 `optional:configserver:` 接入（中心宕机服务照常起跑）
+  - **P2-3 Kafka 异步流水线**：order 发 `order.sync`（key=orderId 保序、acks=all、仅新建订单）→ inventory 幂等消费预占（先查 + `UNIQUE(order_id)` 兜底 + 竞态事务回滚防双扣）；系统失败重试后落 `order.sync.DLT`（毒事件直达），`POST /api/inventory/reservations/dlt/replay` 重放防漏单 —— **Kafka 从"零引用空转容器"变为真实联动通道**
+  - **P2-4 三态一致性**：`order_reservation`（RESERVED/RELEASED/COMMITTED）+ `ReservationReleaseTask` 超时释放补偿 + 手动兜底端点
+- [x] **P3-7 备份恢复演练**：`scripts/backup-restore-drill.sh`——pg_dump → 一次性演练库恢复 → 表/行数一致性断言 → RTO 实测 1s、RPO 口径 24h（生产建议 6h 或 WAL 归档）→ 自动清理
+- [x] **P3-6 部分落地**：Trivy 依赖漏洞扫描接入 CI（报告模式，原因见下）
+- [x] **P2-8 复盘归档**：KRaft vs ZooKeeper 对比表（8 维度）存档于本文件 P2 区
+
+### B. 20 容器全链路验收（container-verify.sh 实测）
+
+**结果：18 容器全部 healthy（compose 18 + 数据卷容器；文档口径 20 含构建期容器），124/124 端到端断言通过，6/6 重启持久化验证通过。**
+
+过程中暴露并修复 **6 项真实缺陷**（都是单测/单容器给不出、只有全链路才暴露的）：
+
+| # | 缺陷 | 修复 |
+|---|---|---|
+| 1 | PG 宿主端口 5432 与宿主机其他项目容器（audit-postgres）冲突 | 映射改 5433:5432 |
+| 2 | inventory 管理端口映射 9092 与 Kafka 宿主端口撞车 | 改 127.0.0.1:9192:9091 |
+| 3 | eureka/config 健康检查用 curl，JRE-alpine 镜像无 curl，容器永久 unhealthy | 改 wget |
+| 4 | config-server 容器内 `SPRING_PROFILES_ACTIVE=docker` 覆盖基础 yml 的 native → "Invalid config server configuration" | 改 `docker,native` 双 profile |
+| 5 | profile 专属 yml 声明 `spring.profiles.active` 被 Boot 拒绝（InvalidConfigDataPropertyException） | 从 application-docker.yml 移除 |
+| 6 | smoke-test.sh 用 `declare -A`（macOS bash 3.2 不支持关联数组，`order: unbound variable`）；`/actuator/circuitbreakers` 实测 404（resilience4j-spring-boot3 未自动注册该端点） | 改 case 语句；熔断断言改走 Micrometer 指标 gauge（`resilience4j_circuitbreaker_state{state="open"}`） |
+
+**学习点（本轮最值钱）**：
+- **配置覆盖语义**：`SPRING_PROFILES_ACTIVE` 环境变量会**整体替换**（不是追加）yml 里的 `spring.profiles.active`——服务需要"部署 profile + 框架 profile"并存时必须逗号并列写出。
+- **"healthy" 的可信度取决于健康检查命令本身**：命令用不存在的工具（curl 不在镜像里）时，容器永远起不来或永远 unhealthy——健康检查命令也是代码，也要被验证。
+- **运行顺序依赖的断言会假失败**：熔断已半开恢复、追踪缓存 TTL 未过期，重跑脚本就会红——干净验收前先重启被测服务/清桩。
+- **Trivy 在共享 CI runner 上会撞 Maven Central 429**（Retry-After 1800s，挂 `~/.m2` 也躲不开未缓存元数据的远端查询）——漏洞扫描先跑报告模式（exit 0），硬门禁由 JaCoCo 承担，收紧前提是 runner 配 Maven 镜像源。
+
+### C. 关于"20 容器 = 压力测试吗"的澄清（写给读者）
+
+**不是。** 20 容器验收回答的是"系统在完整拓扑下**功能正确**"（每条链路的行为与契约一致），不回答"扛得住多大并发"。并发/压力侧的保障在别处：
+- **并发正确性**：Redisson 分布式锁 + `@Version` 乐观锁的单元测试（并发扣减同仓互斥、两仓不阻塞）+ 幂等消费/落库的数据库层集成测试（UNIQUE 约束竞态兜底，真实 PG 验证）——证明的是"并发下**不出错**"，不是"并发下**不慢**"。
+- **吞吐量**：未做专项压测（JMeter/Gatling）。当前是单机演示形态，8 个 JVM 在 Mac mini M4 16GB 上冷启动峰值内存约 8-10GB，可稳定运行；性能数字依赖生产级硬件与真实流量，属于 P3-2（K8s）之后的议题。
+- Kafka 流水线目前的验收口径：功能链路（发→消费→预占→DLT→重放）端到端走通 + 幂等语义被数据库层测试钉死；**不是**吞吐基准。
+
+### 🟢 P3 — M7 生产化
+
 > **状态整理（2026-11-04）**：P3-1（CI/CD）、P3-4（JaCoCo 门禁）、P3-5（Testcontainers）已完成；Grafana 匿名访问已关闭（P0-3）。其余为未来计划——其中 **P3-2 / P3-3 属生产侧部署条件，当前不具备，明确暂缓**（暂不推进，条件具备时再启动）。
 
 - [x] **P3-1 CI/CD** ✅ GitHub Actions（仓库根 `.github/workflows/aslp-ci.yml`）：全模块构建 + 全量测试 + Testcontainers 真实 PG 集成测试，已有绿色运行记录
