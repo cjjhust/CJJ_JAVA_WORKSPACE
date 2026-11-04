@@ -49,7 +49,12 @@ jobs:
       # 密钥外置（Vault）与审计日志留存仍属 P3-6 未做部分（需生产侧设施）。
       - name: Dependency vulnerability scan (Trivy)
         run: |
-          docker run --rm -v "$PWD:/workdir" aquasec/trivy:latest \
+          # 同时挂载 runner 上已填充的 ~/.m2（Build & Test 步骤产出）：
+          # Trivy 解析 pom 依赖树时要查 Maven Central，无缓存会撞 429 限流（实测）
+          docker run --rm \
+            -v "$PWD:/workdir" \
+            -v "$HOME/.m2:/root/.m2" \
+            aquasec/trivy:latest \
             fs --scanners vuln --severity HIGH,CRITICAL \
             --exit-code 1 --ignore-unfixed /workdir
 
