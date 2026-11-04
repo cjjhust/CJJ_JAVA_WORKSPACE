@@ -78,6 +78,10 @@ class OrderPullServiceTest {
         }
     }
 
+    /** P2-3：空操作事件发布器——单测聚焦拉取/落库，不断言 Kafka。 */
+    private static final com.aslp.order.event.OrderEventPublisher NO_OP_PUBLISHER =
+            new com.aslp.order.event.OrderEventPublisher(null, false);
+
     private static final OrderPullResult MOCK_RESULT = new OrderPullResult(
             "Amazon-Mock",
             List.of(
@@ -95,7 +99,8 @@ class OrderPullServiceTest {
         // P1-1：传入内存注册表，便于断言指标真实递增
         service = new OrderPullService(
                 new PlatformPullGateway(new StubStrategy(MOCK_RESULT)),
-                new OrderPersistService(repository), repository, meterRegistry, observationRegistry);
+                new OrderPersistService(repository), repository, meterRegistry, observationRegistry,
+                NO_OP_PUBLISHER);
         // 默认：批量查存量命中空（全部为新订单）；需要「已存在」的用例单独覆盖
         lenient().when(repository.findByOrderIdIn(anyCollection())).thenReturn(List.of());
     }
@@ -148,7 +153,8 @@ class OrderPullServiceTest {
         OrderPullService failing = new OrderPullService(
                 new PlatformPullGateway(new StubStrategy(
                         new OrderPullResult("Amazon", List.of(), false, "401 Unauthorized"))),
-                new OrderPersistService(repository), repository, meterRegistry, observationRegistry);
+                new OrderPersistService(repository), repository, meterRegistry, observationRegistry,
+                NO_OP_PUBLISHER);
 
         OrderPullService.PullSummary summary = failing.pullAndPersist();
 
@@ -170,7 +176,8 @@ class OrderPullServiceTest {
         OrderPullService degradedService = new OrderPullService(
                 new PlatformPullGateway(new StubStrategy(OrderPullResult.degraded(
                         "Amazon-Mock", "平台调用失败已降级（CallNotPermittedException）"))),
-                new OrderPersistService(repository), repository, meterRegistry, observationRegistry);
+                new OrderPersistService(repository), repository, meterRegistry, observationRegistry,
+                NO_OP_PUBLISHER);
 
         OrderPullService.PullSummary summary = degradedService.pullAndPersist();
 
@@ -236,11 +243,13 @@ class OrderPullServiceTest {
     void degradedAndFailedOutcomesAreTaggedDifferently() {
         OrderPullService degradedService = new OrderPullService(
                 new PlatformPullGateway(new StubStrategy(OrderPullResult.degraded("Amazon", "熔断已打开"))),
-                new OrderPersistService(repository), repository, meterRegistry, observationRegistry);
+                new OrderPersistService(repository), repository, meterRegistry, observationRegistry,
+                NO_OP_PUBLISHER);
         OrderPullService failingService = new OrderPullService(
                 new PlatformPullGateway(new StubStrategy(
                         new OrderPullResult("Amazon", List.of(), false, "401 Unauthorized"))),
-                new OrderPersistService(repository), repository, meterRegistry, observationRegistry);
+                new OrderPersistService(repository), repository, meterRegistry, observationRegistry,
+                NO_OP_PUBLISHER);
 
         degradedService.pullAndPersist();
         failingService.pullAndPersist();
@@ -282,7 +291,7 @@ class OrderPullServiceTest {
         OrderPullService traced = new OrderPullService(
                 new PlatformPullGateway(new StubStrategy(MOCK_RESULT)),
                 new OrderPersistService(repository), repository,
-                new SimpleMeterRegistry(), capturing);
+                new SimpleMeterRegistry(), capturing, NO_OP_PUBLISHER);
 
         traced.pullAndPersist();
 

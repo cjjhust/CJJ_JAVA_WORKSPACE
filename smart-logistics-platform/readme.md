@@ -175,7 +175,7 @@ bash scripts/smoke-test.sh                      # 启 6 个服务 → 断言 →
 |---|---|
 | 单元测试 Unit tests / Unit-Tests | **256 全通过**（gateway 9 · order 89 · inventory 45 · route 94 · auth 5 · report 14） |
 | 端到端断言 E2E assertions / End-to-End-Assertions | **124/124**（含限流 429、熔断降级、契约失败分类、邮件解码、PDF 校验、追踪四类失败） |
-| 容器 Containers / Container | **18/18 healthy**（6 服务 + 11 基础设施；Kafka 为 KRaft 单节点，无 ZooKeeper） |
+| 容器 Containers / Container | **20/20 healthy**（8 Java 服务 = 6 业务 + 网关 + eureka/config 治理；12 基础设施；Kafka 为 KRaft 单节点，无 ZooKeeper） |
 | 重启不丢 Restart survival / Neustart-Überleben | 状态机（DB）与邮件节流窗口（Redis）**双双渡过容器重启** |
 | 缺陷复盘 Documented defects / Dokumentierte Fehler | **56 项**（含根因与修复，见 [`todo.md`](todo.md)） |
 | 外部真实契约 Real external contracts / Echte externe Verträge | 3 个：Amazon SP-API · MinIO · DHL/DPD（契约桩以**文件**版本化） |

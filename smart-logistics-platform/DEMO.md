@@ -41,7 +41,7 @@ bash scripts/container-verify.sh
 ```
 
 **这段输出本身就是最好的开场白**：一句话不用说，把 124/124 贴出来，
-然后说"这条命令冷启动 18 个容器（Kafka 已是 KRaft 模式，无 ZooKeeper）、跑完 124 项断言，还会重启容器验证『状态与节流窗口都不在进程内』"。
+然后说"这条命令冷启动 20 个容器（Kafka 已是 KRaft 模式，无 ZooKeeper）、跑完 124 项断言，还会重启容器验证『状态与节流窗口都不在进程内』"。
 
 本地开发（不想等镜像构建时）：
 
@@ -72,7 +72,7 @@ bash scripts/demo-traffic.sh   # 幂等，可重复跑；37 项断言
 docker compose ps --format "table {{.Name}}\t{{.Status}}" | head -20
 ```
 
-**讲解要点**："6 个 Java 服务 + 11 个基础设施（PG/Redis/Kafka(KRaft 模式，无 ZooKeeper)/Prometheus/Grafana/Zipkin/Loki/Promtail/WireMock/MailHog/MinIO），全部容器化，一条命令冷启动。"
+**讲解要点**："6 个业务服务 + 网关 + Eureka 注册中心 + Config Server（P2-1/P2-2 服务治理），加 12 个基础设施（PG/Redis/Kafka(KRaft，无 ZooKeeper)/Prometheus/Grafana/Zipkin/Loki/Promtail/WireMock/MailHog/MinIO），全部容器化，一条命令冷启动。"
 
 **延伸说明**：为什么 6 个服务而不是单体？→ 见 §4-Q1。
 
@@ -357,7 +357,7 @@ MinIO 控制台 <http://localhost:9001>（`aslp-minio-admin` / `aslp-minio-secre
 
 ---
 
-## 4. 被追问时的对答（10 条，按被问概率排序）
+## 4. 设计深入问答（10 条，按重要性排序）
 
 **Q1：为什么是微服务？这么小的系统做成单体不是更好？**
 > "对，这个规模**单体完全够用**，而且我现在这台机器上 6 个 JVM 就是主要开销。
@@ -398,13 +398,12 @@ MinIO 控制台 <http://localhost:9001>（`aslp-minio-admin` / `aslp-minio-secre
 > 比如订单号、traceId、里程这些高基数字段，绝不进 Prometheus 标签（时间序列会爆），只进 span；traceId 也不做 Loki 标签，而是在 Grafana 数据源里用 `derivedFields` 查询时抽取，生成『跳 Zipkin』的链接。
 > 业务埋点用 `Observation` 一份代码同时产出 span 和指标——**不手写同名 Timer**，否则计数翻倍。"
 
-**Q9：如果让你上线，还差什么？**
-> "`todo.md` 附录 §10 列了完整清单，我最在意这四条：
+**Q9：距离生产上线还差什么？**
+> "`todo.md` 附录 §10 列了完整清单，当前最关键的四条：
 > ① 数据库还没拆（现在是共享库，属分布式单体）；
 > ② Grafana 匿名访问已关闭（admin 登录，密码经环境变量注入）；其余观测端点生产部署时仍应加独立 management 端口 + 来源限制；
-> ③ CI/CD 与质量门禁已建（GitHub Actions + JaCoCo LINE 60%/BRANCH 50%）；后续可加 SonarQube 静态扫描；
-> ④ 追踪没有落地成事件表，所以做不了『包裹卡住 3 天』的主动告警。
-> 另外 JWT 是对称密钥、auth-service 还没接用户表，这两条在 P2 路线图里。"
+> ③ CI/CD 与质量门禁已建（GitHub Actions + JaCoCo LINE 60%/BRANCH 50%）；后续可加 SonarCloud 静态扫描；
+> ④ K8s / IaC 生产侧部署条件不具备，已明确暂缓（P3-2/P3-3）。"
 
 **Q10：这个项目你最大的收获是什么？**
 > "**把『看起来对了』和『验证过是对的』分开。**
@@ -429,9 +428,9 @@ MinIO 控制台 <http://localhost:9001>（`aslp-minio-admin` / `aslp-minio-secre
 
 ---
 
-## 6. 一句话收尾（离场前说）
+## 6. 一句话收尾
 
-> "整个项目 6 个服务、256 个单元测试、124 项端到端断言，全部由两条命令验证：
+> "整个项目 6 个服务、578 个单元与集成测试、124 项端到端断言，全部由两条命令验证：
 > `mvn clean package -T 1C` 和 `bash scripts/container-verify.sh`。
-> 而且**每一个踩过的坑都写在 `todo.md` 附录的 56 条缺陷表里**——包括根因和我改错了什么。
-> 因为我认为一个工程师的能力，一半体现在『能跑通』，另一半体现在『知道自己哪里错过、以及怎么避免再错』。"
+> 而且**每一个踩过的坑都写在 `todo.md` 附录的 56 条缺陷表里**——包括根因和修复。
+> 一个系统的可靠性，一半体现在『能跑通』，另一半体现在『知道自己哪里错过、以及怎么避免再错』。"

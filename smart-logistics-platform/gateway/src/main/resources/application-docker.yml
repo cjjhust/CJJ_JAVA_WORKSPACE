@@ -8,24 +8,21 @@ spring:
       port: 6379
   cloud:
     gateway:
-      # Bug 修复（1）：原 uri 为 lb://aslp_order_service:8081 —— lb:// 后必须跟服务名，
-      # 且本项目未部署注册中心；现改为容器网络内直连服务名 + 端口。
+      # P2-1：服务发现寻址（eureka-server 就绪后启用）。lb:// 后必须跟**服务名**（spring.application.name），
+      # 由 loadbalancer 从注册表解析实例 —— 实例扩容/换端口零配置变更。
       #
-      # Bug 修复（2）：主机名不得使用下划线（RFC 2396 的 hostname 只允许字母/数字/-/.）。
+      # 历史 Bug 备忘（仍适用）：主机名不得使用下划线（RFC 2396 的 hostname 只允许字母/数字/-/.）。
       # java.net.URI 会把含下划线的主机名当作 registry-based authority
-      #（getHost()==null、getPort()==-1），于是 Spring Cloud Gateway 的
-      # Route.AbstractBuilder.uri(URI) 会走进「http 且无显式端口」分支，对 URI 做
-      # UriComponentsBuilder.fromUri(...).port(80).build(true).toUri() 重建；authority
-      # 在此过程中丢失，最终生成非法字符串 "http:"，启动即抛：
+      #（getHost()==null、getPort()==-1），导致路由 URI 重建后生成非法串 "http:"，启动即抛：
       #   URISyntaxException: Expected scheme-specific part at index 5: http:
-      # 故此处统一使用 compose 中声明的连字符网络别名（aslp-xxx，见 docker-compose.yml 文件头）。
+      # compose 侧仍统一使用连字符网络别名（aslp-xxx，见 docker-compose.yml 文件头）。
       #
       # P1-2：限流采用**按需路由级**而非 default-filters 全局（原因见 RateLimitConfig 类注释）。
       routes:
         # P1-2：平台拉取接口单独收口（每用户 1 次/秒，burst 1），
         # 对应 M1「针对电商平台 API 的严格限流」。
         - id: order-pull-throttle
-          uri: http://aslp-order-service:8081
+          uri: lb://order-service
           order: -1
           predicates:
             - Path=/api/orders/pull
@@ -38,23 +35,23 @@ spring:
                 redis-rate-limiter.requestedTokens: 1
                 key-resolver: "#{@userKeyResolver}"
         - id: order-service
-          uri: http://aslp-order-service:8081
+          uri: lb://order-service
           predicates:
             - Path=/api/orders/**
         - id: inventory-service
-          uri: http://aslp-inventory-service:8082
+          uri: lb://inventory-service
           predicates:
             - Path=/api/inventory/**
         - id: route-service
-          uri: http://aslp-route-service:8083
+          uri: lb://route-service
           predicates:
             - Path=/api/routes/**,/api/route/**
         - id: report-service
-          uri: http://aslp-report-service:8085
+          uri: lb://report-service
           predicates:
             - Path=/api/reports/**
         - id: auth-service
-          uri: http://aslp-auth-service:8084
+          uri: lb://auth-service
           predicates:
             - Path=/api/auth/**
           filters:
@@ -65,6 +62,12 @@ spring:
                 redis-rate-limiter.burstCapacity: 20
                 redis-rate-limiter.requestedTokens: 1
                 key-resolver: "#{@ipKeyResolver}"
+
+# P2-1：注册中心客户端（容器内指向 eureka-server 服务名）
+eureka:
+  client:
+    service-url:
+      defaultZone: ${EUREKA_CLIENT_SERVICEURL_DEFAULTZONE:http://aslp-eureka-server:8761/eureka}
 server:
   port: 8080
 

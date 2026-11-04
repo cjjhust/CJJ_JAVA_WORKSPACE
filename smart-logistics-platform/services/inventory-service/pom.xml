@@ -41,6 +41,24 @@
             <groupId>org.springframework.boot</groupId>
             <artifactId>spring-boot-starter-actuator</artifactId>
         </dependency>
+        <!-- P2-1：服务注册（Eureka client）——启动时注册到 eureka-server，网关按服务名 lb:// 寻址 -->
+        <dependency>
+            <groupId>org.springframework.cloud</groupId>
+            <artifactId>spring-cloud-starter-netflix-eureka-client</artifactId>
+        </dependency>
+        <!-- P2-2：配置中心客户端——启动时从 config-server 拉取共享配置（optional：中心不在则用本地配置起跑） -->
+        <dependency>
+            <groupId>org.springframework.cloud</groupId>
+            <artifactId>spring-cloud-starter-config</artifactId>
+        </dependency>
+        <!--
+          P2-3：Kafka 消费者（order.sync 事件 → 幂等预占 → DLT 兜底）。
+          生产者侧在 order-service；KRaft 单节点 broker 见 compose。
+        -->
+        <dependency>
+            <groupId>org.springframework.kafka</groupId>
+            <artifactId>spring-kafka</artifactId>
+        </dependency>
         <dependency>
             <groupId>org.redisson</groupId>
             <artifactId>redisson-spring-boot-starter</artifactId>

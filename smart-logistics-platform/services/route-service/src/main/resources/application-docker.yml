@@ -2,6 +2,9 @@ server:
   port: 8083
 
 spring:
+  config:
+    # P2-2：接入配置中心（容器内指向服务名 aslp_config_server）
+    import: "optional:configserver:${ASLP_CONFIG_SERVER:http://aslp-config-server:8888}"
   # P1-6：追踪事件表持久化（与 order/inventory 同库，独立 Flyway 历史表）
   datasource:
     url: jdbc:postgresql://aslp_postgres:5432/aslp_route
@@ -55,3 +58,9 @@ management:
       exposure:
         # P1-1：docker profile 必须同步加上 prometheus（否则 include 会覆盖基础 profile）
         include: health,info,prometheus,metrics
+
+# P2-1：注册到 eureka-server（容器内指向服务名）
+eureka:
+  client:
+    service-url:
+      defaultZone: ${EUREKA_CLIENT_SERVICEURL_DEFAULTZONE:http://aslp-eureka-server:8761/eureka}

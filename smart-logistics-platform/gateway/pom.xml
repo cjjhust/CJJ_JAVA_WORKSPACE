@@ -24,9 +24,10 @@
             <groupId>org.springframework.cloud</groupId>
             <artifactId>spring-cloud-starter-gateway</artifactId>
         </dependency>
+        <!-- P2-1：服务发现客户端（eureka + loadbalancer），lb:// 路由经注册表解析实例 -->
         <dependency>
             <groupId>org.springframework.cloud</groupId>
-            <artifactId>spring-cloud-starter-loadbalancer</artifactId>
+            <artifactId>spring-cloud-starter-netflix-eureka-client</artifactId>
         </dependency>
         <!-- P1-2：限流需要 Redis 令牌桶（RequestRateLimiter -> RedisRateLimiter） -->
         <dependency>

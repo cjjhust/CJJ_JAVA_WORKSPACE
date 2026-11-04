@@ -1,0 +1,25 @@
+server:
+  port: 8761
+
+spring:
+  application:
+    name: eureka-server
+
+eureka:
+  client:
+    # 单节点：不注册自己、不拉注册表（见 EurekaServerApplication 类注释）
+    register-with-eureka: false
+    fetch-registry: false
+  server:
+    # 演示环境关闭自我保护：开发期频繁重启服务，保护模式会让已死实例挂在表里
+    # （生产多节点部署时必须重新打开，见类注释）
+    enable-self-preservation: false
+
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health,info,prometheus
+  metrics:
+    tags:
+      application: ${spring.application.name}

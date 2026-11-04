@@ -831,7 +831,7 @@ curl -s http://localhost:8080/api/orders/AMZ-1001/documents -H "Authorization: B
 
 **学习点（本次最值钱的部分）**：
 
-- **"Unknown data type" 这类方言错误是显式失败，反而是好事**；危险的是 auth/inventory 那种"恰好 H2 兼容"的假绿——测试在错误的数据库上通过，给你一种 Coverage 假象。集成测试要么跑真库，要么明说没跑，不要第三种状态。
+- **"Unknown data type" 这类方言错误是显式失败，反而是好事**；危险的是 auth/inventory 那种"恰好 H2 兼容"的假绿——测试在错误的数据库上通过，造成 Coverage 假象。集成测试要么跑真库，要么明说没跑，不要第三种状态。
 - **客户端-服务端 API 版本错配是 Docker 生态的慢性病**：docker-java 回落 1.32 是历史包袱，环境变量、testcontainers.properties、POM systemPropertyVariables 三条路都传播不进去，唯独 classpath 的 `docker-java.properties` 有效——因为它是**类加载期**读取，先于一切环境探测。
 - **测试参数顺序错误 + 全 String 构造器 = 编译器失明**。record 的具名访问器救得了读取救不了构造；要么用 builder，要么测试里用工厂方法给参数命名。
 - **事务边界理解**：`@DataJpaTest` 的事务包裹 + PG 的 aborted 语义 + `NOT_SUPPORTED` 传播的组合，是"同一个测试在 H2 绿、在 PG 红"的经典第三种来源（前两种是方言和约束时机）。
@@ -895,7 +895,7 @@ curl -s http://localhost:8080/api/orders/AMZ-1001/documents -H "Authorization: B
       **6a** 重启 order-service → 状态机仍 FBA_RELABELED（DB）；**6b** 重启 inventory-service →
       `force=false` 仍 `mailSkipped=true` 且 Redis TTL > 0（**内存实现重启后必然立刻发信**）
 
-**A3. 演示手册 `DEMO.md`（用户直接要的「教我怎么展示」）**
+**A3. 演示手册 `DEMO.md`（「怎么完整展示这个系统」的操作手册）**
 
 - [x] 8 站演示动线，每站配**可复制命令 + 讲解要点 + 期望输出**：系统全景 → 网关鉴权(401/200) →
       M1 订单流水线(幂等/异常打标/限流 429) → M2 防超卖(双状态/超量拒绝/邮件+节流) →
@@ -903,7 +903,7 @@ curl -s http://localhost:8080/api/orders/AMZ-1001/documents -H "Authorization: B
       M4 状态机+审计+**现场重启不丢** → M5 可观测性(Prometheus/Grafana/Zipkin/Loki/看板/单据PDF)
 - [x] **测试数据速查表**：订单号、库存种子（含低库存样板 `AMZ-9999`）、追踪单号↔桩场景映射、
       SP-API 桩开关、状态机事件序列、账号与全部端口
-- [x] **被追问的 10 条对答**（含「为什么不做单体」「为什么不全局限流」「单测全绿就够了吗」）
+- [x] **10 条设计深入问答**（含「为什么不做单体」「为什么不全局限流」「单测全绿就够了吗」）
 - [x] **现场排障速查**（磁盘满 / 容器反复重启 / 503 路由 / 401-403 误判 / 想全部重来）
 
 ### B. 本轮修复的缺陷
@@ -1804,15 +1804,15 @@ todo.md 的 M1/M5 里它也是被反复勾不掉的那一条。本轮把它做�
 
 ### 🟡 P2 — M6 服务治理
 
-> **状态整理（2026-11-04）**：P2-5 / P2-6 已提前完成（P0 安全硬化批次）；P2-8（KRaft）已完成；其余为**未来计划**，未做的真实原因逐条注明——不是"没来得及"，而是各有客观前置条件。
+> **状态整理（2026-11-04）**：P2-1 ~ P2-8 **全部完成**。P2-5/P2-6 随 P0 批次提前完成；P2-1（Eureka 注册中心）、P2-2（Config Server）、P2-3（Kafka 异步流水线）、P2-4（库存三态一致性）于本轮落地；P2-8（KRaft）先行完成。历史取舍记录保留于下方各条目（当时的判断依据，供对照）。
 
-- [ ] **P2-1 注册中心**：引入 Eureka 或 Nacos，网关路由回归 `lb://service-name`，移除硬编码容器名
+- [x] **P2-1 注册中心** ✅ **2026-11-04 完成**：新增 `eureka-server` 模块（:8761，单节点，演示态关自我保护）；5 个服务 + 网关接入 eureka-client；网关全部路由 `http://host:port` → **`lb://service-name`**（实例扩容/换端口零配置变更）
   - 未做原因：**当前形态不需要**。注册中心解决的是"服务实例动态上下线"问题；本项目单机 compose 部署，实例地址固定，`lb://` 无用武之地。真正的前置条件是**多实例部署/K8s**（见 P3-2）——上了 K8s 自带 Service 发现，届时连 Eureka 都可能不需要。结论：等部署形态升级时一并决策，现在引入属于为技术栈堆砌而堆砌。
-- [ ] **P2-2 配置中心**：Spring Cloud Config Server + Git 后端，抽离各服务 `application*.yml` 的环境差异
+- [x] **P2-2 配置中心** ✅ **2026-11-04 完成**：新增 `config-server` 模块（:8888，**native 后端**——`config-repo/` 随代码仓版本化，Git 后端列为升级路径）；5 个服务经 `spring.config.import=optional:configserver:` 接入（中心不在时以本地配置起跑，不阻塞启动）
   - 未做原因：**配置体量未到痛点**。全项目环境差异集中在 6 个 `application-docker.yml`（每文件 <30 行差异），compose 环境变量注入已覆盖。Config Server 的收益在"几十个服务实例 + 多环境 + 动态刷新"，当前规模引入只会增加一个需要维护的组件。前置条件：服务数或环境数翻倍。
-- [ ] **P2-3 Kafka 异步流水线**：订单拉取 → `order.sync` topic → 库存预占 → 支付确认扣减；配套死信队列 `order.sync.DLT` 与重放接口（防漏单）
+- [x] **P2-3 Kafka 异步流水线** ✅ **2026-11-04 完成**：order-service 发 `order.sync` 事件（key=orderId 保序，acks=all）；inventory-service 幂等消费（UNIQUE(order_id) 兜底，至少一次投递 + 幂等消费 = 有效恰好一次）；系统失败重试后落 **`order.sync.DLT`**（毒事件直达），`POST /api/inventory/reservations/dlt/replay` 重放接口防漏单
   - 未做原因：**功能上被更轻的方案覆盖**。当前订单→库存的联动由同步 HTTP + 状态机完成，规模下无性能瓶颈；异步化的真实收益（削峰、解耦、事件溯源）要到"多平台并发拉单 + 高并发下单"时才兑现。**基础设施已就绪**：Kafka 已迁移 KRaft 模式（见 P2-8），`order.sync` topic 已实证可建。前置条件：真实并发压力或新增多平台数据源。
-- [ ] **P2-4 库存最终一致性**：`可用库存 / 锁定库存 / 在途库存` 三态状态机 + 超时释放补偿任务
+- [x] **P2-4 库存最终一致性** ✅ **2026-11-04 完成**：`order_reservation` 预占记录表（RESERVED/RELEASED/COMMITTED 三态）；`ReservationReleaseTask` 周期扫描超时未提交预占并释放（锁定 → 可用），幂等状态机保证不双重释放；`POST /api/inventory/reservations/release-expired` 手动兜底
   - 未做原因：**依赖 P2-3 的事件驱动形态**。"在途库存"的业务语义（已通知补货、未入库）只有异步流水线跑起来才有事件可订阅；现有「可用/锁定」两态 + Redisson 锁 + 乐观锁已覆盖当前同步链路的一致性。前置条件：P2-3 落地。
 - [x] **P2-5 网关安全加固** ✅ **提前完成（P0 批次）**：JWT 由 HS384 对称密钥升级为 **RS256 + JWKS**——auth-service 暴露 `/api/auth/jwks.json` 公钥端点，网关经 JWKS 验签、不持有任何密钥；密钥轮换 = auth 侧换 kid，网关零改动。
 - [x] **P2-6 用户体系** ✅ **提前完成（P2-6 批次）**：`auth_user` 表（Flyway 版本化）+ BCrypt 哈希（含盐）+ 防用户枚举（登录失败不区分原因）+ 真实密码校验，替代了"按用户名前缀推导角色"的演示实现；种子账号契约由 Testcontainers 真实 PG 测试钉死。
@@ -1908,7 +1908,7 @@ todo.md 的 M1/M5 里它也是被反复勾不掉的那一条。本轮把它做�
 
 ### 技术亮点
 - [x] **状态机代码**：FBA 退货换标 / 一件代发 → 已实现为**纯 Java 状态机**（`SimpleOrderStateMachine`，8 状态 / 7 事件），**状态持久化在 DB**（`order_state` + `order_state_event`，P1-8：重启后状态仍在、事件轨迹可审计），未用 Spring StateMachine（`spring-statemachine-core:1.2.14` 在 Maven Central 不存在，见 §9 #5）
-- [x] **标准技术对答**：高并发下用 Redis 锁（Redisson）保证 Bruchsal + Mönchengladbach 两仓库存不冲突 → `InventoryLockService` 把锁粒度定为 `sku + warehouse`（两仓互不阻塞），并叠加 `@Version` 乐观锁
+- [x] **技术要点说明**：高并发下用 Redis 锁（Redisson）保证 Bruchsal + Mönchengladbach 两仓库存不冲突 → `InventoryLockService` 把锁粒度定为 `sku + warehouse`（两仓互不阻塞），并叠加 `@Version` 乐观锁
 
 ---
 

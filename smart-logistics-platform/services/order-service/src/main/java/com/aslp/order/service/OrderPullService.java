@@ -51,15 +51,18 @@ public class OrderPullService {
     private final OrderRepository repository;
     private final MeterRegistry meterRegistry;
     private final ObservationRegistry observationRegistry;
+    private final com.aslp.order.event.OrderEventPublisher eventPublisher;
 
     public OrderPullService(PlatformPullGateway platformPull, OrderPersistService persistService,
                             OrderRepository repository, MeterRegistry meterRegistry,
-                            ObservationRegistry observationRegistry) {
+                            ObservationRegistry observationRegistry,
+                            com.aslp.order.event.OrderEventPublisher eventPublisher) {
         this.platformPull = platformPull;
         this.persistService = persistService;
         this.repository = repository;
         this.meterRegistry = meterRegistry;
         this.observationRegistry = observationRegistry;
+        this.eventPublisher = eventPublisher;
     }
 
     /**
@@ -127,7 +130,11 @@ public class OrderPullService {
         }
 
         // P2-1：落库走独立 bean（@Transactional 生效）；幂等三层保障见 OrderPersistService
-        OrderPersistService.PersistCounts counts = persistService.persist(result);
+        OrderPersistService.PersistOutcome outcome = persistService.persist(result);
+        OrderPersistService.PersistCounts counts = outcome.counts();
+
+        // P2-3：本次新建的订单发 order.sync 事件（inventory 消费做预占）；发布失败不影响主链路
+        eventPublisher.publishCreated(result, outcome.createdDtos());
 
         log.info("[订单接入] 平台 {}：拉取 {} 条，新增 {}，更新 {}，异常打标 {}",
                 result.platform(), result.orders().size(),

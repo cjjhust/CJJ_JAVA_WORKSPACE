@@ -1,0 +1,17 @@
+# =============================================================================
+# P2-2 共享配置库 — 各服务公共覆盖项（native profile）
+#
+# 用途：所有服务在「本地开发」下的共享默认值。这里放**跨服务一致**的配置，
+# 每个服务私有的配置（端口、数据库名）仍留在各服务自己的 application*.yml。
+# 拉取端点：GET /{application}/{profile}/{label}（如 /order-service/local）。
+# =============================================================================
+
+# 可观测性：所有服务统一的采样与指标标签（覆盖各 yml 里的重复段）
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health,info,prometheus,metrics
+  metrics:
+    tags:
+      application: ${spring.application.name}

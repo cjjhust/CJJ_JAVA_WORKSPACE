@@ -10,8 +10,10 @@ import org.springframework.dao.DataIntegrityViolationException;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
+import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.LinkedHashMap;
+import java.util.List;
 import java.util.Map;
 import java.util.Optional;
 
@@ -42,7 +44,13 @@ public class OrderPersistService {
 
     private static final Logger log = LoggerFactory.getLogger(OrderPersistService.class);
 
-    /** 落库计数（供调用方打指标与回执）。 */
+    /** 落库结果：计数（供指标/回执）+ 本次新建的订单（P2-3 事件发布用）。 */
+    public record PersistOutcome(PersistCounts counts, java.util.List<OrderDto> createdDtos) {
+    }
+
+    /**
+     * 幂等落库计数（供调用方打指标与回执）。
+     */
     public record PersistCounts(int created, int updated, int flagged) {
     }
 
@@ -64,9 +72,11 @@ public class OrderPersistService {
      * 幂等落库一批订单（事务内）。
      *
      * @param result 拉取成功（{@code success=true}）的结果；失败结果不应进入本方法
+     * @return 落库计数 + 本次真正新建的订单（P2-3：事件发布只针对 created，
+     *         updated 表示库存侧早已见过该订单，重发是噪音）
      */
     @Transactional
-    public PersistCounts persist(OrderPullResult result) {
+    public PersistOutcome persist(OrderPullResult result) {
         // 1) 批内去重（保序）：分页重叠时同一 orderId 可能出现两次
         Map<String, OrderDto> deduped = new LinkedHashMap<>();
         for (OrderDto dto : result.orders()) {
@@ -84,6 +94,7 @@ public class OrderPersistService {
         int created = 0;
         int updated = 0;
         int flagged = 0;
+        List<OrderDto> createdDtos = new ArrayList<>();
 
         for (OrderDto dto : deduped.values()) {
             OrderRecord record = existing.get(dto.orderId());
@@ -101,6 +112,7 @@ public class OrderPersistService {
                     fresh.setErrorTag(dto.errorTag());
                     repository.save(fresh);
                     created++;
+                    createdDtos.add(dto);   // P2-3：只有真正新建的订单才进事件发布清单
                 } catch (DataIntegrityViolationException e) {
                     // 3) 并发竞态兜底：另一路拉取抢先插入了同一订单 —— 转更新而不是让整批失败
                     log.info("[订单接入] {} 并发插入冲突（UNIQUE(order_id)），转为更新", dto.orderId());
@@ -120,7 +132,7 @@ public class OrderPersistService {
             }
         }
 
-        return new PersistCounts(created, updated, flagged);
+        return new PersistOutcome(new PersistCounts(created, updated, flagged), createdDtos);
     }
 
     /** 仓库编码归一化（{@link OrderPullService#correctOrder} 复用同一口径）。 */

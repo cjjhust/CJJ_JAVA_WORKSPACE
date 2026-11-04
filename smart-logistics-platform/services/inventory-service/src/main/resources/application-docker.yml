@@ -2,8 +2,21 @@ server:
   port: 8082
 
 spring:
+  config:
+    # P2-2：接入配置中心（容器内指向服务名 aslp_config_server）
+    import: "optional:configserver:${ASLP_CONFIG_SERVER:http://aslp-config-server:8888}"
   application:
     name: inventory-service
+  # P2-3：Kafka 消费者（容器内指向 KRaft broker 服务名 aslp_kafka）
+  kafka:
+    bootstrap-servers: ${ASLP_KAFKA_BOOTSTRAP:aslp_kafka:9092}
+    consumer:
+      key-deserializer: org.apache.kafka.common.serialization.StringDeserializer
+      value-deserializer: org.apache.kafka.common.serialization.StringDeserializer
+      group-id: inventory-service
+      auto-offset-reset: earliest
+    listener:
+      ack-mode: record
   # Bug 修复：原 redisson.singleServerConfig.* 不会被 redisson-spring-boot-starter 绑定
   #（该 starter 仅通过 @EnableConfigurationProperties 绑定 spring.data.redis.*
   #  与 spring.redis.redisson.{config,file}），属性被静默忽略后回落默认值 localhost:6379。
@@ -90,3 +103,9 @@ aslp:
       check-interval-ms: 60000
       # 邮件节流：扫描 60s 一次，但最多 30 分钟发一封（避免邮件轰炸）
       mail-interval: 30m
+
+# P2-1：注册到 eureka-server（容器内指向服务名）
+eureka:
+  client:
+    service-url:
+      defaultZone: ${EUREKA_CLIENT_SERVICEURL_DEFAULTZONE:http://aslp-eureka-server:8761/eureka}

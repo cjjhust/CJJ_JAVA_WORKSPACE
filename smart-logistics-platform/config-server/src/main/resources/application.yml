@@ -1,0 +1,24 @@
+server:
+  port: 8888
+
+spring:
+  application:
+    name: config-server
+  cloud:
+    config:
+      server:
+        # P2-2：native 后端 —— 配置库在 classpath:config-repo（随代码仓版本化）。
+        # 升级为 Git 后端时改 profile=git + spring.cloud.config.server.git.uri。
+        native:
+          search-locations: classpath:config-repo
+  profiles:
+    active: native
+
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health,info,prometheus
+  metrics:
+    tags:
+      application: ${spring.application.name}

@@ -1,6 +1,12 @@
 spring:
   application:
     name: aslp-monolith
+  config:
+    # P2-2：单体合并了 5 个服务模块，eureka/config 客户端随之进入 classpath
+    #（spring-cloud-starter-config 在 classpath 上时，Boot 要求显式声明 spring.config.import，
+    # 否则 ConfigDataMissingEnvironmentPostProcessor 直接拒绝启动）。
+    # optional：config-server 未启动时以本地配置起跑（单体形态本就自含全部配置）。
+    import: "optional:configserver:${ASLP_CONFIG_SERVER:http://localhost:8888}"
   # ── 单体模式默认激活 monolith profile（LocalXxxSource 装配、HTTP 客户端不装配）──
   profiles:
     default: monolith

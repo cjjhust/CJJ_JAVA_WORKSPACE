@@ -1,6 +1,19 @@
 spring:
+  config:
+    # P2-2：接入配置中心（容器内指向服务名 aslp_config_server）
+    import: "optional:configserver:${ASLP_CONFIG_SERVER:http://aslp-config-server:8888}"
   application:
     name: order-service
+  # P2-3：Kafka 生产者（容器内指向 KRaft broker 服务名 aslp_kafka）
+  kafka:
+    bootstrap-servers: ${ASLP_KAFKA_BOOTSTRAP:aslp_kafka:9092}
+    producer:
+      key-serializer: org.apache.kafka.common.serialization.StringSerializer
+      value-serializer: org.apache.kafka.common.serialization.StringSerializer
+      acks: all
+      retries: 3
+    template:
+      observation-enabled: true
   datasource:
     url: jdbc:postgresql://aslp_postgres:5432/aslp_order
     username: aslp
@@ -141,3 +154,9 @@ aslp:
     timeout-seconds: 600
     retention: 7
     enabled: true
+
+# P2-1：注册到 eureka-server（容器内指向服务名）
+eureka:
+  client:
+    service-url:
+      defaultZone: ${EUREKA_CLIENT_SERVICEURL_DEFAULTZONE:http://aslp-eureka-server:8761/eureka}

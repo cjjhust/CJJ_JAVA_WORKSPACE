@@ -22,6 +22,8 @@
 
     <modules>
         <module>gateway</module>
+        <module>eureka-server</module>
+        <module>config-server</module>
         <module>services/auth-service</module>
         <module>services/inventory-service</module>
         <module>services/order-service</module>

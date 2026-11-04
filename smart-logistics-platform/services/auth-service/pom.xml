@@ -33,6 +33,16 @@
             <groupId>org.springframework.boot</groupId>
             <artifactId>spring-boot-starter-actuator</artifactId>
         </dependency>
+        <!-- P2-1：服务注册（Eureka client）——启动时注册到 eureka-server，网关按服务名 lb:// 寻址 -->
+        <dependency>
+            <groupId>org.springframework.cloud</groupId>
+            <artifactId>spring-cloud-starter-netflix-eureka-client</artifactId>
+        </dependency>
+        <!-- P2-2：配置中心客户端——启动时从 config-server 拉取共享配置（optional：中心不在则用本地配置起跑） -->
+        <dependency>
+            <groupId>org.springframework.cloud</groupId>
+            <artifactId>spring-cloud-starter-config</artifactId>
+        </dependency>
         <!--
           P2-6：真实用户存储（替代「按用户名前缀推导角色」的演示实现）。
           与 order/inventory 共用同一 PostgreSQL，Flyway 独立历史表（flyway_schema_history_auth）。

@@ -126,7 +126,8 @@ class OrderRepositoryIntegrationTest {
         entityManager.flush();
         entityManager.clear();
 
-        OrderPersistService.PersistCounts counts = persistService.persist(resultWith("AMZ-1", "AMZ-2"));
+        OrderPersistService.PersistOutcome outcome = persistService.persist(resultWith("AMZ-1", "AMZ-2"));
+        OrderPersistService.PersistCounts counts = outcome.counts();
 
         assertEquals(1, counts.created(), "AMZ-2 是新订单");
         assertEquals(1, counts.updated(), "AMZ-1 已存在 → 更新而不是新增");
@@ -146,7 +147,8 @@ class OrderRepositoryIntegrationTest {
         // persist 的 IN 查询会看到抢先者 → 走更新分支（这是「正常」路径）。
         // 真正的竞态（IN 查询与 insert 之间被插队）由上面的 uniqueConstraintIsEnforcedByDatabase
         // 保证：即使 In 查询漏看，insert 也会被数据库拒绝并转为更新（见 OrderPersistService 的 catch）。
-        OrderPersistService.PersistCounts counts = persistService.persist(resultWith("AMZ-1"));
+        OrderPersistService.PersistOutcome outcome = persistService.persist(resultWith("AMZ-1"));
+        OrderPersistService.PersistCounts counts = outcome.counts();
         assertEquals(0, counts.created());
         assertEquals(1, counts.updated());
         assertEquals(1, repository.count(), "任何路径都不允许产生第二行");

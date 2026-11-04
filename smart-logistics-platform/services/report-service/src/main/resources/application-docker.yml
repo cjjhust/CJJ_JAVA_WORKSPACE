@@ -2,6 +2,9 @@ server:
   port: 8085
 
 spring:
+  config:
+    # P2-2：接入配置中心（容器内指向服务名 aslp_config_server）
+    import: "optional:configserver:${ASLP_CONFIG_SERVER:http://aslp-config-server:8888}"
   application:
     name: report-service
 
@@ -35,3 +38,9 @@ management:
       exposure:
         # P1-1：docker profile 必须同步加上 prometheus（否则 include 会覆盖基础 profile）
         include: health,info,prometheus,metrics
+
+# P2-1：注册到 eureka-server（容器内指向服务名）
+eureka:
+  client:
+    service-url:
+      defaultZone: ${EUREKA_CLIENT_SERVICEURL_DEFAULTZONE:http://aslp-eureka-server:8761/eureka}

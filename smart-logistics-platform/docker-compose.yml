@@ -161,6 +161,58 @@ services:
 
   # ---------------------------- Java 微服务 ----------------------------
   # 入口网关 + BFF（WebFlux）。统一使用根 Dockerfile，按 MODULE 构建。
+  # ---------------------------- 服务治理（P2-1 / P2-2） ----------------------------
+  # 注册中心：各服务启动时注册，网关按服务名 lb:// 寻址（实例扩容/换端口零配置变更）
+  aslp_eureka_server:
+    <<: *java-service
+    build:
+      context: .
+      dockerfile: Dockerfile
+      args:
+        MODULE: eureka-server
+    image: aslp/eureka-server:1.0.0
+    container_name: aslp_eureka_server
+    environment:
+      SPRING_PROFILES_ACTIVE: docker
+      SERVER_PORT: 8761
+    ports:
+      - "8761:8761"
+    # RFC 2396：连字符别名（下划线主机名会让 java.net.URI 解析失败，见文件头说明）
+    networks:
+      aslp_net:
+        aliases:
+          - aslp-eureka-server
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fsS http://localhost:8761/actuator/health || exit 1"]
+      interval: 15s
+      timeout: 5s
+      retries: 10
+
+  # 配置中心：native 后端（classpath:config-repo 随代码仓版本化），各服务 optional 接入
+  aslp_config_server:
+    <<: *java-service
+    build:
+      context: .
+      dockerfile: Dockerfile
+      args:
+        MODULE: config-server
+    image: aslp/config-server:1.0.0
+    container_name: aslp_config_server
+    environment:
+      SPRING_PROFILES_ACTIVE: docker
+      SERVER_PORT: 8888
+    ports:
+      - "8888:8888"
+    networks:
+      aslp_net:
+        aliases:
+          - aslp-config-server
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fsS http://localhost:8888/actuator/health || exit 1"]
+      interval: 15s
+      timeout: 5s
+      retries: 10
+
   aslp_gateway:
     <<: *java-service
     build:

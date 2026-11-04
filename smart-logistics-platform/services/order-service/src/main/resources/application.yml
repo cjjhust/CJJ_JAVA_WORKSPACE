@@ -1,6 +1,19 @@
 spring:
+  config:
+    # P2-2：接入配置中心（optional：config-server 未启动时以本地配置起跑，不阻塞启动）
+    import: "optional:configserver:${ASLP_CONFIG_SERVER:http://localhost:8888}"
   application:
     name: order-service
+  # P2-3：Kafka 生产者（order.sync 事件 → inventory 预占）。KRaft 单节点 broker 见 compose。
+  kafka:
+    bootstrap-servers: ${ASLP_KAFKA_BOOTSTRAP:localhost:9092}
+    producer:
+      key-serializer: org.apache.kafka.common.serialization.StringSerializer
+      value-serializer: org.apache.kafka.common.serialization.StringSerializer
+      acks: all            # 预占事件不允许静默丢失；leader + ISR 确认
+      retries: 3
+    template:
+      observation-enabled: true   # 事件发送进 trace（Zipkin 可见跨服务链路）
   # P0-1：订单统一网关持久化（与 inventory-service 使用同一套凭据，避免配置分叉）
   datasource:
     url: jdbc:postgresql://localhost:5432/aslp
@@ -143,3 +156,9 @@ aslp:
     declared-value-eur: "29.90"
     hs-code: "9503.00.99"
     currency: EUR
+
+# P2-1：注册到 eureka-server（本地开发指向 localhost）
+eureka:
+  client:
+    service-url:
+      defaultZone: ${EUREKA_CLIENT_SERVICEURL_DEFAULTZONE:http://localhost:8761/eureka}

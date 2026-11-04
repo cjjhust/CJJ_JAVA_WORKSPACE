@@ -1,0 +1,26 @@
+# =============================================================================
+# P2-2 共享配置库 — docker profile 公共覆盖项
+#
+# 覆盖各服务 application-docker.yml 中**完全相同**的段落（Zipkin 端点、
+# Eureka 地址、Kafka 地址）。各服务私有项（数据库 URL、端口）不动。
+# =============================================================================
+
+# P1-3：链路追踪（所有服务同一 Zipkin 端点）
+management:
+  tracing:
+    sampling:
+      probability: 1.0
+  zipkin:
+    tracing:
+      endpoint: ${ASLP_ZIPKIN_ENDPOINT:http://aslp-zipkin:9411/api/v2/spans}
+
+# P2-1：注册中心地址（所有服务同一 Eureka）
+eureka:
+  client:
+    service-url:
+      defaultZone: ${EUREKA_CLIENT_SERVICEURL_DEFAULTZONE:http://aslp-eureka-server:8761/eureka}
+
+# P2-3：Kafka 地址（order 生产者 / inventory 消费者同一 broker）
+spring:
+  kafka:
+    bootstrap-servers: ${ASLP_KAFKA_BOOTSTRAP:http://aslp_kafka:9092}

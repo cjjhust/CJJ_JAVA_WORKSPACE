@@ -2,8 +2,22 @@ server:
   port: 8082
 
 spring:
+  config:
+    # P2-2：接入配置中心（optional：config-server 未启动时以本地配置起跑，不阻塞启动）
+    import: "optional:configserver:${ASLP_CONFIG_SERVER:http://localhost:8888}"
   application:
     name: inventory-service
+  # P2-3：Kafka 消费者（order.sync → 幂等预占）。KRaft 单节点 broker 见 compose。
+  kafka:
+    bootstrap-servers: ${ASLP_KAFKA_BOOTSTRAP:localhost:9092}
+    consumer:
+      key-deserializer: org.apache.kafka.common.serialization.StringDeserializer
+      value-deserializer: org.apache.kafka.common.serialization.StringDeserializer
+      group-id: inventory-service
+      auto-offset-reset: earliest   # 首次上线也能消费到历史事件（幂等预占保证重复无害）
+      ack-mode: record
+      # P2-3：消费重试 + DLT 由 KafkaErrorConfig 装配 DefaultErrorHandler；
+      # 参数见下方 aslp.kafka.dlt.*（max-attempts / backoff-ms）
   # Bug 修复：原 redisson.singleServerConfig.* 不会被 redisson-spring-boot-starter 绑定
   #（该 starter 仅绑定 spring.data.redis.* 与 spring.redis.redisson.{config,file}），
   # 属性被静默忽略后回落默认值 localhost:6379；本地因端口映射"碰巧"可用，
@@ -86,3 +100,9 @@ aslp:
       # 巡检周期：毫秒数（@Scheduled 的 String 形式不认 60s 简写，见 §9 #44）
       check-interval-ms: 60000
       mail-interval: 30m
+
+# P2-1：注册到 eureka-server（本地开发指向 localhost）
+eureka:
+  client:
+    service-url:
+      defaultZone: ${EUREKA_CLIENT_SERVICEURL_DEFAULTZONE:http://localhost:8761/eureka}
