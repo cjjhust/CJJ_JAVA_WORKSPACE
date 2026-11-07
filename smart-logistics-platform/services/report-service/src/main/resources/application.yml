@@ -13,6 +13,7 @@ aslp:
   report:
     order-base-url: http://localhost:8081
     inventory-base-url: http://localhost:8082
+    route-base-url: http://localhost:8083
     # 超时必须显式给上限：看板是"随时会被点开"的接口，默认无限读超时会被一个卡住的上游
     # 占满线程池 —— 那比"降级显示部分数据"糟糕得多。
     connect-timeout: 2s

@@ -24,6 +24,9 @@ public class ReportProperties {
     /** 库存服务基地址（提供 /api/inventory/warnings/status）。 */
     private String inventoryBaseUrl = "http://localhost:8082";
 
+    /** 路线服务基地址（提供 /api/routes/optimize，M3 路线可视化数据源）。 */
+    private String routeBaseUrl = "http://localhost:8083";
+
     /** 建连超时（下游没在监听时必须快速失败，而不是让报表页面转圈）。 */
     private Duration connectTimeout = Duration.ofSeconds(2);
 
@@ -47,6 +50,14 @@ public class ReportProperties {
 
     public void setInventoryBaseUrl(String inventoryBaseUrl) {
         this.inventoryBaseUrl = inventoryBaseUrl;
+    }
+
+    public String getRouteBaseUrl() {
+        return routeBaseUrl;
+    }
+
+    public void setRouteBaseUrl(String routeBaseUrl) {
+        this.routeBaseUrl = routeBaseUrl;
     }
 
     public Duration getConnectTimeout() {

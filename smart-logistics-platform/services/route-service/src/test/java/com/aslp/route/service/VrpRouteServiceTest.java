@@ -88,6 +88,7 @@ class VrpRouteServiceTest {
                 List.of(new OptimizeRequest.VehicleSpec("V-01", 10.0)),
                 List.of(new OptimizeRequest.DeliverySpec("D-1", "Karlsruhe", KARLSRUHE_LAT, KARLSRUHE_LON, 2.0)),
                 null,
+                null,
                 null));
 
         VrpPlan plan = service.solve(spec.problem(), spec.maxIterations());
@@ -117,6 +118,7 @@ class VrpRouteServiceTest {
                 new OptimizeRequest.Point("Bruchsal-总仓", DEPOT_LAT, DEPOT_LON),
                 List.of(new OptimizeRequest.VehicleSpec("V-01", 1.0)),
                 List.of(new OptimizeRequest.DeliverySpec("D-BIG", "Karlsruhe", KARLSRUHE_LAT, KARLSRUHE_LON, 50.0)),
+                null,
                 null,
                 null));
 
@@ -224,6 +226,7 @@ class VrpRouteServiceTest {
                 List.of(new OptimizeRequest.VehicleSpec("V-01", 1.0)),
                 List.of(new OptimizeRequest.DeliverySpec("D-BIG", "Karlsruhe", KARLSRUHE_LAT, KARLSRUHE_LON, 50.0)),
                 null,
+                null,
                 null));
 
         VrpPlan plan = service.solve(spec.problem(), spec.maxIterations());
@@ -282,6 +285,7 @@ class VrpRouteServiceTest {
                 List.of(new OptimizeRequest.DeliverySpec("Z-LAST", "Karlsruhe", KARLSRUHE_LAT, KARLSRUHE_LON, 9.0),
                         new OptimizeRequest.DeliverySpec("A-FIRST", "Bruchsal", 49.11, 8.60, 9.0)),
                 null,
+                null,
                 null));
 
         VrpPlan plan = service.solve(spec.problem(), spec.maxIterations());
@@ -319,5 +323,40 @@ class VrpRouteServiceTest {
                 .addVehicle(vehicle)
                 .addJob(job)
                 .build();
+    }
+
+    @Test
+    @DisplayName("PDP 仓库互调：shipment 先 pickup 后 delivery（jsprit 配对约束），回执带 kind 标记")
+    void shipmentPickupBeforeDelivery() {
+        // Mönchengladbach → Bruchsal 互调 5 件：车从 Bruchsal 出发，先去 MG 装货再回 Bruchsal 卸货
+        VrpProblemFactory.Spec spec = FACTORY.fromRequest(new OptimizeRequest(
+                new OptimizeRequest.Point("Bruchsal-总仓", DEPOT_LAT, DEPOT_LON),
+                List.of(new OptimizeRequest.VehicleSpec("V-01", 10.0)),
+                null,
+                List.of(new OptimizeRequest.ShipmentSpec("S-1", "MG→Bruchsal 互调",
+                        51.1805, 6.4428, DEPOT_LAT, DEPOT_LON, 5.0)),
+                null,
+                null));
+
+        VrpPlan plan = service.solve(spec.problem(), spec.maxIterations());
+
+        assertTrue(plan.feasible(), "互调 5 件 < 容量 10，应有可行解");
+        assertEquals(1, plan.routes().size());
+        List<VrpPlan.Stop> stops = plan.routes().get(0).stops();
+        assertEquals(2, stops.size(), "一次 shipment 产生 pickup + delivery 两个停靠点");
+
+        VrpPlan.Stop pickup = stops.get(0);
+        VrpPlan.Stop delivery = stops.get(1);
+        assertEquals("pickup", pickup.kind(), "第一个停靠点必须是装货");
+        assertEquals("delivery", delivery.kind(), "第二个停靠点必须是卸货");
+        assertEquals("S-1", pickup.jobId());
+        assertEquals("S-1", delivery.jobId(), "pickup/delivery 属于同一作业，jobId 一致");
+        // jsprit 约定：shipment 的 pickup/delivery 活动尺寸均为负值（绝对值 = 调拨量）
+        assertEquals(5.0, Math.abs(pickup.demand()), 1e-9);
+        assertEquals(5.0, Math.abs(delivery.demand()), 1e-9);
+        assertTrue(pickup.arrivalHours() < delivery.arrivalHours(), "装货必须先于卸货");
+        // 闭环：MG 单程 ~288 km，来回 ~576 km
+        assertTrue(plan.totalDistanceKm() > 500 && plan.totalDistanceKm() < 650,
+                "互调路线应约 576 km（Bruchsal↔Mönchengladbach 往返），实际: " + plan.totalDistanceKm());
     }
 }

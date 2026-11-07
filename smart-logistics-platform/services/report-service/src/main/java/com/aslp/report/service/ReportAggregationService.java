@@ -5,11 +5,14 @@ import com.aslp.report.client.InventoryWarningSource;
 import com.aslp.report.client.OrderStatsClient;
 import com.aslp.report.client.OrderStatsSource;
 import com.aslp.report.client.ReportSourceUnavailableException;
+import com.aslp.report.client.VrpPlanSource;
+import com.aslp.report.dto.VrpPlanSnapshot;
 import com.aslp.report.config.ReportProperties;
 import com.aslp.report.dto.DashboardReport;
 import com.aslp.report.dto.DashboardReport.ChartData;
 import com.aslp.report.dto.DashboardReport.InventoryBlock;
 import com.aslp.report.dto.DashboardReport.OrdersBlock;
+import com.aslp.report.dto.DashboardReport.VrpBlock;
 import com.aslp.report.dto.InventoryWarningSnapshot;
 import com.aslp.report.dto.OrderStatsSnapshot;
 import io.micrometer.observation.Observation;
@@ -55,15 +58,18 @@ public class ReportAggregationService {
 
     private final OrderStatsSource orderStatsSource;
     private final InventoryWarningSource inventoryWarningSource;
+    private final VrpPlanSource vrpPlanSource;
     private final ObservationRegistry observationRegistry;
     private final ReportProperties props;
 
     public ReportAggregationService(OrderStatsSource orderStatsSource,
                                     InventoryWarningSource inventoryWarningSource,
+                                    VrpPlanSource vrpPlanSource,
                                     ObservationRegistry observationRegistry,
                                     ReportProperties props) {
         this.orderStatsSource = orderStatsSource;
         this.inventoryWarningSource = inventoryWarningSource;
+        this.vrpPlanSource = vrpPlanSource;
         this.observationRegistry = observationRegistry;
         this.props = props;
     }
@@ -76,6 +82,7 @@ public class ReportAggregationService {
             List<String> unavailable = new ArrayList<>();
             OrdersBlock orders = fetchOrders(unavailable);
             InventoryBlock inventory = fetchInventory(unavailable);
+            VrpBlock vrp = fetchVrp(unavailable);
 
             boolean degraded = !unavailable.isEmpty();
             observation.lowCardinalityKeyValue("degraded", String.valueOf(degraded));
@@ -89,7 +96,8 @@ public class ReportAggregationService {
                     degraded,
                     List.copyOf(unavailable),
                     orders,
-                    inventory);
+                    inventory,
+                    vrp);
         }
     }
 
@@ -160,6 +168,20 @@ public class ReportAggregationService {
             InventoryWarningSnapshot empty = InventoryWarningSnapshot.unavailable();
             return new InventoryBlock(false, empty.threshold(), 0,
                     empty.secondsUntilMailAllowed(), empty.lowStock(), ChartData.of(java.util.Map.of()));
+        }
+    }
+
+    /** VRP 路线区块（M3 可视化）：透传求解回执；route-service 不可用才降级，feasible=false 不算故障。 */
+    private VrpBlock fetchVrp(List<String> unavailable) {
+        try {
+            VrpPlanSnapshot plan = vrpPlanSource.fetch();
+            return new VrpBlock(true, plan.feasible(), plan.message(), plan.totalDistanceKm(),
+                    plan.totalLoad(), plan.routeCount(), plan.stopCount(),
+                    plan.unassignedJobIds(), plan.elapsedMs(), plan.routes());
+        } catch (ReportSourceUnavailableException e) {
+            log.warn("VRP 路线不可用，看板降级：{}", e.getMessage(), e);
+            unavailable.add(e.getSource());
+            return new VrpBlock(false, false, e.getMessage(), 0, 0, 0, 0, List.of(), 0, List.of());
         }
     }
 

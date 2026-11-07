@@ -44,6 +44,7 @@ class VrpProblemFactoryTest {
                 new OptimizeRequest.Point("Bruchsal-总仓", 49.1243, 8.5987),
                 List.of(new OptimizeRequest.VehicleSpec("V-01", 30.0)),
                 List.of(new OptimizeRequest.DeliverySpec("D-1", "Karlsruhe", 49.0069, 8.4037, 2.0)),
+                null,
                 90.0,
                 500));
 
@@ -65,6 +66,7 @@ class VrpProblemFactoryTest {
                 List.of(new OptimizeRequest.VehicleSpec("  ", 10.0),
                         new OptimizeRequest.VehicleSpec(null, 10.0)),
                 List.of(new OptimizeRequest.DeliverySpec("D-1", null, 49.0069, 8.4037, 1.0)),
+                null,
                 null,
                 null));
 
@@ -105,7 +107,7 @@ class VrpProblemFactoryTest {
         assertMessageContains("vehicles[0].capacity 必填",
                 () -> factory.fromRequest(new OptimizeRequest(D("B", 49.1243, 8.5987),
                         List.of(new OptimizeRequest.VehicleSpec("V-01", null)),
-                        oneDelivery(D("D-1", 49.0, 8.4, 1.0)), null, null)));
+                        oneDelivery(D("D-1", 49.0, 8.4, 1.0)), null, null, null)));
 
         assertMessageContains("vehicles[0].capacity 必须是正整数",
                 () -> factory.fromRequest(request(D("B", 49.1243, 8.5987), 0.0, oneDelivery(D("D-1", 49.0, 8.4, 1.0)))));
@@ -140,12 +142,12 @@ class VrpProblemFactoryTest {
                 () -> factory.fromRequest(new OptimizeRequest(D("B", 49.1243, 8.5987),
                         List.of(new OptimizeRequest.VehicleSpec("V-01", 10.0),
                                 new OptimizeRequest.VehicleSpec("V-01", 10.0)),
-                        oneDelivery(D("D-1", 49.0, 8.4, 1.0)), null, null)));
+                        oneDelivery(D("D-1", 49.0, 8.4, 1.0)), null, null, null)));
 
         assertMessageContains("作业 id 重复：D-1",
                 () -> factory.fromRequest(new OptimizeRequest(D("B", 49.1243, 8.5987),
                         List.of(new OptimizeRequest.VehicleSpec("V-01", 10.0)),
-                        List.of(D("D-1", 49.0, 8.4, 1.0), D("D-1", 49.1, 8.5, 1.0)), null, null)));
+                        List.of(D("D-1", 49.0, 8.4, 1.0), D("D-1", 49.1, 8.5, 1.0)), null, null, null)));
     }
 
     @Test
@@ -153,11 +155,11 @@ class VrpProblemFactoryTest {
     void rejectsEmptyCollections() {
         assertMessageContains("vehicles 至少需要 1 辆车",
                 () -> factory.fromRequest(new OptimizeRequest(D("B", 49.1243, 8.5987), List.of(),
-                        oneDelivery(D("D-1", 49.0, 8.4, 1.0)), null, null)));
+                        oneDelivery(D("D-1", 49.0, 8.4, 1.0)), null, null, null)));
 
-        assertMessageContains("deliveries 至少需要 1 个配送作业",
+        assertMessageContains("deliveries / shipments 至少需要 1 个作业",
                 () -> factory.fromRequest(new OptimizeRequest(D("B", 49.1243, 8.5987),
-                        List.of(new OptimizeRequest.VehicleSpec("V-01", 10.0)), List.of(), null, null)));
+                        List.of(new OptimizeRequest.VehicleSpec("V-01", 10.0)), List.of(), null, null, null)));
     }
 
     @Test
@@ -166,17 +168,17 @@ class VrpProblemFactoryTest {
         assertMessageContains("maxIterations 必须在 100 ~ 5000",
                 () -> factory.fromRequest(new OptimizeRequest(D("B", 49.1243, 8.5987),
                         List.of(new OptimizeRequest.VehicleSpec("V-01", 10.0)),
-                        oneDelivery(D("D-1", 49.0, 8.4, 1.0)), null, 50)));
+                        oneDelivery(D("D-1", 49.0, 8.4, 1.0)), null, null, 50)));
 
         assertMessageContains("maxIterations 必须在 100 ~ 5000",
                 () -> factory.fromRequest(new OptimizeRequest(D("B", 49.1243, 8.5987),
                         List.of(new OptimizeRequest.VehicleSpec("V-01", 10.0)),
-                        oneDelivery(D("D-1", 49.0, 8.4, 1.0)), null, 99999)));
+                        oneDelivery(D("D-1", 49.0, 8.4, 1.0)), null, null, 99999)));
 
         assertMessageContains("speedKmh 必须在 0 ~ 130",
                 () -> factory.fromRequest(new OptimizeRequest(D("B", 49.1243, 8.5987),
                         List.of(new OptimizeRequest.VehicleSpec("V-01", 10.0)),
-                        oneDelivery(D("D-1", 49.0, 8.4, 1.0)), 300.0, null)));
+                        oneDelivery(D("D-1", 49.0, 8.4, 1.0)), null, 300.0, null)));
     }
 
     @Test
@@ -184,7 +186,7 @@ class VrpProblemFactoryTest {
     void reportsAllErrorsAtOnce() {
         IllegalArgumentException ex = assertThrows(IllegalArgumentException.class,
                 () -> factory.fromRequest(new OptimizeRequest(null, List.of(),
-                        List.of(D("D-1", 999.0, 8.4, 1.0)), null, null)));
+                        List.of(D("D-1", 999.0, 8.4, 1.0)), null, null, null)));
 
         assertTrue(ex.getMessage().contains("depot 必填"), ex.getMessage());
         assertTrue(ex.getMessage().contains("vehicles 至少需要 1 辆车"), ex.getMessage());
@@ -196,7 +198,7 @@ class VrpProblemFactoryTest {
     private static OptimizeRequest request(OptimizeRequest.Point depot, Double capacity,
                                           List<OptimizeRequest.DeliverySpec> deliveries) {
         return new OptimizeRequest(depot, List.of(new OptimizeRequest.VehicleSpec("V-01", capacity)),
-                deliveries, null, null);
+                deliveries, null, null, null);
     }
 
     private static List<OptimizeRequest.DeliverySpec> oneDelivery(OptimizeRequest.DeliverySpec spec) {

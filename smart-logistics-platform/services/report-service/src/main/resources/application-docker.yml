@@ -16,6 +16,7 @@ aslp:
   report:
     order-base-url: http://aslp-order-service:8081
     inventory-base-url: http://aslp-inventory-service:8082
+    route-base-url: http://aslp-route-service:8083
     connect-timeout: 2s
     read-timeout: 3s
     low-stock-limit: 20

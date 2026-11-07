@@ -73,6 +73,11 @@
         </table>
         <div class="unavailable" id="msg-errortag"></div>
     </div>
+    <div class="card" style="grid-column: 1 / -1;">
+        <h2>调拨路线（VRP 求解 · route-service）—— <span id="vrp-summary" style="color:#e6ecf7"></span></h2>
+        <div class="chart" id="chart-vrp" style="height:340px"></div>
+        <div class="unavailable" id="msg-vrp"></div>
+    </div>
 </div>
 
 <footer>
@@ -154,6 +159,83 @@
             : '<tr><td colspan="2" style="color:#93a1bd">暂无异常订单</td></tr>';
     }
 
+    // VRP 路线图：经纬度散点 + 路线连线（不依赖地图瓦片，离线可用）。
+    // x=纬度 / y=经度 与后端 Location 约定一致；pickup（装货）与 delivery（卸货）用形状区分。
+    function renderVrp(vrp) {
+        const c = chart('chart-vrp');
+        const summary = document.getElementById('vrp-summary');
+        if (!c) return;
+        if (!vrp.available) {
+            summary.textContent = '';
+            setMessage('msg-vrp', 'route-service 不可用，无法求解调拨路线。');
+            return;
+        }
+        setMessage('msg-vrp', '');
+        if (!vrp.feasible) {
+            summary.textContent = '无可行路线';
+            setMessage('msg-vrp', '求解完成但无可行解（运力不足或作业不可达）：' + (vrp.unassignedJobIds || []).join(', '));
+            return;
+        }
+        summary.textContent = vrp.routeCount + ' 条路线 · ' + vrp.totalDistanceKm + ' km · 载重 ' + vrp.totalLoad
+            + ' · 求解 ' + vrp.elapsedMs + ' ms';
+
+        const series = [];
+        const colors = ['#4d8dff', '#3ddc97', '#ffb020', '#c792ea', '#89ddff', '#ffcb6b'];
+        (vrp.routes || []).forEach((route, idx) => {
+            const color = colors[idx % colors.length];
+            // 路线连线：仓库 → 各停靠点 → 返回仓库（闭环）
+            const line = [[route.depotId + ' (仓)', null]].concat(
+                route.stops.map(s => [s.name || s.jobId, s]));
+            const points = [];
+            points.push({ name: route.depotId, value: line[0] && routeDepot(route), symbol: 'diamond', symbolSize: 14 });
+            route.stops.forEach(s => points.push({
+                name: (s.name || s.jobId) + (s.kind === 'pickup' ? ' ↑装' : ' ↓卸'),
+                value: [s.lon, s.lat],
+                symbol: s.kind === 'pickup' ? 'triangle' : 'circle',
+                symbolSize: 10,
+                demand: Math.abs(s.demand)
+            }));
+            points.push({ name: route.depotId + ' (返)', value: routeDepot(route), symbol: 'diamond', symbolSize: 14 });
+            series.push({
+                type: 'lines', coordinateSystem: 'cartesian2d',
+                data: points.map(p => ({ coords: p.value })),
+                lineStyle: { color: color, width: 2, opacity: 0.55, curveness: 0.08 },
+                silent: true
+            });
+            series.push({
+                type: 'scatter',
+                data: points,
+                itemStyle: { color: color },
+                label: { show: true, position: 'top', color: '#e6ecf7', fontSize: 10,
+                         formatter: p => p.data.name },
+                tooltip: { formatter: p => p.data.name + (p.data.demand != null ? '（' + p.data.demand + ' 件）' : '') }
+            });
+        });
+
+        c.setOption({
+            tooltip: { trigger: 'item' },
+            legend: { show: false },
+            grid: { left: 50, right: 30, top: 20, bottom: 40 },
+            xAxis: { type: 'value', name: '经度', nameTextStyle: baseText, axisLabel: baseText,
+                     splitLine: { lineStyle: { color: '#2a3550' } } },
+            yAxis: { type: 'value', name: '纬度', nameTextStyle: baseText, axisLabel: baseText,
+                     splitLine: { lineStyle: { color: '#2a3550' } } },
+            series
+        }, true);
+    }
+
+    // 仓库坐标取路线第一个停靠点回推前的 depot 位置——后端未直接给 depot 坐标时，
+    // 用首停靠点近似会导致偏差，因此从 depotId 反查：演示问题里仓库即总仓坐标（见 route-service demo）。
+    function routeDepot(route) {
+        // depot 坐标不在回执里（只有 depotId）；从第一条路线收尾闭环的几何中无法精确恢复，
+        // 但 ECharts 需要数值 —— 用报表侧已知的演示仓库坐标兜底，真实场景应让上游带回 depot 坐标。
+        return DEPOT_COORDS[route.depotId] || DEPOT_COORDS['_default'];
+    }
+    const DEPOT_COORDS = {
+        '_default': [8.5987, 49.1243],           // Bruchsal 总仓（演示问题，与 route-service demo 一致）
+        'Bruchsal-总仓': [8.5987, 49.1243]
+    };
+
     function setMessage(id, text) { document.getElementById(id).textContent = text || ''; }
 
     async function load() {
@@ -182,6 +264,7 @@
             if (orders.available) { renderStatus(orders.statusChart); renderWarehouse(orders.warehouseChart); }
             if (inventory.available) { renderLowStock(inventory.lowStockChart, inventory.threshold); }
             renderErrorTags(orders.byErrorTag, orders.available);
+            renderVrp(data.vrp);
         } catch (e) {
             badge.textContent = '无法连接报表服务：' + e;
             badge.className = 'badge warn';

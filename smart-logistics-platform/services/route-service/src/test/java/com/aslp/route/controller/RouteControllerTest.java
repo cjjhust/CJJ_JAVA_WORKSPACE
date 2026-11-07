@@ -155,6 +155,6 @@ class RouteControllerTest {
         return new VrpPlan(true, "已生成 1 条配送路线，总里程 615.1 km", 615.1, 14.0, 1, 4,
                 List.of(), 42L,
                 List.of(new VrpPlan.Route("VRP-01", "V-02", "Bruchsal-总仓", 615.1, 14.0,
-                        List.of(new VrpPlan.Stop(1, "VRP-D-02", "Frankfurt", 50.1109, 8.6821, 5.0, 1.83)))));
+                        List.of(new VrpPlan.Stop(1, "VRP-D-02", "Frankfurt", 50.1109, 8.6821, 5.0, 1.83, "delivery")))));
     }
 }

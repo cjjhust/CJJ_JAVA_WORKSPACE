@@ -178,7 +178,8 @@ public class VrpRouteService {
                 km += GeoDistance.km(lat(previous), lon(previous), lat(current), lon(current));
                 double demand = demandOf(activity);
                 stops.add(new VrpPlan.Stop(sequence++, jobIdOf(activity), nameOf(activity),
-                        lat(current), lon(current), demand, GeoDistance.round2(activity.getArrTime())));
+                        lat(current), lon(current), demand, GeoDistance.round2(activity.getArrTime()),
+                        kindOf(activity)));
                 load += demand;
                 previous = current;
             }
@@ -228,6 +229,17 @@ public class VrpRouteService {
     private static double demandOf(TourActivity activity) {
         Capacity size = activity.getSize();
         return size != null && size.getNuOfDimensions() > 0 ? size.get(0) : 0.0;
+    }
+
+    /**
+     * 停靠类型：单向配送的 {@code Service} 活动与 PDP 互调的 {@code Shipment} 活动
+     * 统一映射为 pickup / delivery 两种 kind（前端据此区分装货/卸货标记）。
+     */
+    private static String kindOf(TourActivity activity) {
+        if (activity instanceof com.graphhopper.jsprit.core.problem.solution.route.activity.PickupShipment) {
+            return "pickup";
+        }
+        return "delivery";
     }
 
     /** 纬度：约定 {@code x} 为纬度（与 {@code HaversineCostModel}、{@code GeoDistance} 一致）。 */

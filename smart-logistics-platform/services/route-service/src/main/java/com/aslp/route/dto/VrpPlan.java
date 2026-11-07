@@ -38,7 +38,11 @@ public record VrpPlan(
             List<Stop> stops) {
     }
 
-    /** 单个配送作业（含顺序与预计到达时刻）。 */
+    /**
+     * 单个停靠点（含顺序与预计到达时刻）。
+     * {@code kind} 标记作业类型：{@code "delivery"} 单向卸货；PDP 互调时
+     * {@code "pickup"}（装货，demand 为调拨量）/ {@code "delivery"}（卸货）。
+     */
     public record Stop(
             int sequence,
             String jobId,
@@ -46,6 +50,7 @@ public record VrpPlan(
             double lat,
             double lon,
             double demand,
-            double arrivalHours) {
+            double arrivalHours,
+            String kind) {
     }
 }

@@ -3,7 +3,9 @@ package com.aslp.route.engine;
 import com.aslp.route.dto.OptimizeRequest;
 import com.graphhopper.jsprit.core.problem.Location;
 import com.graphhopper.jsprit.core.problem.VehicleRoutingProblem;
+import com.graphhopper.jsprit.core.problem.job.Job;
 import com.graphhopper.jsprit.core.problem.job.Service;
+import com.graphhopper.jsprit.core.problem.job.Shipment;
 import com.graphhopper.jsprit.core.problem.vehicle.VehicleImpl;
 import com.graphhopper.jsprit.core.problem.vehicle.VehicleTypeImpl;
 import com.graphhopper.jsprit.core.util.Coordinate;
@@ -106,11 +108,10 @@ public class VrpProblemFactory {
 
         // ---- deliveries ----
         List<OptimizeRequest.DeliverySpec> deliveries = request.deliveries();
-        List<Service> builtJobs = new ArrayList<>();
+        // Service（单向卸货）与 Shipment（PDP 收发配对）是平级类，共同父接口为 Job
+        List<Job> builtJobs = new ArrayList<>();
         Set<String> jobIds = new HashSet<>();
-        if (deliveries == null || deliveries.isEmpty()) {
-            errors.add("deliveries 至少需要 1 个配送作业");
-        } else {
+        if (deliveries != null) {
             for (int i = 0; i < deliveries.size(); i++) {
                 OptimizeRequest.DeliverySpec d = deliveries.get(i);
                 String label = "deliveries[" + i + "]";
@@ -128,6 +129,39 @@ public class VrpProblemFactory {
                     builtJobs.add(job(d.id(), d.name(), d.lat(), d.lon(), demand));
                 }
             }
+        }
+
+        // ---- shipments（仓库互调，PDP）----
+        // jsprit Shipment：pickup 与 delivery 配对，求解器保证先装后卸、全程容量合法。
+        // 与 deliveries 并存：单向调拨（高频主场景）入参格式不变，互调走独立字段。
+        List<OptimizeRequest.ShipmentSpec> shipments = request.shipments();
+        if (shipments != null) {
+            for (int i = 0; i < shipments.size(); i++) {
+                OptimizeRequest.ShipmentSpec s = shipments.get(i);
+                String label = "shipments[" + i + "]";
+                if (s.id() == null || s.id().isBlank()) {
+                    errors.add(label + ".id 必填（用于回执未指派作业）");
+                    continue;
+                }
+                if (!jobIds.add(s.id())) {
+                    errors.add("作业 id 重复：" + s.id());
+                    continue;
+                }
+                requireCoordinate(label + ".pickup", s.pickupLat(), s.pickupLon(), errors);
+                requireCoordinate(label + ".delivery", s.deliveryLat(), s.deliveryLon(), errors);
+                Integer demand = requirePositiveInt(label + ".demand", s.demand(), errors);
+                if (s.pickupLat() != null && s.pickupLon() != null
+                        && s.deliveryLat() != null && s.deliveryLon() != null && demand != null) {
+                    builtJobs.add(shipment(s.id(), s.name(),
+                            s.pickupLat(), s.pickupLon(), s.deliveryLat(), s.deliveryLon(), demand));
+                }
+            }
+        }
+
+        if (deliveries == null && shipments == null) {
+            errors.add("deliveries / shipments 至少提供其一");
+        } else if ((deliveries == null || deliveries.isEmpty()) && (shipments == null || shipments.isEmpty())) {
+            errors.add("deliveries / shipments 至少需要 1 个作业");
         }
 
         double speedKmh = resolveSpeedKmh(request.speedKmh(), errors);
@@ -163,6 +197,7 @@ public class VrpProblemFactory {
                         new OptimizeRequest.DeliverySpec("VRP-D-03", "Düsseldorf", 51.2277, 6.7735, 2.0),
                         new OptimizeRequest.DeliverySpec("VRP-D-04", "Mönchengladbach", 51.1805, 6.4428, 4.0)),
                 null,
+                null,
                 null));
     }
 
@@ -185,6 +220,18 @@ public class VrpProblemFactory {
         return Service.Builder.newInstance(id)
                 .setName(name == null || name.isBlank() ? id : name)
                 .setLocation(location(id, lat, lon))
+                .addSizeDimension(0, demand)
+                .build();
+    }
+
+    /** 仓库互调作业：pickup 装货 → delivery 卸货（先装后卸与全程容量由 jsprit 约束保证）。 */
+    private static Shipment shipment(String id, String name,
+                                     double pickupLat, double pickupLon,
+                                     double deliveryLat, double deliveryLon, int demand) {
+        return Shipment.Builder.newInstance(id)
+                .setName(name == null || name.isBlank() ? id : name)
+                .setPickupLocation(location(id + "-P", pickupLat, pickupLon))
+                .setDeliveryLocation(location(id + "-D", deliveryLat, deliveryLon))
                 .addSizeDimension(0, demand)
                 .build();
     }

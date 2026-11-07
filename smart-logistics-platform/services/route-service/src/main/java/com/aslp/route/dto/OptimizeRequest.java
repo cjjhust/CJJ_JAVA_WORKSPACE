@@ -30,6 +30,7 @@ public record OptimizeRequest(
         Point depot,
         List<VehicleSpec> vehicles,
         List<DeliverySpec> deliveries,
+        List<ShipmentSpec> shipments,
         Double speedKmh,
         Integer maxIterations) {
 
@@ -46,5 +47,17 @@ public record OptimizeRequest(
     /** 配送作业：{@code demand} 为占用量（维度 0）。 */
     @JsonIgnoreProperties(ignoreUnknown = true)
     public record DeliverySpec(String id, String name, Double lat, Double lon, Double demand) {
+    }
+
+    /**
+     * 仓库互调作业（P2 收发调拨，PDP）：{@code pickup} 仓装货、{@code delivery} 仓卸货，
+     * jsprit 的 Shipment 约束保证先 pickup 后 delivery，全程容量约束自动生效。
+     * {@code demand} 为调拨量（正整数，维度 0）。
+     */
+    @JsonIgnoreProperties(ignoreUnknown = true)
+    public record ShipmentSpec(String id, String name,
+                               Double pickupLat, Double pickupLon,
+                               Double deliveryLat, Double deliveryLon,
+                               Double demand) {
     }
 }

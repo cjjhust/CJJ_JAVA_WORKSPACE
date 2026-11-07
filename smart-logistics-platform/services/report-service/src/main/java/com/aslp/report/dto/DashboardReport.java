@@ -24,7 +24,8 @@ public record DashboardReport(
         boolean degraded,
         List<String> unavailable,
         OrdersBlock orders,
-        InventoryBlock inventory) {
+        InventoryBlock inventory,
+        VrpBlock vrp) {
 
     /** 订单区块：既保留原始计数，也给出可直接画图的摊平结构。 */
     public record OrdersBlock(
@@ -49,6 +50,24 @@ public record DashboardReport(
             long secondsUntilMailAllowed,
             List<InventoryWarningSnapshot.LowStockItem> lowStock,
             ChartData lowStockChart) {
+    }
+
+    /**
+     * VRP 路线区块（M3 可视化）：直接透传 route-service 的求解回执。
+     * 停靠点坐标 + kind 标记足够前端画「仓库 → 装货/卸货点」的路线图；
+     * 求解失败（无可行解）不算数据源故障 —— feasible=false 也是有效状态。
+     */
+    public record VrpBlock(
+            boolean available,
+            boolean feasible,
+            String message,
+            double totalDistanceKm,
+            double totalLoad,
+            int routeCount,
+            int stopCount,
+            List<String> unassignedJobIds,
+            long elapsedMs,
+            List<VrpPlanSnapshot.Route> routes) {
     }
 
     /** ECharts 友好的两数组结构。 */

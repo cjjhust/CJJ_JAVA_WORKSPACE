@@ -5,10 +5,13 @@ import com.aslp.report.client.InventoryWarningSource;
 import com.aslp.report.client.OrderStatsClient;
 import com.aslp.report.client.OrderStatsSource;
 import com.aslp.report.client.ReportSourceUnavailableException;
+import com.aslp.report.client.VrpPlanClient;
+import com.aslp.report.client.VrpPlanSource;
 import com.aslp.report.config.ReportProperties;
 import com.aslp.report.dto.DashboardReport;
 import com.aslp.report.dto.InventoryWarningSnapshot;
 import com.aslp.report.dto.OrderStatsSnapshot;
+import com.aslp.report.dto.VrpPlanSnapshot;
 import io.micrometer.observation.ObservationRegistry;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -34,6 +37,7 @@ class ReportAggregationServiceTest {
 
     private OrderStatsSource orderStatsClient;
     private InventoryWarningSource inventoryWarningClient;
+    private VrpPlanSource vrpPlanClient;
     private ReportProperties props;
     private ReportAggregationService service;
 
@@ -41,9 +45,10 @@ class ReportAggregationServiceTest {
     void setUp() {
         orderStatsClient = Mockito.mock(OrderStatsSource.class);
         inventoryWarningClient = Mockito.mock(InventoryWarningSource.class);
+        vrpPlanClient = Mockito.mock(VrpPlanSource.class);
         props = new ReportProperties();
         props.setLowStockLimit(2);
-        service = new ReportAggregationService(orderStatsClient, inventoryWarningClient,
+        service = new ReportAggregationService(orderStatsClient, inventoryWarningClient, vrpPlanClient,
                 ObservationRegistry.create(), props);
     }
 
@@ -66,10 +71,16 @@ class ReportAggregationServiceTest {
         return new InventoryWarningSnapshot.LowStockItem(sku, "Mönchengladbach", qty, 0);
     }
 
+    private static VrpPlanSnapshot healthyVrp() {
+        return new VrpPlanSnapshot(true, "已生成 1 条配送路线", 100.0, 5.0, 1, 2,
+                java.util.List.of(), 50, java.util.List.of());
+    }
+
     @Test
     void healthySourcesProduceNonDegradedDashboardWithChartData() {
         when(orderStatsClient.fetch()).thenReturn(orders(3));
         when(inventoryWarningClient.fetch()).thenReturn(warning(List.of(item("AMZ-9999", 5))));
+        when(vrpPlanClient.fetch()).thenReturn(healthyVrp());
 
         DashboardReport report = service.dashboard();
 
@@ -90,6 +101,7 @@ class ReportAggregationServiceTest {
         when(orderStatsClient.fetch())
                 .thenThrow(new ReportSourceUnavailableException(OrderStatsClient.SOURCE, new RuntimeException("boom")));
         when(inventoryWarningClient.fetch()).thenReturn(warning(List.of(item("AMZ-9999", 5))));
+        when(vrpPlanClient.fetch()).thenReturn(healthyVrp());
 
         DashboardReport report = service.dashboard();
 
@@ -106,6 +118,7 @@ class ReportAggregationServiceTest {
     @Test
     void inventorySourceFailureDegradesOnlyThatBlock() {
         when(orderStatsClient.fetch()).thenReturn(orders(3));
+        when(vrpPlanClient.fetch()).thenReturn(healthyVrp());
         when(inventoryWarningClient.fetch())
                 .thenThrow(new ReportSourceUnavailableException(InventoryWarningClient.SOURCE, new RuntimeException("boom")));
 
@@ -125,16 +138,19 @@ class ReportAggregationServiceTest {
                 new ReportSourceUnavailableException(OrderStatsClient.SOURCE, new RuntimeException("boom")));
         when(inventoryWarningClient.fetch()).thenThrow(
                 new ReportSourceUnavailableException(InventoryWarningClient.SOURCE, new RuntimeException("boom")));
+        when(vrpPlanClient.fetch()).thenThrow(
+                new ReportSourceUnavailableException(VrpPlanClient.SOURCE, new RuntimeException("boom")));
 
         DashboardReport report = service.dashboard();
 
         assertTrue(report.degraded());
-        assertEquals(List.of("order-service", "inventory-service"), report.unavailable());
+        assertEquals(List.of("order-service", "inventory-service", "route-service"), report.unavailable());
     }
 
     @Test
     void lowStockDetailIsTruncatedToConfiguredLimitButCountStaysTruthful() {
         when(orderStatsClient.fetch()).thenReturn(orders(3));
+        when(vrpPlanClient.fetch()).thenReturn(healthyVrp());
         when(inventoryWarningClient.fetch()).thenReturn(warning(List.of(
                 item("SKU-A", 1), item("SKU-B", 2), item("SKU-C", 3))));
 
@@ -153,6 +169,7 @@ class ReportAggregationServiceTest {
         // P2-2 回归：截断前必须按可用库存升序（越少越紧急），
         // 否则「前 N 条」只是数据库自然序，会把不紧急的 SKU 当紧急项展示
         when(orderStatsClient.fetch()).thenReturn(orders(3));
+        when(vrpPlanClient.fetch()).thenReturn(healthyVrp());
         when(inventoryWarningClient.fetch()).thenReturn(warning(List.of(
                 item("SKU-LOOSE", 9), item("SKU-TIGHT", 1), item("SKU-MID", 4))));
 

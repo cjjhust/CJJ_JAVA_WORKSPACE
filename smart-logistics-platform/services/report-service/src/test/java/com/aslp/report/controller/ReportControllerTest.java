@@ -54,7 +54,7 @@ class ReportControllerTest {
         Map<String, Object> body = response.getBody();
         assertNotNull(body);
         assertEquals(Boolean.TRUE, body.get("degraded"));
-        assertEquals(List.of("order-service", "inventory-service"), body.get("unavailable"));
+        assertEquals(List.of("order-service", "inventory-service", "route-service"), body.get("unavailable"));
 
         // 分块结构必须存在且如实标注不可用，而不是返回一个「看起来正常的全 0 看板」
         Map<String, Object> orders = (Map<String, Object>) body.get("orders");
