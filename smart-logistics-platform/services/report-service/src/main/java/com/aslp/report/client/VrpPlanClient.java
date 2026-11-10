@@ -7,6 +7,7 @@ import org.springframework.stereotype.Component;
 import org.springframework.web.client.RestClient;
 import org.springframework.web.client.RestClientException;
 
+import java.util.List;
 import java.util.Map;
 
 /**
@@ -43,9 +44,22 @@ public class VrpPlanClient implements VrpPlanSource {
     @Override
     public VrpPlanSnapshot fetch() {
         try {
+            // 必须发完整请求体：route-service 收到「任何 body」（哪怕只有 maxIterations）
+            // 都不会再回落内置演示问题，缺 depot/vehicles 会直接 400（容器实测踩中）。
+            // 因此这里完整复刻演示拓扑（与 VrpProblemFactory.demo() 同源），并压迭代数。
             VrpPlanSnapshot plan = client.post()
                     .uri("/api/routes/optimize")
-                    .body(Map.of("maxIterations", DEMO_MAX_ITERATIONS))
+                    .body(Map.of(
+                            "depot", Map.of("id", "Bruchsal-总仓", "lat", 49.1243, "lon", 8.5987),
+                            "vehicles", List.of(
+                                    Map.of("id", "V-01", "capacity", 20),
+                                    Map.of("id", "V-02", "capacity", 20)),
+                            "deliveries", List.of(
+                                    Map.of("id", "VRP-D-01", "name", "Karlsruhe", "lat", 49.0069, "lon", 8.4037, "demand", 3),
+                                    Map.of("id", "VRP-D-02", "name", "Frankfurt", "lat", 50.1109, "lon", 8.6821, "demand", 5),
+                                    Map.of("id", "VRP-D-03", "name", "Düsseldorf", "lat", 51.2277, "lon", 6.7735, "demand", 2),
+                                    Map.of("id", "VRP-D-04", "name", "Mönchengladbach", "lat", 51.1805, "lon", 6.4428, "demand", 4)),
+                            "maxIterations", DEMO_MAX_ITERATIONS))
                     .retrieve()
                     .body(VrpPlanSnapshot.class);
             if (plan == null) {

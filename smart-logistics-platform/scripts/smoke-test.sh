@@ -426,6 +426,22 @@ check_post_json_status "VRP 非法入参 400    POST /api/routes/optimize(缺 de
     '{"depot":{"id":"B","lat":49.1243,"lon":8.5987},"vehicles":[{"id":"V-01","capacity":10}]}' \
     "400"
 
+# PDP 仓库互调（P2 收发调拨）：shipments[] 配对作业，jsprit 保证先 pickup 后 delivery。
+# 用例：V-01（容量 10）从 Bruchsal 出发，先去 Karlsruhe 装货（pickup），回 Bruchsal 卸（delivery）。
+# 断言三件事：可行解存在、同一 jobId 产生 pickup+delivery 两个停靠点、kind 标记正确。
+check_post_json "PDP 互调可行解       POST /api/routes/optimize(shipments)" \
+    "http://localhost:8080/api/routes/optimize" \
+    '{"depot":{"id":"Bruchsal-总仓","lat":49.1243,"lon":8.5987},'\
+'"vehicles":[{"id":"V-01","capacity":10}],'\
+'"shipments":[{"id":"SMOKE-S-1","name":"Karlsruhe→Bruchsal 互调","pickupLat":49.0069,"pickupLon":8.4037,"deliveryLat":49.1243,"deliveryLon":8.5987,"demand":5}]}' \
+    '"feasible":true'
+check_post_json "PDP 先装后卸         POST /api/routes/optimize(shipments)" \
+    "http://localhost:8080/api/routes/optimize" \
+    '{"depot":{"id":"Bruchsal-总仓","lat":49.1243,"lon":8.5987},'\
+'"vehicles":[{"id":"V-01","capacity":10}],'\
+'"shipments":[{"id":"SMOKE-S-1","name":"Karlsruhe→Bruchsal 互调","pickupLat":49.0069,"pickupLon":8.4037,"deliveryLat":49.1243,"deliveryLon":8.5987,"demand":5}]}' \
+    '"kind":"pickup"'
+
 echo "--- M1/M5 报表看板（P1-7：真实聚合 order-service + inventory-service）---"
 # 这段断言的是"报表里的数字来自真实业务数据"，而不是"接口返回了 200"：
 #  - total=3 与前面 M1 段落的 /api/orders/stats 断言同源（真的读了订单库）；

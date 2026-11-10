@@ -1838,6 +1838,26 @@ todo.md 的 M1/M5 里它也是被反复勾不掉的那一条。本轮把它做�
 
 ### 🟢 P3 — M7 生产化
 
+## 🔄 最新工程进度增量（2026-11-10，轮次 21）— 需求：PDP 收发调拨 + VRP 可视化 + 收工实测
+
+### A. 本轮交付
+
+- [x] **PDP 收发调拨（仓库互调）**：`OptimizeRequest` 新增可选 `shipments[]`（pickup/delivery 配对 + 调拨量），jsprit `Shipment` 建模——先装后卸与全程容量约束由求解器内置保证；**现有 `deliveries[]` 单向 API 原样保留**，两种作业并存；`VrpPlan.Stop` 新增 `kind`（pickup/delivery）回执标记
+- [x] **VRP 结果可视化接入看板**：report-service 新增 `VrpPlanSource` 抽象（微服务 HTTP client / 单体进程内 source 双实现，P2-7 拓扑对齐），`/api/reports/dashboard` 新增 `vrp` 区块（同一套部分降级语义）；dashboard.html 新增调拨路线卡片（经纬度散点 + 闭环连线，pickup=三角↑ / delivery=圆↓，无地图瓦片、离线可用）
+- [x] **测试**：route-service 98/98（新增 PDP 求解测试：pickup 先于 delivery、jobId 配对、闭环里程几何锁定）；report-service 15/15（含三源全挂降级）；smoke-test 新增 2 条 PDP 断言（可行解 + 先装后卸 kind 标记）→ **126/126**
+
+### B. 收工实测（container-verify.sh 全链路 + 浏览器肉眼验证）
+
+- **实测又抓到 1 个真实 bug（单元测试给不出的那种）**：`VrpPlanClient` 只发 `{maxIterations}` 的 body——而 route-service 收到「任何 body」都不再回落内置演示问题，缺 depot 直接 400 → 看板 vrp 区块降级。修复：client 完整复刻演示请求体（与 `VrpProblemFactory.demo()` 同源）。教训：**「不带 body 走默认值」的 API 契约对调用方是个陷阱，客户端不能假设服务端替自己补默认**。
+- 附带排障：Docker VM 磁盘满（`runc: resource temporarily unavailable` / PG `No space left on device`）——清理悬空镜像 + 构建缓存（~9GB）恢复；**未动数据卷**。
+- 最终结果：**8 镜像重建 → 18/18 容器 healthy → 126/126 断言 → 6/6 重启持久化全绿**；`:8085/dashboard.html` 浏览器打开肉眼确认 VRP 卡片渲染正常（1 条路线 · 615.1 km）。
+- 运行顺序依赖的假失败再次出现（缓存 TTL / 熔断半开），重启 order+wiremock 清态后全绿——上轮学习点的再次验证。
+
+### C. 学习点（本轮新增）
+
+- **客户端不能依赖服务端的「缺省回落」**：POST 带 body 即退出演示模式——这类契约要在客户端注释里显式警示（已写）。
+- **Docker Desktop 磁盘压力的症状链**：构建期 runc fork 失败、运行期 PG 写锁文件失败，两者同根因；先 `docker system df` 定位，清构建缓存最安全（不碰卷）。
+
 ## 🔄 最新工程进度增量（2026-11-04，轮次 20）— 需求：P2 全量落地 + 20 容器全链路验收 + 收尾
 
 ### A. 本轮交付

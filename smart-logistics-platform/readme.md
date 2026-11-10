@@ -125,7 +125,7 @@ mvn clean package -T 1C                      # → 256 tests green
 
 # 2) 容器全量启动 + 全量验证  |  full container verification  |  vollständige Container-Verifikation
 docker compose down -v                       # 从干净状态开始 / clean state / sauberer Zustand
-bash scripts/container-verify.sh             # → 18/18 containers, 124/124 assertions
+bash scripts/container-verify.sh             # → 18/18 containers, 126/126 assertions
                                              #    + restart proofs (state & throttle survive restart)
 ```
 
@@ -174,7 +174,7 @@ bash scripts/smoke-test.sh                      # 启 6 个服务 → 断言 →
 | 项目 Item / Position | 结果 Result / Ergebnis |
 |---|---|
 | 单元测试 Unit tests / Unit-Tests | **256 全通过**（gateway 9 · order 89 · inventory 45 · route 94 · auth 5 · report 14） |
-| 端到端断言 E2E assertions / End-to-End-Assertions | **124/124**（含限流 429、熔断降级、契约失败分类、邮件解码、PDF 校验、追踪四类失败） |
+| 端到端断言 E2E assertions / End-to-End-Assertions | **126/126**（含限流 429、熔断降级、契约失败分类、邮件解码、PDF 校验、追踪四类失败、**PDP 收发调拨**） |
 | 容器 Containers / Container | **20/20 healthy**（8 Java 服务 = 6 业务 + 网关 + eureka/config 治理；12 基础设施；Kafka 为 KRaft 单节点，无 ZooKeeper） |
 | 重启不丢 Restart survival / Neustart-Überleben | 状态机（DB）与邮件节流窗口（Redis）**双双渡过容器重启** |
 | 缺陷复盘 Documented defects / Dokumentierte Fehler | **56 项**（含根因与修复，见 [`todo.md`](todo.md)） |
@@ -199,7 +199,7 @@ order-service（拉取落库成功后）                inventory-service（幂�
 
 | 口径 | 数值 |
 |---|---|
-| 全链路验收 | 18/18 容器 healthy · **124/124 断言** · **6/6 重启持久化验证**（`container-verify.sh`） |
+| 全链路验收 | 18/18 容器 healthy · **126/126 断言**（含 PDP 互调用例）· **6/6 重启持久化验证**（`container-verify.sh`） |
 | Kafka 验收口径 | 功能链路端到端（发→消费→预占→DLT→重放）+ 幂等语义被真实 PG 集成测试钉死；**非吞吐基准** |
 | 内存 | 8 个 JVM（6 业务 + 网关 + eureka/config）冷启动峰值约 **8–10 GB**，可稳定运行 |
 | 说明 | 20 容器验收回答"完整拓扑下功能正确"，**不是压力测试**；并发正确性由分布式锁/乐观锁单测与 UNIQUE 竞态兜底集成测试保障；吞吐压测（JMeter/Gatling）属生产化议题，未做 |
